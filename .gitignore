@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# Runtime orchestration records are local by default.
+.ai/tasks/*
+!.ai/tasks/.gitkeep

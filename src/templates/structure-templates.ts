@@ -87,6 +87,8 @@ Before the first task:
 2. Show the active orchestrator, complex-worker and fast-worker models, routing mode, fallback policy and override source.
 3. Ask the user whether to continue with or change that profile.
 4. Do not begin discovery or planning until the user confirms.
+5. For the active project, read its record from \`.ai/workspace.yaml\`, then read the referenced \`skill_registry\`.
+6. Load only the registered technology skills relevant to the current task. A technology skill file not referenced by that registry is inactive.
 
 ## Non-negotiable behavior
 
@@ -113,6 +115,8 @@ Before the first task:
 2. Show the active orchestrator, complex-worker and fast-worker models, routing mode, fallback policy and override source.
 3. Ask the user whether to continue with or change that profile.
 4. Do not begin discovery or planning until the user confirms.
+5. For the active project, read its record from \`.ai/workspace.yaml\`, then read the referenced \`skill_registry\`.
+6. Load only the registered technology skills relevant to the current task. A technology skill file not referenced by that registry is inactive.
 
 ## Non-negotiable behavior
 

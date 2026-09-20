@@ -15,6 +15,7 @@ const PROJECT_MARKERS = [
   "pyproject.toml",
   "pom.xml",
   "build.gradle",
+  "build.gradle.kts",
   "Cargo.toml",
   "go.mod",
 ] as const;
@@ -39,9 +40,17 @@ export class StructureService {
     const scope = requestedScope ?? (await this.detectScope(resolvedTarget));
     const definitions = createStructureFiles(scope);
     const files: PlannedFile[] = [];
+    const absolutePaths = new Map<string, string>();
+    for (const definition of definitions) {
+      absolutePaths.set(
+        definition.relativePath,
+        await resolveSafeInitPath(this.fileSystem, resolvedTarget, definition.relativePath),
+      );
+    }
 
     for (const definition of definitions) {
-      const absolutePath = path.join(resolvedTarget, definition.relativePath);
+      const absolutePath = absolutePaths.get(definition.relativePath);
+      if (absolutePath === undefined) throw new Error("Missing preflighted initialization path.");
       if (!(await this.fileSystem.exists(absolutePath))) {
         files.push({ ...definition, status: "create" });
         continue;
@@ -72,6 +81,14 @@ export class StructureService {
       );
     }
 
+    const absolutePaths = new Map<string, string>();
+    for (const file of plan.files) {
+      absolutePaths.set(
+        file.relativePath,
+        await resolveSafeInitPath(this.fileSystem, plan.targetDirectory, file.relativePath),
+      );
+    }
+
     const created: string[] = [];
     const updated: string[] = [];
     const unchanged: string[] = [];
@@ -82,10 +99,15 @@ export class StructureService {
         continue;
       }
 
-      await this.fileSystem.writeText(
-        path.join(plan.targetDirectory, file.relativePath),
-        file.content,
+      const absolutePath = absolutePaths.get(file.relativePath);
+      if (absolutePath === undefined) throw new Error("Missing preflighted initialization path.");
+      await assertSafeInitPath(
+        this.fileSystem,
+        plan.targetDirectory,
+        absolutePath,
+        file.relativePath,
       );
+      await this.fileSystem.writeText(absolutePath, file.content);
 
       if (file.status === "create") {
         created.push(file.relativePath);
@@ -104,6 +126,37 @@ export class StructureService {
       }
     }
     return "workspace";
+  }
+}
+
+async function resolveSafeInitPath(
+  fileSystem: FileSystem,
+  root: string,
+  relativePath: string,
+): Promise<string> {
+  if (path.isAbsolute(relativePath)) {
+    throw new CliError(`Initialization path must be relative: ${relativePath}`, 2);
+  }
+  const absolutePath = path.resolve(root, relativePath);
+  const boundary = path.relative(root, absolutePath);
+  if (boundary === ".." || boundary.startsWith(`..${path.sep}`) || path.isAbsolute(boundary)) {
+    throw new CliError(`Initialization path escapes the target directory: ${relativePath}`, 2);
+  }
+  await assertSafeInitPath(fileSystem, root, absolutePath, relativePath);
+  return absolutePath;
+}
+
+async function assertSafeInitPath(
+  fileSystem: FileSystem,
+  root: string,
+  absolutePath: string,
+  displayPath: string,
+): Promise<void> {
+  try {
+    await fileSystem.assertPathWithinRoot(root, absolutePath);
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new CliError(`Unsafe initialization path '${displayPath}': ${detail}`, 2);
   }
 }
 

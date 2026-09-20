@@ -15,7 +15,7 @@ const HELP = `ai-structure — Codex and Claude Code orchestration structure gen
 Usage:
   ai-structure inspect [--target <path>] [--scope workspace|repository]
   ai-structure init [--target <path>] [--scope workspace|repository] [--force]
-  ai-structure sync [--target <path>] [--json]
+  ai-structure sync [--target <path>] [--force] [--json]
   ai-structure doctor [--target <path>] [--json]
 
 Commands:
@@ -82,9 +82,10 @@ async function main(): Promise<void> {
       return;
     }
     case "sync": {
-      rejectUnsupported(values.force, "--force", command);
       rejectUnsupported(scope !== undefined, "--scope", command);
-      const result = await new ProjectDiscoveryService(fileSystem).sync(target);
+      const result = await new ProjectDiscoveryService(fileSystem).sync(target, {
+        force: values.force,
+      });
       if (values.json) {
         console.log(JSON.stringify(result, null, 2));
       } else {

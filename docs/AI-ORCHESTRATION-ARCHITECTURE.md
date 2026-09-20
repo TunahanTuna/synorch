@@ -1,6 +1,6 @@
-# AI Orchestration Structure — Mimari Plan
+# AI Orchestration Structure — Mimari ve Uygulanan Yapı
 
-> Durum: Tasarım aşaması  
+> Durum: Çalıştırılabilir çekirdek uygulanmış durumda
 > Son güncelleme: 2026-09-20  
 > Amaç: Codex ve Claude Code üzerinde çalışan, orchestrator merkezli, agent/skill/protokol tabanlı ve token-verimli bir geliştirme organizasyonu kurmak.
 
@@ -73,35 +73,33 @@ Bu yapı Git ile paylaşılabilir ve ekip genelinde kullanılabilir.
 
 ### 3.3 Boş klasör davranışı
 
-Boş klasörde proje analizi veya AI tabanlı mimari üretimi yapılmaz. Yalnızca generic orchestration çekirdeği kurulur. Proje bilgileri dürüst biçimde `unknown` bırakılır.
+Boş klasörde proje analizi veya AI tabanlı mimari üretimi yapılmaz. Yalnızca generic orchestration çekirdeği kurulur ve workspace proje listesi boş başlar.
 
 ```yaml
-project:
-  status: not_defined
-  type: unknown
-  stack: []
-  architecture: unknown
+schema_version: 1
+scope: workspace
+projects: []
 ```
 
 ## 4. CLI Yaşam Döngüsü
 
-Öngörülen komutlar:
+Uygulanan komutlar:
 
 ```text
-ai-structure init
 ai-structure inspect
-ai-structure sync
+ai-structure init
+ai-structure sync [--force]
 ai-structure doctor
 ```
 
 - `init`: Agent/skill/protokol çekirdeğini ve provider adapter'larını kurar.
 - `inspect`: Yazma yapmadan önce kurulacak veya değişecek yapıyı gösterir.
-- `sync`: Manuel olarak tetiklenir; yeni repository'leri, manifest değişikliklerini ve provider çıktılarını senkronize eder.
-- `doctor`: Çelişkili talimatları, eksik provider kabiliyetlerini, eski komutları, kopuk referansları ve context şişmesini tespit eder.
+- `sync`: Manuel olarak tetiklenir; modülleri ve kanıtları keşfeder, proje kayıtlarını ve skill registry'lerini senkronize eder. Farklılaştırılmış generated teknoloji skill'lerini varsayılan olarak korur; yalnızca açık `--force` ile yeniler.
+- `doctor`: Canonical yapılandırmayı, proje → record → skill registry → skill dosyası referans zincirini ve dosya sistemi sınırlarını doğrular.
 
 Arka planda çalışan watcher veya daemon planlanmamaktadır. Yeni bir repository eklendiğinde kullanıcı `sync` çalıştırabilir. Tam yeniden `init` gerekmez.
 
-## 5. Önerilen Dosya Yapısı
+## 5. Uygulanan Başlangıç Dosya Yapısı
 
 ```text
 .ai/
@@ -109,7 +107,8 @@ Arka planda çalışan watcher veya daemon planlanmamaktadır. Yeni bir reposito
 ├── constitution.md
 ├── workspace.yaml
 ├── projects/
-│   └── <project-id>.yaml
+│   ├── <project-id>.yaml
+│   └── <project-id>.skills.yaml
 ├── protocols/
 │   ├── registry.yaml
 │   ├── core/
@@ -121,7 +120,6 @@ Arka planda çalışan watcher veya daemon planlanmamaktadır. Yeni bir reposito
 │   │   ├── verification.md
 │   │   ├── failure-recovery.md
 │   │   └── user-communication.md
-│   └── custom/
 ├── agents/
 │   ├── orchestrator/AGENT.md
 │   ├── explorer/AGENT.md
@@ -135,18 +133,17 @@ Arka planda çalışan watcher veya daemon planlanmamaktadır. Yeni bir reposito
 │   ├── implementation/SKILL.md
 │   ├── verification/SKILL.md
 │   ├── debugging/SKILL.md
-│   └── code-review/SKILL.md
+│   ├── code-review/SKILL.md
+│   └── technology/
+│       └── <selected-skill>/SKILL.md
 ├── model-profiles/
 │   ├── openai.yaml
-│   └── anthropic.yaml
+│   └── claude.yaml
 ├── tasks/
-│   └── <task-id>/
-│       ├── plan.md
-│       ├── context-packet.yaml
-│       └── reports/
+│   └── .gitkeep
 └── providers/
-    ├── codex/
-    └── claude-code/
+    ├── codex.md
+    └── claude-code.md
 ```
 
 `tasks/` çalışma kayıtlarının kalıcı mı, geçici mi ve Git'e dahil olup olmayacağı daha sonra kesinleştirilecektir.
@@ -648,27 +645,54 @@ Adapter, provider'ın desteklediği en ekonomik yöntemi seçer ancak task packe
 
 ## 12. Project Discovery ve Manuel Senkronizasyon
 
-Mevcut repository'de deterministik tarama şu gerçekleri çıkarabilir:
+Uygulanan `sync`, repository veya workspace içindeki proje adaylarını ve modülleri deterministik olarak tarar. Manifest içeren modül dizinleri recursive keşfedilir; normal derinlik sınırının tipik Java kaynak ağacını kesmemesi için `src`, `test`, `tests` ve generated source ağaçları ayrı, limitli bir derin taramadan geçer. Güvenlik limitine ulaşılması sessiz, eksik snapshot üretmek yerine açık hata verir.
 
-- Dil ve framework
-- Package manager
-- Build/test/lint/typecheck komutları
-- Workspace/monorepo yapısı
-- Kaynak ve test klasörleri
-- CI/CD ve container yapılandırmaları
+Her modül için aşağıdaki verified evidence türleri kaynak path'iyle kaydedilir:
 
-AI destekli semantik analiz, ancak mimari sınırlar veya yazılı olmayan konvansiyonlar gibi yorum gerektiren alanlarda opsiyonel olarak kullanılabilir.
+- `manifest`
+- `language`
+- `framework`
+- `package_manager`
+- `build_tool`
+- `dependency`
 
-Kayıtlar kaynak ve güven seviyesi taşır:
+JavaScript/TypeScript manifestleri ile Maven ve Gradle tanımları ayrıştırılır; yorumlar ve yalnız dependency/plugin management altında duran koordinatlar aktif framework kanıtı sayılmaz. Modül komutları çalıştırılacak `cwd`, kaynak ve `verified` güven seviyesiyle tutulur.
 
 ```yaml
-test_command:
+test:
   value: pnpm test
+  cwd: frontend
   source: package.json
   confidence: verified
 ```
 
-Yeni repo eklendiğinde önerilen akış:
+Her proje registry'si yedi canonical base skill'i kaydeder:
+
+- `planning`
+- `project-discovery`
+- `codebase-exploration`
+- `implementation`
+- `verification`
+- `debugging`
+- `code-review`
+
+Bunların yanında yalnız eşleşen verified evidence için teknoloji pack'i seçilir. Mevcut pack → skill eşlemeleri:
+
+| Pack | Üretilen skill |
+| --- | --- |
+| TypeScript | `typescript-patterns` |
+| React | `react-patterns` |
+| Java | `java-patterns` |
+| Spring Boot | `spring-boot-patterns` |
+| JPA/Hibernate | `jpa-patterns` |
+| Maven | `maven-build` |
+| Gradle | `gradle-build` |
+
+Seçimler, gerekçeleri ve matched evidence `.ai/projects/<project-id>.skills.yaml` içinde tutulur. Teknoloji skill dosyaları `.ai/skills/technology/**` altında materialize edilir; registry'de referanslanmayan eski dosyalar aktif sayılmaz. `sync`, kullanıcı tarafından değiştirilmiş bir generated teknoloji skill'i gördüğünde durur; `sync --force` yalnız bu çakışan generated teknoloji skill'ini canonical içerikle yenilemeye izin verir.
+
+Aktivasyon sırası güvenlidir: teknoloji skill dosyaları, proje record'ları ve workspace kaydı hazırlandıktan sonra skill registry en son yazılır. Önkoşul yazımlarından biri başarısız olursa önceki aktif registry korunur.
+
+Yeni repo eklendiğinde uygulanan akış:
 
 ```text
 git clone
@@ -677,12 +701,14 @@ ai-structure sync
    ↓
 deterministik keşif
    ↓
-project registry güncellemesi
+project record ve skill çözümleme
    ↓
-provider entrypoint/adapters güncellemesi
+teknoloji skill'leri, record ve workspace yazımı
+   ↓
+skill registry'nin en son aktive edilmesi
 ```
 
-Repository'nin tamamı her senkronizasyonda taranmaz. Önemli manifest ve yapılandırmalar için fingerprint tutulabilir.
+`doctor`; workspace entry'lerini, canonical `.ai/projects/<id>.yaml` record'larını, modül dizinlerini, manifest/source path'lerini, command `cwd` değerlerini, skill registry şemasını, canonical yedi base skill kümesini ve seçili teknoloji skill dosyalarını uçtan uca doğrular. Kontroller hem lexical traversal/absolute path varyantlarını hem de `realpath` tabanlı symlink/junction kaçışlarını kapsar; eksik, bozuk, duplicate veya root dışına çıkan herhangi bir referans varken yapı `healthy` raporlanmaz.
 
 ## 13. Provider Uyumluluğu ve Sınırlar
 
@@ -781,3 +807,11 @@ Sistem başarılı sayılmalıdır eğer:
 - `sync` manuel tetiklemeyle repository/project gerçeklerini kanıt kaynaklarıyla kaydeder.
 - `doctor` canonical yapı, model profilleri, session confirmation ve silent-fallback yasağını doğrular.
 - Generated structure; constitution, sekiz core protokol, beş agent rolü, yedi başlangıç skill'i, OpenAI/Claude model profilleri ve context/completion packet şemalarını içerir.
+
+### 2026-09-20 — Recursive discovery, skill registry ve path güvenliği
+
+- Repository içindeki manifest tabanlı modüller recursive keşfedilir; iç içe `src`/test source ağaçları ayrı güvenlik limitleriyle taranır.
+- Dil, framework, package manager, build tool ve dependency seçimleri yalnız kaynak path'i taşıyan verified evidence üzerinden yapılır.
+- Yedi base skill her proje registry'sinde canonical ve eksiksiz tutulur; teknoloji skill'leri yalnız eşleşen pack kanıtıyla aktive edilir.
+- `sync`, değiştirilmiş generated teknoloji skill'lerini açık `--force` olmadan ezmez ve aktif skill registry'sini önkoşul çıktılarından sonra en son yazar.
+- `doctor`, workspace'ten skill dosyasına kadar referans bütünlüğünü, canonical base setini, modül/command path'lerini ve lexical + symlink/junction root containment kurallarını doğrular.

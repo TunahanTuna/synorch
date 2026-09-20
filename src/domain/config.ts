@@ -35,6 +35,71 @@ export const manifestSchema = z.object({
 });
 export type Manifest = z.infer<typeof manifestSchema>;
 
+const verifiedCommandSchema = z.object({
+  value: z.string(),
+  cwd: z.string().min(1),
+  source: z.string(),
+  confidence: z.literal("verified"),
+});
+
+export const projectEvidenceSchema = z.object({
+  kind: z.enum(["manifest", "language", "framework", "package_manager", "build_tool", "dependency"]),
+  value: z.string().min(1),
+  source: z.string().min(1),
+  confidence: z.literal("verified"),
+});
+export type ProjectEvidence = z.infer<typeof projectEvidenceSchema>;
+
+const projectStackSchema = z.object({
+  languages: z.array(z.string()),
+  frameworks: z.array(z.string()),
+  package_manager: z.string().nullable(),
+  build_tool: z.string().nullable(),
+});
+
+export const projectModuleSchema = z.object({
+  id: z.string().min(1),
+  path: z.string().min(1),
+  manifests: z.array(z.string()),
+  stack: projectStackSchema,
+  commands: z.record(z.string(), verifiedCommandSchema),
+  evidence: z.array(projectEvidenceSchema),
+});
+export type ProjectModule = z.infer<typeof projectModuleSchema>;
+
+const registeredBaseSkillSchema = z.object({
+  id: z.string().min(1),
+  relative_path: z.string().min(1),
+});
+
+const matchedSkillEvidenceSchema = z.object({
+  module_id: z.string().min(1),
+  module_path: z.string().min(1),
+  fact: projectEvidenceSchema,
+});
+
+const registeredTechnologySkillSchema = z.object({
+  id: z.string().min(1),
+  pack_id: z.string().min(1),
+  relative_path: z.string().min(1),
+  reasons: z.array(z.string().min(1)),
+});
+
+const selectedTechnologyPackSchema = z.object({
+  id: z.string().min(1),
+  skill_ids: z.array(z.string().min(1)),
+  matched_evidence: z.array(matchedSkillEvidenceSchema),
+});
+
+export const skillRegistrySchema = z.object({
+  schema_version: z.literal(1),
+  project_id: z.string().min(1),
+  base_skills: z.array(registeredBaseSkillSchema),
+  technology_skills: z.array(registeredTechnologySkillSchema),
+  selected_packs: z.array(selectedTechnologyPackSchema),
+});
+export type SkillRegistry = z.infer<typeof skillRegistrySchema>;
+
 export const projectRecordSchema = z.object({
   id: z.string().min(1),
   path: z.string().min(1),
@@ -42,19 +107,12 @@ export const projectRecordSchema = z.object({
   repository: z.object({
     git: z.boolean(),
   }),
-  stack: z.object({
-    languages: z.array(z.string()),
-    frameworks: z.array(z.string()),
-    package_manager: z.string().nullable(),
-  }),
-  commands: z.record(
-    z.string(),
-    z.object({
-      value: z.string(),
-      source: z.string(),
-      confidence: z.literal("verified"),
-    }),
-  ),
+  stack: projectStackSchema,
+  commands: z.record(z.string(), verifiedCommandSchema),
+  manifests: z.array(z.string()),
+  evidence: z.array(projectEvidenceSchema),
+  modules: z.array(projectModuleSchema),
+  skill_registry: z.string().min(1),
 });
 export type ProjectRecord = z.infer<typeof projectRecordSchema>;
 

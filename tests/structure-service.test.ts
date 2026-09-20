@@ -7,7 +7,7 @@ import { afterEach, test } from "node:test";
 import { DoctorService } from "../src/application/doctor-service.ts";
 import { ProjectDiscoveryService } from "../src/application/project-discovery.ts";
 import { StructureService } from "../src/application/structure-service.ts";
-import { skillRegistrySchema } from "../src/domain/config.ts";
+import { manifestSchema, skillRegistrySchema } from "../src/domain/config.ts";
 import { CliError } from "../src/domain/errors.ts";
 import { NodeFileSystem } from "../src/infrastructure/file-system.ts";
 import { parseYaml } from "../src/infrastructure/serialization.ts";
@@ -39,6 +39,9 @@ test("empty directory defaults to workspace scope and includes both model profil
   assert.match(agents?.content ?? "", /skill_registry/);
   const claude = plan.files.find((file) => file.relativePath === "CLAUDE.md");
   assert.match(claude?.content ?? "", /skill_registry/);
+  const manifest = plan.files.find((file) => file.relativePath === ".ai/manifest.yaml");
+  const parsedManifest = manifestSchema.parse(parseYaml(manifest?.content ?? ""));
+  assert.equal(parsedManifest.generator.name, "synorch");
 });
 
 test("a directory with package.json defaults to repository scope", async () => {
@@ -598,7 +601,7 @@ test("sync rejects a technology skill path that escapes through a symlink or jun
   );
 });
 
-test("init rejects an AI structure path that escapes through a symlink before any mutation", async () => {
+test("init rejects a Synorch structure path that escapes through a symlink before any mutation", async () => {
   const directory = await createTempDirectory();
   const outside = await createTempDirectory();
   const setupFileSystem = new NodeFileSystem();
@@ -715,7 +718,7 @@ function isLinkCapabilityError(error: unknown): boolean {
 }
 
 async function createTempDirectory(): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-structure-test-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synorch-test-"));
   temporaryDirectories.push(directory);
   return directory;
 }

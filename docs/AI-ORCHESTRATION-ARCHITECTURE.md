@@ -1,4 +1,4 @@
-# AI Orchestration Structure — Mimari ve Uygulanan Yapı
+# Synorch — Mimari ve Uygulanan Yapı
 
 > Durum: Çalıştırılabilir çekirdek uygulanmış durumda
 > Son güncelleme: 2026-09-20  
@@ -7,6 +7,8 @@
 ## 1. Ürün Tanımı
 
 Bu proje bir model runtime'ı, sürekli çalışan agent harness'i veya alternatif bir coding assistant değildir.
+
+Ürün adı **Synorch**'tur. NPM paket adı `synorch`, birincil terminal komutu `syn`, keşfedilebilir uzun executable alias'ı ise `synorch` olarak tanımlanır.
 
 Ürün; boş bir klasöre, mevcut bir repository'ye veya birden fazla repository içeren workspace'e çalıştırıldığında AI geliştirme çalışma sistemini kuran bir CLI'dır. Kurulumdan sonra günlük geliştirme doğrudan Codex veya Claude Code üzerinden devam eder.
 
@@ -86,10 +88,10 @@ projects: []
 Uygulanan komutlar:
 
 ```text
-ai-structure inspect
-ai-structure init
-ai-structure sync [--force]
-ai-structure doctor
+syn inspect
+syn init
+syn sync [--force]
+syn doctor
 ```
 
 - `init`: Agent/skill/protokol çekirdeğini ve provider adapter'larını kurar.
@@ -704,7 +706,7 @@ Yeni repo eklendiğinde uygulanan akış:
 ```text
 git clone
    ↓
-ai-structure sync
+syn sync
    ↓
 deterministik keşif
    ↓

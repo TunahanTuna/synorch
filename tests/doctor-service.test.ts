@@ -489,7 +489,7 @@ async function createSyncedStructure(): Promise<{
 }
 
 async function createTempDirectory(): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-structure-doctor-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synorch-doctor-"));
   temporaryDirectories.push(directory);
   return directory;
 }

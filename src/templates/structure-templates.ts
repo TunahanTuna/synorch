@@ -12,7 +12,7 @@ export function createStructureFiles(scope: StructureScope): readonly FileDefini
       ".ai/manifest.yaml",
       stringifyYaml({
         schema_version: 1,
-        generator: { name: "ai-structure", version: GENERATOR_VERSION },
+        generator: { name: "synorch", version: GENERATOR_VERSION },
         scope,
         routing: {
           mode: "automatic",

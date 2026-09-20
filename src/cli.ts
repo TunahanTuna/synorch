@@ -10,13 +10,13 @@ import { CliError } from "./domain/errors.ts";
 import type { GenerationPlan } from "./domain/generation.ts";
 import { NodeFileSystem } from "./infrastructure/file-system.ts";
 
-const HELP = `ai-structure — Codex and Claude Code orchestration structure generator
+const HELP = `syn — Synorch orchestration structure generator for Codex and Claude Code
 
 Usage:
-  ai-structure inspect [--target <path>] [--scope workspace|repository]
-  ai-structure init [--target <path>] [--scope workspace|repository] [--force]
-  ai-structure sync [--target <path>] [--force] [--json]
-  ai-structure doctor [--target <path>] [--json]
+  syn inspect [--target <path>] [--scope workspace|repository]
+  syn init [--target <path>] [--scope workspace|repository] [--force]
+  syn sync [--target <path>] [--force] [--json]
+  syn doctor [--target <path>] [--json]
 
 Commands:
   inspect  Preview every generated file and conflict without writing.
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
       } else {
         console.log(`Initialized ${plan.scope} structure at ${plan.targetDirectory}`);
         console.log(`Created: ${result.created.length}, updated: ${result.updated.length}, unchanged: ${result.unchanged.length}`);
-        console.log("Next: run `ai-structure sync`, then `ai-structure doctor`.");
+        console.log("Next: run `syn sync`, then `syn doctor`.");
       }
       return;
     }

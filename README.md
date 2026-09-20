@@ -1,6 +1,23 @@
-# ai-structure
+# Synorch
 
-`ai-structure`, Codex ve Claude Code için provider-bağımsız, orchestrator merkezli agent/skill/protokol yapısı kuran Node.js tabanlı bir CLI'dır.
+`synorch`, Codex ve Claude Code için provider-bağımsız, orchestrator merkezli agent/skill/protokol yapısı kuran Node.js tabanlı bir CLI'dır. Paket adı `synorch`, kurulumdan sonraki kısa terminal komutu `syn`'dir.
+
+## Kullanım
+
+Kurulum yapmadan çalıştırma:
+
+```bash
+npx synorch init
+pnpm dlx synorch init
+yarn dlx synorch init
+```
+
+Global kurulumdan sonra kısa komut:
+
+```bash
+npm install --global synorch
+syn init
+```
 
 ## Geliştirme
 
@@ -13,10 +30,10 @@ pnpm dev -- inspect
 ## Komutlar
 
 ```bash
-ai-structure inspect [--target <path>] [--scope workspace|repository]
-ai-structure init [--target <path>] [--scope workspace|repository] [--force]
-ai-structure sync [--target <path>] [--force] [--json]
-ai-structure doctor [--target <path>] [--json]
+syn inspect [--target <path>] [--scope workspace|repository]
+syn init [--target <path>] [--scope workspace|repository] [--force]
+syn sync [--target <path>] [--force] [--json]
+syn doctor [--target <path>] [--json]
 ```
 
 ## Skill havuzu

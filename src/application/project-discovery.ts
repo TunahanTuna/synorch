@@ -90,7 +90,7 @@ export class ProjectDiscoveryService {
     const workspacePath = path.join(root, ".ai", "workspace.yaml");
     await assertSafeGeneratedPath(this.fileSystem, root, workspacePath, ".ai/workspace.yaml");
     if (!(await this.fileSystem.exists(workspacePath))) {
-      throw new CliError("Structure is not initialized. Run `ai-structure init` first.", 2);
+      throw new CliError("Structure is not initialized. Run `syn init` first.", 2);
     }
 
     const currentWorkspace = workspaceSchema.parse(

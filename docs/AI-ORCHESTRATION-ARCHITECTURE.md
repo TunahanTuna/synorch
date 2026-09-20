@@ -833,3 +833,12 @@ Sistem başarılı sayılmalıdır eğer:
 - Debugging, refactoring, dokümantasyon, release, performans, tasarım, oyun ve diğer uzmanlık skill'leri on-demand kalır; orchestrator açıklama eşleşmesi olmadan bunları yüklemez.
 - Anthropic Agent Skills, Superpowers ve Microsoft Agent Skills araştırılmış, sabit commit kimlikleriyle `reference-only` kaydedilmiş ve otomatik üçüncü taraf kod/talimat çalıştırma kapsam dışında bırakılmıştır.
 - Kaynak havuzunun tamamının context'e yüklenmesi yasaktır; katalog metadata'sı ucuz keşif, `SKILL.md` ve destek kaynakları progressive disclosure için kullanılır.
+
+### 2026-09-20 — Synorch paketleme ve yayın güvenliği
+
+- Ürün, npm üzerinde `synorch` paketi olarak; kurulum sonrasında `syn` ve `synorch` executable alias'larıyla dağıtılacaktır.
+- İlk pre-stable sürüm `0.1.0` ve Git tag'i `v0.1.0` olarak tanımlanmıştır; sürüm geçmişi Keep a Changelog ve Semantic Versioning ile tutulacaktır.
+- Her paketleme öncesinde typecheck, test ve build zorunlu `prepack` kapısından geçer; paket içeriği allowlist ile sınırlandırılır.
+- CI ve npm publish workflow'ları salt-okunur varsayılan yetkiler, sabit action commit SHA'ları ve release-tag/sürüm eşleşme kontrolü kullanır.
+- İlk npm yayını 2FA ile manuel yapılır; sonraki yayınlar GitHub Actions ile token saklamadan npm Trusted Publishing/OIDC üzerinden gerçekleştirilir.
+- MIT lisansı, özel güvenlik bildirimi, changelog ve insan odaklı release notları public dağıtım sözleşmesinin parçasıdır.

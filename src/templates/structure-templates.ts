@@ -1,8 +1,7 @@
 import type { FileDefinition } from "../domain/generation.ts";
 import type { StructureScope } from "../domain/config.ts";
+import { SYNORCH_GENERATOR_NAME, SYNORCH_VERSION } from "../domain/product.ts";
 import { stringifyYaml } from "../infrastructure/serialization.ts";
-
-const GENERATOR_VERSION = "0.1.0";
 
 export function createStructureFiles(scope: StructureScope): readonly FileDefinition[] {
   return [
@@ -12,7 +11,7 @@ export function createStructureFiles(scope: StructureScope): readonly FileDefini
       ".ai/manifest.yaml",
       stringifyYaml({
         schema_version: 1,
-        generator: { name: "synorch", version: GENERATOR_VERSION },
+        generator: { name: SYNORCH_GENERATOR_NAME, version: SYNORCH_VERSION },
         scope,
         routing: {
           mode: "automatic",

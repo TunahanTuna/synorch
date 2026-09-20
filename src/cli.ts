@@ -8,6 +8,7 @@ import { StructureService } from "./application/structure-service.ts";
 import { scopeSchema, type StructureScope } from "./domain/config.ts";
 import { CliError } from "./domain/errors.ts";
 import type { GenerationPlan } from "./domain/generation.ts";
+import { SYNORCH_VERSION } from "./domain/product.ts";
 import { NodeFileSystem } from "./infrastructure/file-system.ts";
 
 const HELP = `syn — Synorch orchestration structure generator for Codex and Claude Code
@@ -45,7 +46,7 @@ async function main(): Promise<void> {
   });
 
   if (values.version) {
-    console.log("0.1.0");
+    console.log(SYNORCH_VERSION);
     return;
   }
   if (values.help || positionals.length === 0) {

@@ -45,3 +45,12 @@ Anthropic Agent Skills, Superpowers ve Microsoft Agent Skills kaynakları sabit 
 `init`, kaynak koda dokunmadan canonical orchestration çekirdeğini kurar. Ardından `sync`, repository veya workspace modüllerini kanıta dayalı olarak keşfeder, proje/skill registry'lerini ve seçilen teknoloji skill'lerini üretir; kullanıcı tarafından değiştirilmiş generated teknoloji skill'lerini yalnızca açık `--force` ile yeniler. Son olarak `doctor`, referans zincirini, canonical base skill kümesini ve path/symlink sınırlarını doğrular.
 
 Mimari kararlar için [mimari planı](./docs/AI-ORCHESTRATION-ARCHITECTURE.md) inceleyin.
+
+## Gereksinimler ve proje bilgileri
+
+- Node.js 24 veya daha yeni bir sürüm gerekir.
+- Sürüm geçmişi için [CHANGELOG.md](./CHANGELOG.md) dosyasını inceleyin.
+- Güvenlik açıklarını herkese açık issue yerine [güvenlik politikasındaki](./SECURITY.md) özel bildirim akışıyla paylaşın.
+- Synorch, [MIT lisansı](./LICENSE) altında yayımlanır.
+
+İlk sürüm notları [Synorch v0.1.0](./docs/releases/v0.1.0.md) belgesinde yer alır.

@@ -2,15 +2,34 @@
   "name": "synorch",
   "version": "0.1.0",
   "description": "Provider-neutral AI orchestration structure generator for Codex and Claude Code.",
+  "keywords": [
+    "ai",
+    "agents",
+    "orchestration",
+    "codex",
+    "claude-code",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "Tunahan Tuna",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TunahanTuna/synorch.git"
+  },
+  "homepage": "https://github.com/TunahanTuna/synorch#readme",
+  "bugs": {
+    "url": "https://github.com/TunahanTuna/synorch/issues"
+  },
   "type": "module",
   "bin": {
-    "syn": "./dist/cli.js",
-    "synorch": "./dist/cli.js"
+    "syn": "dist/cli.js",
+    "synorch": "dist/cli.js"
   },
   "files": [
     "dist",
     "skill-sources",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
@@ -18,10 +37,15 @@
     "dev": "node src/cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test tests/*.test.ts",
-    "check": "pnpm typecheck && pnpm test && pnpm build"
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "prepack": "pnpm check",
+    "release:dry-run": "npm publish --dry-run"
   },
   "engines": {
     "node": ">=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "packageManager": "pnpm@11.19.0",
   "dependencies": {

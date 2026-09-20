@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SYNORCH_GENERATOR_NAME } from "./product.ts";
 
 export const scopeSchema = z.enum(["workspace", "repository"]);
 export type StructureScope = z.infer<typeof scopeSchema>;
@@ -19,7 +20,7 @@ export type ModelProfile = z.infer<typeof modelProfileSchema>;
 export const manifestSchema = z.object({
   schema_version: z.literal(1),
   generator: z.object({
-    name: z.enum(["synorch", "ai-structure"]),
+    name: z.union([z.literal(SYNORCH_GENERATOR_NAME), z.literal("ai-structure")]),
     version: z.string().min(1),
   }),
   scope: scopeSchema,

@@ -68,7 +68,7 @@ export function resolveSkillPacks(modules: readonly ModuleStackFacts[]): SkillRe
       technologySkills.push({
         ...skill,
         packId: pack.id,
-        content: getTechnologySkillTemplate(skill.id),
+        content: skill.sourceId === null ? getTechnologySkillTemplate(skill.id) : null,
         reasons,
       });
     }

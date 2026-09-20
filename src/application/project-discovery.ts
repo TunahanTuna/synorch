@@ -10,6 +10,7 @@ import type {
 import { workspaceSchema } from "../domain/config.ts";
 import { CliError } from "../domain/errors.ts";
 import type { FileSystem } from "../infrastructure/file-system.ts";
+import { loadBundledSkillPool } from "../infrastructure/bundled-skill-library.ts";
 import { parseYaml, stringifyYaml } from "../infrastructure/serialization.ts";
 import { resolveSkillPacks } from "./skill-resolver.ts";
 
@@ -107,12 +108,18 @@ export class ProjectDiscoveryService {
 
     const preparedProjects: PreparedProject[] = [];
     const desiredSkills = new Map<string, string>();
+    const bundledPool = await loadBundledSkillPool();
+    desiredSkills.set(".ai/skills/catalog.yaml", bundledPool.catalogContent);
+    for (const file of bundledPool.files) {
+      desiredSkills.set(file.relativePath, file.content);
+    }
     for (const inspected of inspectedProjects) {
       const skillRegistryPath = `.ai/projects/${inspected.id}.skills.yaml`;
       const record: ProjectRecord = { ...inspected, skill_registry: skillRegistryPath };
       const skillResolution = resolveSkillPacks(record.modules);
       for (const skill of skillResolution.technologySkills) {
         if (skill.content === null) {
+          if (skill.sourceId !== null && desiredSkills.has(skill.relativePath)) continue;
           throw new Error(`Technology skill ${skill.id} has no materializable content.`);
         }
         const existing = desiredSkills.get(skill.relativePath);
@@ -137,6 +144,7 @@ export class ProjectDiscoveryService {
           technology_skills: skillResolution.technologySkills.map((skill) => ({
             id: skill.id,
             pack_id: requiredPackId(skill.id, skill.packId),
+            source_id: skill.sourceId,
             relative_path: skill.relativePath,
             reasons: [...skill.reasons],
           })),
@@ -167,7 +175,7 @@ export class ProjectDiscoveryService {
         if (normalizeLineEndings(current) === normalizeLineEndings(content)) continue;
         if (options.force !== true) {
           throw new CliError(
-            `Sync stopped because technology skill differs: ${relativePath}\nRe-run with --force only after reviewing this file.`,
+            `Sync stopped because generated skill file differs: ${relativePath}\nRe-run with --force only after reviewing this file.`,
             2,
           );
         }

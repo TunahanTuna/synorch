@@ -14,14 +14,19 @@ test("selects React and TypeScript skills from explicit module evidence", () => 
   assert.deepEqual(skillIds(resolution.technologySkills), [
     "typescript-patterns",
     "react-patterns",
+    "react-modern",
+    "frontend-craft",
   ]);
   assert.equal(resolution.baseSkills.length, 7);
   assert.ok(resolution.baseSkills.every((skill) => skill.category === "base"));
   assert.match(resolution.technologySkills[0]?.reasons[0] ?? "", /frontend.*tsconfig\.json/);
   assert.match(resolution.technologySkills[1]?.content ?? "", /name: react-patterns/);
+  assert.equal(resolution.technologySkills[2]?.sourceId, "ingenium");
+  assert.equal(resolution.technologySkills[2]?.content, null);
   assert.ok(
     resolution.technologySkills.every((skill) =>
-      skill.relativePath.startsWith(".ai/skills/technology/"),
+      skill.relativePath.startsWith(".ai/skills/technology/") ||
+      skill.relativePath.startsWith(".ai/skills/library/"),
     ),
   );
 });
@@ -42,8 +47,11 @@ test("selects Java, Spring Boot, JPA and Maven skills from verified facts", () =
 
   assert.deepEqual(skillIds(resolution.technologySkills), [
     "java-patterns",
+    "java-backend",
     "spring-boot-patterns",
     "jpa-patterns",
+    "db-schema-craft",
+    "query-tuning",
     "maven-build",
   ]);
   assert.deepEqual(
@@ -92,12 +100,33 @@ test("deduplicates evidence and produces deterministic registry-ordered output",
   assert.deepEqual(skillIds(first.technologySkills), [
     "typescript-patterns",
     "react-patterns",
+    "react-modern",
+    "frontend-craft",
     "java-patterns",
+    "java-backend",
     "gradle-build",
   ]);
   assert.deepEqual(first, second);
   assert.equal(first.selectedPacks.find((pack) => pack.id === "react")?.matchedEvidence.length, 1);
   assert.equal(new Set(skillIds(first.allSkills)).size, first.allSkills.length);
+});
+
+test("selects bundled Node, Vue and Tailwind skills only from matching evidence", () => {
+  const resolution = resolveSkillPacks([
+    moduleFacts("api", "api", [fact("framework", "fastify", "api/package.json")]),
+    moduleFacts("web", "web", [
+      fact("framework", "vue", "web/package.json"),
+      fact("dependency", "tailwindcss", "web/package.json"),
+    ]),
+  ]);
+
+  assert.deepEqual(skillIds(resolution.technologySkills), [
+    "node-backend",
+    "vue-modern",
+    "frontend-craft",
+    "tailwind-v4-tokens",
+  ]);
+  assert.ok(resolution.technologySkills.every((skill) => skill.sourceId === "ingenium"));
 });
 
 function moduleFacts(

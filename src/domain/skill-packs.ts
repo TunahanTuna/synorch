@@ -30,6 +30,7 @@ export interface SkillDefinition {
   readonly id: string;
   readonly category: SkillCategory;
   readonly relativePath: string;
+  readonly sourceId: string | null;
 }
 
 export interface SkillPackTrigger {
@@ -62,10 +63,10 @@ export const TECHNOLOGY_SKILL_PACKS: readonly TechnologySkillPackDefinition[] = 
   technologyPack("typescript", "typescript-patterns", [
     { kind: "language", values: ["typescript"] },
   ]),
-  technologyPack("react", "react-patterns", [
+  technologyPack("react", [inlineSkill("react-patterns"), bundledSkill("react-modern"), bundledSkill("frontend-craft")], [
     { kind: "framework", values: ["react"] },
   ]),
-  technologyPack("java", "java-patterns", [{ kind: "language", values: ["java"] }]),
+  technologyPack("java", [inlineSkill("java-patterns"), bundledSkill("java-backend")], [{ kind: "language", values: ["java"] }]),
   technologyPack("spring-boot", "spring-boot-patterns", [
     { kind: "framework", values: ["spring-boot"] },
     {
@@ -76,7 +77,7 @@ export const TECHNOLOGY_SKILL_PACKS: readonly TechnologySkillPackDefinition[] = 
       ],
     },
   ]),
-  technologyPack("jpa", "jpa-patterns", [
+  technologyPack("jpa", [inlineSkill("jpa-patterns"), bundledSkill("db-schema-craft"), bundledSkill("query-tuning")], [
     { kind: "framework", values: ["jpa", "hibernate"] },
     {
       kind: "dependency",
@@ -98,26 +99,47 @@ export const TECHNOLOGY_SKILL_PACKS: readonly TechnologySkillPackDefinition[] = 
       values: ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
     },
   ]),
+  technologyPack("node-backend", [bundledSkill("node-backend")], [
+    { kind: "framework", values: ["express", "fastify", "nestjs"] },
+  ]),
+  technologyPack("vue", [bundledSkill("vue-modern"), bundledSkill("frontend-craft")], [
+    { kind: "framework", values: ["vue", "nuxt"] },
+  ]),
+  technologyPack("tailwind", [bundledSkill("tailwind-v4-tokens")], [
+    { kind: "dependency", values: ["tailwindcss", "@tailwindcss/vite", "@tailwindcss/postcss"] },
+  ]),
 ];
 
 function baseSkill(id: string): SkillDefinition {
-  return { id, category: "base", relativePath: `.ai/skills/${id}/SKILL.md` };
+  return { id, category: "base", relativePath: `.ai/skills/${id}/SKILL.md`, sourceId: null };
 }
 
 function technologyPack(
   id: string,
-  skillId: string,
+  skills: string | readonly SkillDefinition[],
   anyOf: readonly SkillPackTrigger[],
 ): TechnologySkillPackDefinition {
   return {
     id,
-    skills: [
-      {
-        id: skillId,
-        category: "technology",
-        relativePath: ".ai/skills/technology/" + skillId + "/SKILL.md",
-      },
-    ],
+    skills: typeof skills === "string" ? [inlineSkill(skills)] : skills,
     anyOf,
+  };
+}
+
+function inlineSkill(id: string): SkillDefinition {
+  return {
+    id,
+    category: "technology",
+    relativePath: `.ai/skills/technology/${id}/SKILL.md`,
+    sourceId: null,
+  };
+}
+
+function bundledSkill(id: string): SkillDefinition {
+  return {
+    id,
+    category: "technology",
+    relativePath: `.ai/skills/library/ingenium/${id}/SKILL.md`,
+    sourceId: "ingenium",
   };
 }

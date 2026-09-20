@@ -81,6 +81,7 @@ const matchedSkillEvidenceSchema = z.object({
 const registeredTechnologySkillSchema = z.object({
   id: z.string().min(1),
   pack_id: z.string().min(1),
+  source_id: z.string().min(1).nullable().default(null),
   relative_path: z.string().min(1),
   reasons: z.array(z.string().min(1)),
 });

@@ -580,17 +580,15 @@ export class DoctorService {
     }
 
     for (const skill of registry.technology_skills) {
-      const skillPath = resolveSafeRelativePath(
-        root,
-        skill.relative_path,
-        ".ai/skills/technology/",
-      );
+      const skillPath =
+        resolveSafeRelativePath(root, skill.relative_path, ".ai/skills/technology/") ??
+        resolveSafeRelativePath(root, skill.relative_path, ".ai/skills/library/");
       if (skillPath === undefined) {
         diagnostics.push({
           severity: "error",
           code: "unsafe-technology-skill-path",
           message:
-            "Technology skill path must stay under .ai/skills/technology/: " +
+            "Technology skill path must stay under .ai/skills/technology/ or .ai/skills/library/: " +
             skill.relative_path,
           path: registryPath,
         });

@@ -205,9 +205,14 @@ test("repository sync recursively discovers deterministic frontend and backend m
     [
       "typescript-patterns",
       "react-patterns",
+      "react-modern",
+      "frontend-craft",
       "java-patterns",
+      "java-backend",
       "spring-boot-patterns",
       "jpa-patterns",
+      "db-schema-craft",
+      "query-tuning",
       "maven-build",
     ],
   );
@@ -229,6 +234,17 @@ test("repository sync recursively discovers deterministic frontend and backend m
   for (const skill of registry.base_skills) {
     assert.equal(await fileSystem.exists(path.join(directory, skill.relative_path)), true);
   }
+  const catalog = parseYaml(
+    await readFile(path.join(directory, ".ai", "skills", "catalog.yaml"), "utf8"),
+  ) as { readonly skills: readonly unknown[]; readonly sources: readonly unknown[] };
+  assert.equal(catalog.skills.length, 33);
+  assert.equal(catalog.sources.length, 4);
+  assert.equal(
+    await fileSystem.exists(
+      path.join(directory, ".ai", "skills", "library", "ingenium", "node-backend", "reference.md"),
+    ),
+    true,
+  );
 
   await delay(10);
   const secondResult = await new ProjectDiscoveryService(fileSystem).sync(directory);
@@ -296,7 +312,7 @@ test("sync protects customized technology skills unless force is explicit", asyn
 
   await assert.rejects(
     discovery.sync(directory),
-    (error: unknown) => error instanceof CliError && /technology skill differs/i.test(error.message),
+    (error: unknown) => error instanceof CliError && /generated skill file differs/i.test(error.message),
   );
   assert.equal(await readFile(skillPath, "utf8"), "user-owned customization\n");
   assert.equal(await readFile(recordPath, "utf8"), recordBeforeConflict);

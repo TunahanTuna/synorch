@@ -681,14 +681,21 @@ Bunların yanında yalnız eşleşen verified evidence için teknoloji pack'i se
 | Pack | Üretilen skill |
 | --- | --- |
 | TypeScript | `typescript-patterns` |
-| React | `react-patterns` |
-| Java | `java-patterns` |
+| React | `react-patterns`, Ingenium `react-modern`, `frontend-craft` |
+| Java | `java-patterns`, Ingenium `java-backend` |
 | Spring Boot | `spring-boot-patterns` |
-| JPA/Hibernate | `jpa-patterns` |
+| JPA/Hibernate | `jpa-patterns`, Ingenium `db-schema-craft`, `query-tuning` |
 | Maven | `maven-build` |
 | Gradle | `gradle-build` |
+| Express/Fastify/NestJS | Ingenium `node-backend` |
+| Vue/Nuxt | Ingenium `vue-modern`, `frontend-craft` |
+| Tailwind CSS | Ingenium `tailwind-v4-tokens` |
 
-Seçimler, gerekçeleri ve matched evidence `.ai/projects/<project-id>.skills.yaml` içinde tutulur. Teknoloji skill dosyaları `.ai/skills/technology/**` altında materialize edilir; registry'de referanslanmayan eski dosyalar aktif sayılmaz. `sync`, kullanıcı tarafından değiştirilmiş bir generated teknoloji skill'i gördüğünde durur; `sync --force` yalnız bu çakışan generated teknoloji skill'ini canonical içerikle yenilemeye izin verir.
+Seçimler, gerekçeleri, source id ve matched evidence `.ai/projects/<project-id>.skills.yaml` içinde tutulur. Yerel teknoloji skill'leri `.ai/skills/technology/**`, bundled havuz ise `.ai/skills/library/<source-id>/**` altında materialize edilir. `.ai/skills/catalog.yaml`, skill açıklamalarını, aktivasyon biçimini ve source provenance/lisans bilgisini taşır. Registry'deki otomatik skill'ler önceliklidir; `on-demand` skill yalnız açıklaması mevcut görevle doğrudan eşleştiğinde yüklenir. Bütün havuz aynı anda context'e alınmaz.
+
+İlk bundled kaynak, 33 skill ve bunlara ait script/reference dosyalarını içeren proje-sahipli Ingenium snapshot'ıdır. Anthropic Agent Skills, Superpowers ve Microsoft Agent Skills; repository URL, lisans ve sabit commit kimliğiyle `reference-only` kaynak olarak kataloglanır. Harici repository içeriği ayrı güvenlik ve lisans incelemesi olmadan otomatik import veya execute edilmez.
+
+`sync`, kullanıcı tarafından değiştirilmiş herhangi bir generated skill/katalog dosyası gördüğünde durur; `sync --force` yalnız bu çakışan generated dosyayı canonical içerikle yenilemeye izin verir.
 
 Aktivasyon sırası güvenlidir: teknoloji skill dosyaları, proje record'ları ve workspace kaydı hazırlandıktan sonra skill registry en son yazılır. Önkoşul yazımlarından biri başarısız olursa önceki aktif registry korunur.
 
@@ -806,7 +813,7 @@ Sistem başarılı sayılmalıdır eğer:
 - `init` mevcut farklı dosyaları varsayılan olarak korur; yalnızca açık `--force` ile günceller.
 - `sync` manuel tetiklemeyle repository/project gerçeklerini kanıt kaynaklarıyla kaydeder.
 - `doctor` canonical yapı, model profilleri, session confirmation ve silent-fallback yasağını doğrular.
-- Generated structure; constitution, sekiz core protokol, beş agent rolü, yedi başlangıç skill'i, OpenAI/Claude model profilleri ve context/completion packet şemalarını içerir.
+- Generated structure; constitution, sekiz core protokol, beş agent rolü, yedi canonical base skill, curated skill catalog, OpenAI/Claude model profilleri ve context/completion packet şemalarını içerir.
 
 ### 2026-09-20 — Recursive discovery, skill registry ve path güvenliği
 
@@ -815,3 +822,12 @@ Sistem başarılı sayılmalıdır eğer:
 - Yedi base skill her proje registry'sinde canonical ve eksiksiz tutulur; teknoloji skill'leri yalnız eşleşen pack kanıtıyla aktive edilir.
 - `sync`, değiştirilmiş generated teknoloji skill'lerini açık `--force` olmadan ezmez ve aktif skill registry'sini önkoşul çıktılarından sonra en son yazar.
 - `doctor`, workspace'ten skill dosyasına kadar referans bütünlüğünü, canonical base setini, modül/command path'lerini ve lexical + symlink/junction root containment kurallarını doğrular.
+
+### 2026-09-20 — Curated skill kaynakları ve Ingenium havuzu
+
+- Ingenium'un 33 skill ve 36 dosyadan oluşan proje-sahipli snapshot'ı destek script/reference dosyaları korunarak bundled kaynak haline getirilmiştir.
+- Skill kaynakları repository, revision, license ve trust seviyesiyle kataloglanır; generated projelerde katalog `.ai/skills/catalog.yaml` olarak yazılır.
+- React, Java, Node, Vue, JPA/Hibernate ve Tailwind eşleşmeleri verified repository evidence üzerinden otomatik aktive edilir.
+- Debugging, refactoring, dokümantasyon, release, performans, tasarım, oyun ve diğer uzmanlık skill'leri on-demand kalır; orchestrator açıklama eşleşmesi olmadan bunları yüklemez.
+- Anthropic Agent Skills, Superpowers ve Microsoft Agent Skills araştırılmış, sabit commit kimlikleriyle `reference-only` kaydedilmiş ve otomatik üçüncü taraf kod/talimat çalıştırma kapsam dışında bırakılmıştır.
+- Kaynak havuzunun tamamının context'e yüklenmesi yasaktır; katalog metadata'sı ucuz keşif, `SKILL.md` ve destek kaynakları progressive disclosure için kullanılır.

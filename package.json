@@ -8,6 +8,7 @@
   },
   "files": [
     "dist",
+    "skill-sources",
     "README.md",
     "LICENSE"
   ],

@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Fixed
 
-- Pin npm 11.19.1 in the release workflow so npm Trusted Publishing is available on Node.js 24 runners.
+- Run the pinned npm 11.19.1 CLI directly so Trusted Publishing is reliable on Node.js 24 runners.
 
 ## [0.1.0] - 2026-09-20
 

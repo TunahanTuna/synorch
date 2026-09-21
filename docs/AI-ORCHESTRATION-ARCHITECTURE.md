@@ -668,7 +668,7 @@ test:
   confidence: verified
 ```
 
-Her proje registry'si yedi canonical base skill'i kaydeder:
+Her proje registry'si sekiz canonical base skill'i kaydeder:
 
 - `planning`
 - `project-discovery`
@@ -677,6 +677,7 @@ Her proje registry'si yedi canonical base skill'i kaydeder:
 - `verification`
 - `debugging`
 - `code-review`
+- `task-conductor`
 
 Bunların yanında yalnız eşleşen verified evidence için teknoloji pack'i seçilir. Mevcut pack → skill eşlemeleri:
 
@@ -695,7 +696,7 @@ Bunların yanında yalnız eşleşen verified evidence için teknoloji pack'i se
 
 Seçimler, gerekçeleri, source id ve matched evidence `.ai/projects/<project-id>.skills.yaml` içinde tutulur. Yerel teknoloji skill'leri `.ai/skills/technology/**`, bundled havuz ise `.ai/skills/library/<source-id>/**` altında materialize edilir. `.ai/skills/catalog.yaml`, skill açıklamalarını, aktivasyon biçimini ve source provenance/lisans bilgisini taşır. Registry'deki otomatik skill'ler önceliklidir; `on-demand` skill yalnız açıklaması mevcut görevle doğrudan eşleştiğinde yüklenir. Bütün havuz aynı anda context'e alınmaz.
 
-İlk bundled kaynak, 33 skill ve bunlara ait script/reference dosyalarını içeren proje-sahipli Ingenium snapshot'ıdır. Anthropic Agent Skills, Superpowers ve Microsoft Agent Skills; repository URL, lisans ve sabit commit kimliğiyle `reference-only` kaynak olarak kataloglanır. Harici repository içeriği ayrı güvenlik ve lisans incelemesi olmadan otomatik import veya execute edilmez.
+İlk bundled kaynak, 32 available skill ve bunlara ait script/reference dosyalarını içeren proje-sahipli Ingenium snapshot'ıdır. Task Conductor bu snapshot'tan ayrılarak canonical base skill yapılmıştır. Anthropic Agent Skills, Superpowers ve Microsoft Agent Skills; repository URL, lisans ve sabit commit kimliğiyle `reference-only` kaynak olarak kataloglanır. Harici repository içeriği ayrı güvenlik ve lisans incelemesi olmadan otomatik import veya execute edilmez.
 
 `sync`, kullanıcı tarafından değiştirilmiş herhangi bir generated skill/katalog dosyası gördüğünde durur; `sync --force` yalnız bu çakışan generated dosyayı canonical içerikle yenilemeye izin verir.
 
@@ -717,7 +718,7 @@ teknoloji skill'leri, record ve workspace yazımı
 skill registry'nin en son aktive edilmesi
 ```
 
-`doctor`; workspace entry'lerini, canonical `.ai/projects/<id>.yaml` record'larını, modül dizinlerini, manifest/source path'lerini, command `cwd` değerlerini, skill registry şemasını, canonical yedi base skill kümesini ve seçili teknoloji skill dosyalarını uçtan uca doğrular. Kontroller hem lexical traversal/absolute path varyantlarını hem de `realpath` tabanlı symlink/junction kaçışlarını kapsar; eksik, bozuk, duplicate veya root dışına çıkan herhangi bir referans varken yapı `healthy` raporlanmaz.
+`doctor`; workspace entry'lerini, canonical `.ai/projects/<id>.yaml` record'larını, modül dizinlerini, manifest/source path'lerini, command `cwd` değerlerini, skill registry şemasını, canonical sekiz base skill kümesini ve seçili teknoloji skill dosyalarını uçtan uca doğrular. Kontroller hem lexical traversal/absolute path varyantlarını hem de `realpath` tabanlı symlink/junction kaçışlarını kapsar; eksik, bozuk, duplicate veya root dışına çıkan herhangi bir referans varken yapı `healthy` raporlanmaz.
 
 ## 13. Provider Uyumluluğu ve Sınırlar
 
@@ -815,24 +816,34 @@ Sistem başarılı sayılmalıdır eğer:
 - `init` mevcut farklı dosyaları varsayılan olarak korur; yalnızca açık `--force` ile günceller.
 - `sync` manuel tetiklemeyle repository/project gerçeklerini kanıt kaynaklarıyla kaydeder.
 - `doctor` canonical yapı, model profilleri, session confirmation ve silent-fallback yasağını doğrular.
-- Generated structure; constitution, sekiz core protokol, beş agent rolü, yedi canonical base skill, curated skill catalog, OpenAI/Claude model profilleri ve context/completion packet şemalarını içerir.
+- Generated structure; constitution, sekiz core protokol, beş agent rolü, Task Conductor dahil sekiz canonical base skill, curated skill catalog, OpenAI/Claude model profilleri ve context/completion packet şemalarını içerir.
 
 ### 2026-09-20 — Recursive discovery, skill registry ve path güvenliği
 
 - Repository içindeki manifest tabanlı modüller recursive keşfedilir; iç içe `src`/test source ağaçları ayrı güvenlik limitleriyle taranır.
 - Dil, framework, package manager, build tool ve dependency seçimleri yalnız kaynak path'i taşıyan verified evidence üzerinden yapılır.
-- Yedi base skill her proje registry'sinde canonical ve eksiksiz tutulur; teknoloji skill'leri yalnız eşleşen pack kanıtıyla aktive edilir.
+- Sekiz base skill her proje registry'sinde canonical ve eksiksiz tutulur; teknoloji skill'leri yalnız eşleşen pack kanıtıyla aktive edilir.
 - `sync`, değiştirilmiş generated teknoloji skill'lerini açık `--force` olmadan ezmez ve aktif skill registry'sini önkoşul çıktılarından sonra en son yazar.
 - `doctor`, workspace'ten skill dosyasına kadar referans bütünlüğünü, canonical base setini, modül/command path'lerini ve lexical + symlink/junction root containment kurallarını doğrular.
 
 ### 2026-09-20 — Curated skill kaynakları ve Ingenium havuzu
 
-- Ingenium'un 33 skill ve 36 dosyadan oluşan proje-sahipli snapshot'ı destek script/reference dosyaları korunarak bundled kaynak haline getirilmiştir.
+- Ingenium'un 32 skill ve 35 dosyadan oluşan proje-sahipli snapshot'ı destek script/reference dosyaları korunarak bundled kaynak haline getirilmiştir; Task Conductor bağımsız canonical base skill'e taşınmıştır.
 - Skill kaynakları repository, revision, license ve trust seviyesiyle kataloglanır; generated projelerde katalog `.ai/skills/catalog.yaml` olarak yazılır.
 - React, Java, Node, Vue, JPA/Hibernate ve Tailwind eşleşmeleri verified repository evidence üzerinden otomatik aktive edilir.
 - Debugging, refactoring, dokümantasyon, release, performans, tasarım, oyun ve diğer uzmanlık skill'leri on-demand kalır; orchestrator açıklama eşleşmesi olmadan bunları yüklemez.
 - Anthropic Agent Skills, Superpowers ve Microsoft Agent Skills araştırılmış, sabit commit kimlikleriyle `reference-only` kaydedilmiş ve otomatik üçüncü taraf kod/talimat çalıştırma kapsam dışında bırakılmıştır.
 - Kaynak havuzunun tamamının context'e yüklenmesi yasaktır; katalog metadata'sı ucuz keşif, `SKILL.md` ve destek kaynakları progressive disclosure için kullanılır.
+
+### 2026-09-21 — Orantılı yürütme ve canonical Task Conductor
+
+- Optimizasyon; doğruluk sınırı korunarak token/context maliyeti ve geçen sürenin birlikte azaltılması olarak tanımlanır.
+- Her görev uygulama öncesi `trivial`, `standard` veya `high-risk` sınıfına alınır; scope veya bulgular değişirse tier yükseltilir.
+- Trivial işler bir fast worker, kompakt kullanıcı-onaylı plan ve claim-specific kanıtla yürür; broad discovery, full-project kontroller, reviewer ve browser varsayılan değildir.
+- Standard işlerde targeted kontroller ve yalnız material/boundary-crossing değişikliklerde reviewer; high-risk işlerde complex worker, kapsamlı kanıt ve bağımsız review zorunludur.
+- Headed browser kullanıcı talebi veya daha ucuz kanıtların çözemediği isimlendirilmiş bir kriter için ayrıca onay olmadıkça kullanılamaz.
+- Task Conductor Ingenium snapshot'ından ayrılıp sekizinci canonical base skill yapılmıştır; non-trivial brief'lerde merkezi decomposition ve just-in-time skill routing sağlar.
+- Skill durumu `available`, project registry ile `active` ve task context'inde `loaded` olarak ayrılır; bootstrap bütün kataloğu taramaz.
 
 ### 2026-09-20 — Synorch paketleme ve yayın güvenliği
 

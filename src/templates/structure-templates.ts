@@ -2,6 +2,7 @@ import type { FileDefinition } from "../domain/generation.ts";
 import type { StructureScope } from "../domain/config.ts";
 import { SYNORCH_GENERATOR_NAME, SYNORCH_VERSION } from "../domain/product.ts";
 import { stringifyYaml } from "../infrastructure/serialization.ts";
+import { taskConductorSkill } from "./task-conductor-skill.ts";
 
 export function createStructureFiles(scope: StructureScope): readonly FileDefinition[] {
   return [
@@ -52,6 +53,7 @@ export function createStructureFiles(scope: StructureScope): readonly FileDefini
     file(".ai/skills/verification/SKILL.md", verificationSkill, "skill"),
     file(".ai/skills/debugging/SKILL.md", debuggingSkill, "skill"),
     file(".ai/skills/code-review/SKILL.md", codeReviewSkill, "skill"),
+    file(".ai/skills/task-conductor/SKILL.md", taskConductorSkill, "skill"),
     file(".ai/model-profiles/openai.yaml", openAiProfile, "canonical"),
     file(".ai/model-profiles/claude.yaml", claudeProfile, "canonical"),
     file(".ai/schemas/context-packet.schema.json", contextPacketSchema, "schema"),
@@ -87,7 +89,9 @@ Before the first task:
 3. Ask the user whether to continue with or change that profile.
 4. Do not begin discovery or planning until the user confirms.
 5. For the active project, read its record from \`.ai/workspace.yaml\`, then read the referenced \`skill_registry\`.
-6. Read \`.ai/skills/catalog.yaml\` descriptions. Load registered technology skills first; load an on-demand bundled skill only when its description directly matches the current task. Never load the whole library.
+6. Treat registry entries as active, catalog entries as merely available, and skill contents as unloaded until the current work requires them. Do not scan or load the whole catalog during bootstrap.
+7. For a non-trivial brief, load \`.ai/skills/task-conductor/SKILL.md\` as the central decomposition and routing discipline. For a one-line or single-step fix, keep the workflow trivial and do not create an orchestra.
+8. Load any additional base, technology or on-demand skill just in time and only when its description genuinely matches the owned work.
 
 ## Non-negotiable behavior
 
@@ -96,7 +100,8 @@ Before the first task:
 - Plan every new task and obtain user approval before execution.
 - Delegate all implementation to worker agents.
 - Give each worker a minimal, evidence-backed task context packet.
-- Require independent verification before reporting completion.
+- Match verification cost to explicit risk. Trivial work uses exact diff and claim-specific evidence without an independent reviewer. Material standard and high-risk work require independent review.
+- Headed browser verification is opt-in: use it only when the user requested it or after approval for a named criterion that cheaper evidence cannot settle.
 - Only the orchestrator communicates with the user.
 
 If the host cannot provide the configured model or worker delegation capability, report the limitation. Never silently fall back or implement the work yourself.
@@ -115,7 +120,9 @@ Before the first task:
 3. Ask the user whether to continue with or change that profile.
 4. Do not begin discovery or planning until the user confirms.
 5. For the active project, read its record from \`.ai/workspace.yaml\`, then read the referenced \`skill_registry\`.
-6. Read \`.ai/skills/catalog.yaml\` descriptions. Load registered technology skills first; load an on-demand bundled skill only when its description directly matches the current task. Never load the whole library.
+6. Treat registry entries as active, catalog entries as merely available, and skill contents as unloaded until the current work requires them. Do not scan or load the whole catalog during bootstrap.
+7. For a non-trivial brief, load \`.ai/skills/task-conductor/SKILL.md\` as the central decomposition and routing discipline. For a one-line or single-step fix, keep the workflow trivial and do not create an orchestra.
+8. Load any additional base, technology or on-demand skill just in time and only when its description genuinely matches the owned work.
 
 ## Non-negotiable behavior
 
@@ -124,7 +131,8 @@ Before the first task:
 - Plan every new task and obtain user approval before execution.
 - Delegate all implementation to worker agents.
 - Give each worker a minimal, evidence-backed task context packet.
-- Require independent verification before reporting completion.
+- Match verification cost to explicit risk. Trivial work uses exact diff and claim-specific evidence without an independent reviewer. Material standard and high-risk work require independent review.
+- Headed browser verification is opt-in: use it only when the user requested it or after approval for a named criterion that cheaper evidence cannot settle.
 - Only the orchestrator communicates with the user.
 
 If the host cannot provide the configured model or worker delegation capability, report the limitation. Never silently fall back or implement the work yourself.
@@ -188,7 +196,7 @@ protocols:
 
 const orchestrationProtocol = `---
 id: core.orchestration
-version: 1.0.0
+version: 1.1.0
 priority: constitutional
 mandatory: true
 overridable: false
@@ -196,23 +204,33 @@ overridable: false
 
 # Orchestration Protocol
 
-Use the state machine:
+Required lifecycle:
 
-\`SESSION_BOOTSTRAP → MODEL_PROFILE_CONFIRMATION → INTAKE → DISCOVERY → CLARIFICATION → PLAN → USER_APPROVAL → DECOMPOSITION → DISPATCH → MONITORING → VERIFICATION → REVIEW → FINAL_REPORT\`.
+\`SESSION_BOOTSTRAP → MODEL_PROFILE_CONFIRMATION → INTAKE → RISK_CLASSIFICATION → PLAN → USER_APPROVAL → DISPATCH → PROPORTIONAL_VERIFICATION → FINAL_REPORT\`.
 
-The orchestrator must not skip a gate. It may read project files and write only task-control records under \`.ai/tasks/**\`. Every product mutation is delegated. Worker questions return to the orchestrator; only material decisions are escalated to the user.
+Classify work before expanding the workflow:
+
+- \`trivial\`: one local, reversible change without behavior, contract, dependency, security, data or architecture impact.
+- \`standard\`: bounded behavior across a small related surface.
+- \`high-risk\`: security, authentication, payments, persistence, migrations, public contracts, concurrency, destructive operations or wide architecture.
+
+Discovery, clarification, decomposition, monitoring and independent review are conditional tools, not mandatory ceremony. Use them only when risk, uncertainty or dependency structure justifies them. User approval, delegated product mutation and evidence for completion remain mandatory.
+
+The orchestrator may read project files and write only task-control records under \`.ai/tasks/**\`. Every product mutation is delegated. Worker questions return to the orchestrator; only material decisions are escalated to the user.
 `;
 
 const planningProtocol = `---
 id: core.planning-and-approval
-version: 1.0.0
+version: 1.1.0
 priority: core
 mandatory: true
 ---
 
 # Planning and Approval
 
-Before execution, present the understood goal, verified current state, proposed approach, affected areas, task decomposition, model choices, verification plan, assumptions and risks. Wait for explicit user approval. Re-open approval when scope or a material decision changes.
+Before execution, present the understood goal, risk tier, proposed approach, ownership and verification budget. Wait for explicit user approval. Re-open approval when scope, tier or a material decision changes.
+
+For trivial work, use one compact paragraph: exact change, one fast worker, owned path and claim-specific proof. Do not invent workstreams, broad discovery or a reviewer. Standard plans include affected areas, focused discovery and targeted checks. High-risk plans include dependencies, failure modes, independent review and rollback or recovery where relevant.
 `;
 
 const delegationProtocol = `---
@@ -229,14 +247,20 @@ Give every worker one bounded objective, explicit ownership, constraints, accept
 
 const modelRoutingProtocol = `---
 id: core.model-routing
-version: 1.0.0
+version: 1.1.0
 priority: core
 mandatory: true
 ---
 
 # Model Routing
 
-Use the active provider profile. Route architecture and final decisions to the orchestrator tier, complex implementation/debugging to the complex-worker tier, and small local low-risk work to the fast-worker tier. Small tasks are still delegated. Do not silently substitute unavailable models. Session overrides do not become persistent defaults unless the user explicitly requests it.
+Use the active provider profile and the classified risk:
+
+- Trivial work uses exactly one fast worker unless the required capability is unavailable.
+- Standard work uses the smallest capable worker set; prefer a fast worker for local edits and a complex worker for non-local reasoning.
+- High-risk work uses complex workers for implementation or debugging and an independent reviewer.
+
+The orchestrator owns architecture and final decisions but never implementation. Use Task Conductor as the central decomposition and skill-routing discipline for non-trivial briefs. Do not silently substitute unavailable models. Session overrides do not become persistent defaults unless the user explicitly requests it.
 `;
 
 const contextHandoffProtocol = `---
@@ -255,14 +279,23 @@ Workers may inspect target files and narrowly verify critical facts, but must no
 
 const verificationProtocol = `---
 id: core.verification
-version: 1.0.0
+version: 1.1.0
 priority: core
 mandatory: true
 ---
 
 # Verification
 
-No task is complete without evidence. Run the narrowest relevant checks first, then broader checks proportional to risk. Record exact commands and outcomes. Never claim a check ran when it did not. A separate reviewer evaluates requirement coverage, diff risk and evidence for material changes.
+No task is complete without evidence, but unrelated checks do not increase correctness. Stop at the cheapest evidence that proves the approved claim:
+
+1. Exact diff, search, parse or static inspection tied to the change.
+2. Narrow existing lint, typecheck, unit or component checks for the affected scope.
+3. Broader build, integration or end-to-end checks only when behavior or boundaries justify them.
+4. Independent review for material standard work and all high-risk work.
+
+Trivial work must not trigger a full-project lint, build, test suite, independent reviewer or browser unless the change itself invalidates that rule. Record exact commands and outcomes, including intentionally skipped checks. Never claim a check ran when it did not.
+
+Headed browser verification is opt-in. Use it only when the user requested it, or when a named acceptance criterion cannot be resolved by static, automated or structural evidence. In the latter case, explain the gap and obtain approval first. Never create browser automation or screenshot infrastructure as an incidental verification step.
 `;
 
 const failureRecoveryProtocol = `---
@@ -298,7 +331,7 @@ control_plane_write_scope: .ai/tasks/**
 
 # Orchestrator
 
-Own requirements, decisions, plans, delegation, context packets, monitoring, review synthesis and user communication. Never implement. Use the planning, project-discovery and verification skills. Treat worker claims as untrusted until supported by evidence.
+Own requirements, risk classification, decisions, plans, delegation, context packets, monitoring, review synthesis and user communication. Never implement. Use Task Conductor as the central routing discipline for non-trivial briefs, load other skills just in time and keep single-step work plain. Treat worker claims as untrusted until supported by proportionate evidence.
 `;
 
 const explorerAgent = `---
@@ -353,11 +386,13 @@ description: Use for every new user task before implementation begins.
 # Planning
 
 1. State the goal and non-goals.
-2. Separate verified facts, assumptions and decisions.
-3. Identify risks and material questions.
+2. Classify the task as trivial, standard or high-risk with evidence.
+3. Separate verified facts, assumptions and decisions; identify material questions.
 4. Build a dependency-aware task graph with ownership.
 5. Select worker tiers and verification.
 6. Present the plan and wait for user approval.
+
+For trivial work, replace the task graph with one compact objective, one fast worker, exact ownership and claim-specific proof.
 `;
 
 const projectDiscoverySkill = `---
@@ -397,7 +432,7 @@ description: Use before any implementation is reported complete.
 
 # Verification
 
-Map each acceptance criterion to evidence. Run focused tests first, then lint/typecheck/build or broader tests according to risk. Record commands, exit status and failures. Distinguish passed, failed and not-run checks.
+Map each acceptance criterion to the cheapest sufficient evidence and stop when the claim is proven. Trivial work uses exact diff or targeted static proof without broad checks or review. Standard work uses focused tests and only the relevant lint/typecheck/build. High-risk work adds broad checks and independent review. A headed browser is opt-in and requires a user request or approval for a named unresolved criterion. Record passed, failed, skipped and not-run checks.
 `;
 
 const debuggingSkill = `---
@@ -464,9 +499,14 @@ const contextPacketSchema = JSON.stringify(
       "task_id",
       "assigned_role",
       "model_tier",
+      "risk_tier",
       "objective",
       "scope",
       "acceptance_criteria",
+      "verification_commands",
+      "review_required",
+      "browser_policy",
+      "loaded_skills",
       "expected_report",
     ],
     properties: {
@@ -474,6 +514,10 @@ const contextPacketSchema = JSON.stringify(
       parent_task_id: { type: ["string", "null"] },
       assigned_role: { type: "string", minLength: 1 },
       model_tier: { enum: ["complex_worker", "fast_worker"] },
+      risk_tier: { enum: ["trivial", "standard", "high-risk"] },
+      review_required: { type: "boolean" },
+      browser_policy: { enum: ["disabled", "ask-first", "user-approved"] },
+      loaded_skills: { type: "array", items: { type: "string", minLength: 1 } },
       objective: { type: "string", minLength: 1 },
       rationale: { type: "string" },
       scope: {
@@ -506,7 +550,16 @@ const completionPacketSchema = JSON.stringify(
     title: "Worker Completion Packet",
     type: "object",
     additionalProperties: false,
-    required: ["task_id", "status", "summary", "changed_files", "commands_run", "unresolved_risks"],
+    required: [
+      "task_id",
+      "status",
+      "summary",
+      "changed_files",
+      "commands_run",
+      "checks_skipped",
+      "loaded_skills",
+      "unresolved_risks",
+    ],
     properties: {
       task_id: { type: "string", minLength: 1 },
       status: { enum: ["completed", "failed", "needs_context", "blocked"] },
@@ -514,6 +567,8 @@ const completionPacketSchema = JSON.stringify(
       root_cause: { type: ["string", "null"] },
       changed_files: { type: "array", items: { type: "string" } },
       commands_run: { type: "array", items: { type: "object" } },
+      checks_skipped: { type: "array", items: { type: "string" } },
+      loaded_skills: { type: "array", items: { type: "string", minLength: 1 } },
       decisions_made: { type: "array", items: { type: "string" } },
       unresolved_risks: { type: "array", items: { type: "string" } },
       recommended_context_updates: { type: "array", items: { type: "string" } },

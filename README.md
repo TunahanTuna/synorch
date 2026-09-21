@@ -38,7 +38,11 @@ syn doctor [--target <path>] [--json]
 
 ## Skill havuzu
 
-`sync`, proje sahibinin 33 skill'lik Ingenium havuzunu destek dosyalarıyla birlikte `.ai/skills/library/ingenium/` altına materialize eder ve kaynak/lisans/provenance bilgisini `.ai/skills/catalog.yaml` içinde tutar. React, Java, Node, Vue, JPA ve Tailwind skill'leri yalnız verified stack kanıtıyla otomatik aktive edilir; diğer skill'ler açıklamaları eşleştiğinde on-demand yüklenir. Bütün havuzun aynı anda context'e alınması yasaktır.
+`init`, Ingenium'dan bağımsız canonical `task-conductor` dahil sekiz base skill üretir. Task Conductor yalnız non-trivial brief'lerde merkezi decomposition/routing disiplini olarak kullanılır; tek satırlık işler için orkestra kurulmaz.
+
+`sync`, proje sahibinin 32 skill'lik Ingenium havuzunu destek dosyalarıyla birlikte `.ai/skills/library/ingenium/` altına materialize eder ve kaynak/lisans/provenance bilgisini `.ai/skills/catalog.yaml` içinde tutar. Katalog girdileri yalnız `available` durumundadır ve varsayılan olarak context'e yüklenmez. React, Java, Node, Vue, JPA ve Tailwind skill'leri yalnız verified stack kanıtıyla aktive edilir; diğer skill'ler görev açıklaması gerçekten eşleştiğinde just-in-time yüklenir. Bütün havuzun aynı anda taranması veya context'e alınması yasaktır.
+
+Görevler `trivial`, `standard` veya `high-risk` olarak sınıflandırılır. Trivial işler tek fast worker ve claim-specific kanıtla tamamlanır; bağımsız reviewer, full-project kontroller ve headed browser varsayılan olarak kullanılmaz. Browser doğrulaması yalnız kullanıcı isteğiyle veya daha ucuz kanıtların çözemediği isimlendirilmiş bir kriter için ayrıca onay alınarak yapılır.
 
 Anthropic Agent Skills, Superpowers ve Microsoft Agent Skills kaynakları sabit commit kimlikleriyle kataloglanır ancak güvenlik ve lisans incelemesi yapılmadan içerikleri otomatik import veya execute edilmez.
 

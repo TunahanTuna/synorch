@@ -11,8 +11,8 @@ test("bundles the complete Ingenium skill pool with provenance", async () => {
     readonly sources: ReadonlyArray<Record<string, unknown>>;
   };
 
-  assert.equal(BUNDLED_SKILLS.length, 33);
-  assert.equal(catalog.skills.length, 33);
+  assert.equal(BUNDLED_SKILLS.length, 32);
+  assert.equal(catalog.skills.length, 32);
   assert.equal(catalog.sources.length, 4);
   assert.ok(
     pool.files.some(
@@ -34,6 +34,12 @@ test("bundles the complete Ingenium skill pool with provenance", async () => {
         String(skill["description"]).length > 20,
     ),
   );
+  assert.ok(
+    catalog.skills.every(
+      (skill) => skill["availability"] === "available" && skill["loaded_by_default"] === false,
+    ),
+  );
+  assert.ok(!catalog.skills.some((skill) => skill["id"] === "task-conductor"));
 });
 
 test("pins researched external sources without auto-trusting their content", () => {

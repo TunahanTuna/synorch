@@ -44,6 +44,8 @@ export async function loadBundledSkillPool(): Promise<BundledSkillPool> {
       id: skill.id,
       source_id: skill.sourceId,
       activation: skill.activation,
+      availability: "available",
+      loaded_by_default: false,
       relative_path: `${targetRoot}/SKILL.md`,
       description,
     });

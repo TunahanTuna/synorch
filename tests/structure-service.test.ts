@@ -37,8 +37,13 @@ test("empty directory defaults to workspace scope and includes both model profil
   const agents = plan.files.find((file) => file.relativePath === "AGENTS.md");
   assert.match(agents?.content ?? "", /Mandatory session bootstrap/);
   assert.match(agents?.content ?? "", /skill_registry/);
+  assert.match(agents?.content ?? "", /Do not scan or load the whole catalog/);
+  assert.match(agents?.content ?? "", /Headed browser verification is opt-in/);
   const claude = plan.files.find((file) => file.relativePath === "CLAUDE.md");
   assert.match(claude?.content ?? "", /skill_registry/);
+  assert.ok(
+    plan.files.some((file) => file.relativePath === ".ai/skills/task-conductor/SKILL.md"),
+  );
   const manifest = plan.files.find((file) => file.relativePath === ".ai/manifest.yaml");
   const parsedManifest = manifestSchema.parse(parseYaml(manifest?.content ?? ""));
   assert.equal(parsedManifest.generator.name, "synorch");
@@ -202,7 +207,8 @@ test("repository sync recursively discovers deterministic frontend and backend m
   const recordPath = path.join(directory, `.ai/projects/${project.id}.yaml`);
   const firstRecordContent = await readFile(recordPath, "utf8");
   const registry = skillRegistrySchema.parse(parseYaml(firstRegistryContent));
-  assert.equal(registry.base_skills.length, 7);
+  assert.equal(registry.base_skills.length, 8);
+  assert.ok(registry.base_skills.some((skill) => skill.id === "task-conductor"));
   assert.deepEqual(
     registry.technology_skills.map((skill) => skill.id),
     [
@@ -239,8 +245,13 @@ test("repository sync recursively discovers deterministic frontend and backend m
   }
   const catalog = parseYaml(
     await readFile(path.join(directory, ".ai", "skills", "catalog.yaml"), "utf8"),
-  ) as { readonly skills: readonly unknown[]; readonly sources: readonly unknown[] };
-  assert.equal(catalog.skills.length, 33);
+  ) as {
+    readonly skills: ReadonlyArray<Record<string, unknown>>;
+    readonly sources: readonly unknown[];
+  };
+  assert.equal(catalog.skills.length, 32);
+  assert.ok(catalog.skills.every((skill) => skill["loaded_by_default"] === false));
+  assert.ok(!catalog.skills.some((skill) => skill["id"] === "task-conductor"));
   assert.equal(catalog.sources.length, 4);
   assert.equal(
     await fileSystem.exists(
@@ -497,7 +508,7 @@ test("sync does not materialize technology skills for an unrelated stack", async
     parseYaml(await readFile(path.join(directory, project.skill_registry), "utf8")),
   );
 
-  assert.equal(registry.base_skills.length, 7);
+  assert.equal(registry.base_skills.length, 8);
   assert.deepEqual(registry.technology_skills, []);
   assert.deepEqual(registry.selected_packs, []);
   assert.equal(

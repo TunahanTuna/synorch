@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- A canonical, provider-neutral Task Conductor base skill for dependency-aware decomposition and just-in-time skill routing.
+- Explicit `trivial`, `standard`, and `high-risk` execution tiers in task context contracts.
+
+### Changed
+
+- Scale planning, worker count, verification, and independent review to task risk instead of applying the full workflow to every change.
+- Make headed-browser verification opt-in and require the cheapest sufficient evidence first.
+- Distinguish available catalog skills from active project skills and task-loaded skills; the catalog is no longer scanned during session bootstrap.
+- Move Task Conductor out of the Ingenium snapshot so it has one canonical source of truth.
+
 ### Fixed
 
 - Run the pinned npm 11.19.1 CLI directly so Trusted Publishing is reliable on Node.js 24 runners.

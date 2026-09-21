@@ -103,7 +103,6 @@ const INGENIUM_SKILL_IDS = [
   "session-recap",
   "shader-vfx",
   "tailwind-v4-tokens",
-  "task-conductor",
   "tauri-game-dev",
   "ui-ux-design",
   "vue-modern",

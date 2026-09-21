@@ -17,7 +17,8 @@ test("selects React and TypeScript skills from explicit module evidence", () => 
     "react-modern",
     "frontend-craft",
   ]);
-  assert.equal(resolution.baseSkills.length, 7);
+  assert.equal(resolution.baseSkills.length, 8);
+  assert.ok(resolution.baseSkills.some((skill) => skill.id === "task-conductor"));
   assert.ok(resolution.baseSkills.every((skill) => skill.category === "base"));
   assert.match(resolution.technologySkills[0]?.reasons[0] ?? "", /frontend.*tsconfig\.json/);
   assert.match(resolution.technologySkills[1]?.content ?? "", /name: react-patterns/);

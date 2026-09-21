@@ -869,3 +869,15 @@ The system should be considered successful if:
 - Skills are never auto-deleted. Staleness, non-use and supersession only ever produce a proposal.
 - `doctor` treats contract violations as errors and shape heuristics as warnings; no new CLI command is introduced in the first slice.
 - The observation ledger is Git-tracked while per-task working directories are not, which settles open decision §15.4.
+
+### 2026-09-22 — Canonical content depth
+
+- A measured audit of `syn init` output showed the generated core satisfies roughly a third of the agent and skill contracts defined in §8.1 and §8.2 of this document.
+- Six required elements are satisfied by zero generated files: the skills an agent may use, its expected report format, its completion conditions, and a skill's required inputs, permitted tools and output contract.
+- `task-conductor` is 3 694 bytes while the other seven canonical base skills total 3 021 bytes; an eleven-fold spread inside one category is treated as a defect, and `task-conductor` is adopted as the reference quality standard.
+- Token budget is allocated per load frequency rather than uniformly: the unconditionally loaded entrypoint and constitution hold their current size, while agent manifests and base skills — which load conditionally and only when about to be used — grow to 3KB and 6KB ceilings respectively.
+- Genuine depth beyond those ceilings goes into `references/` files that are fetched only when a procedure step needs them, rather than into the hot path.
+- Skill frontmatter gains a `not_for` negative trigger, and agent frontmatter gains `allowed_skills` and `reports`, so §8.1 and §8.2 become machine-checkable by `doctor` instead of remaining prose.
+- `doctor` treats contract violations as errors and size ceiling overruns as warnings.
+- No new agent roles are introduced; five roles remain sufficient and the work is depth, not breadth.
+- Canonical Agent Manifest v1 and Canonical Skill Contract v1 are shared prerequisites for both this work and the Skill Creator, and are built once before either.

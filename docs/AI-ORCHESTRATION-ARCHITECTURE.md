@@ -853,3 +853,19 @@ The system should be considered successful if:
 - The CI and npm publish workflows use read-only default permissions, pinned action commit SHAs, and a release-tag/version match check.
 - The first npm release is done manually with 2FA; subsequent releases are performed through GitHub Actions via npm Trusted Publishing/OIDC without storing a token.
 - The MIT license, a private security reporting channel, a changelog and human-focused release notes are part of the public distribution contract.
+
+### 2026-09-22 — Skill Creator and the observation ledger
+
+- The system will improve itself by distilling repeatedly confirmed project knowledge into skills, rather than generating skills on first contact with a project.
+- No project skill is generated at bootstrap; the project record already holds verified facts, and generic procedure is already covered by the technology packs.
+- Non-obvious discoveries are recorded as cheap, evidence-carrying observations in `.ai/tasks/observations.yaml`, which is Git-tracked and lives inside the orchestrator's only writable area.
+- An observation is promoted to a proposed skill after three confirmations from distinct task ids; a user correction promotes immediately.
+- Unpromoted observations expire after 90 days or 20 tasks without reconfirmation, so one-off incidents never become procedures.
+- Skill authoring is delegated to an implementer and verified by an independent reviewer; no new agent role is introduced and the orchestrator write boundary is unchanged.
+- `skill-creator` becomes the ninth canonical base skill.
+- Generated skills live in `.ai/skills/project/**`, are never touched by `sync --force`, and carry their evidence, source digests and confirming task ids in frontmatter.
+- Active project skills are capped at twelve, and each `SKILL.md` at 15KB; promotion beyond the cap requires retiring an existing skill first.
+- A generated skill can never hold `constitutional` priority or override a core protocol; `doctor` enforces this as a prompt-injection defense.
+- Skills are never auto-deleted. Staleness, non-use and supersession only ever produce a proposal.
+- `doctor` treats contract violations as errors and shape heuristics as warnings; no new CLI command is introduced in the first slice.
+- The observation ledger is Git-tracked while per-task working directories are not, which settles open decision §15.4.

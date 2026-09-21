@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-09-21
 ### Added
 
 - A canonical, provider-neutral Task Conductor base skill for dependency-aware decomposition and just-in-time skill routing.
@@ -17,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make headed-browser verification opt-in and require the cheapest sufficient evidence first.
 - Distinguish available catalog skills from active project skills and task-loaded skills; the catalog is no longer scanned during session bootstrap.
 - Move Task Conductor out of the Ingenium snapshot so it has one canonical source of truth.
+- Existing 0.1.x structures must be reviewed and regenerated with `syn init --force` followed by `syn sync --force` to adopt the new canonical contracts.
 
 ### Fixed
 
@@ -33,5 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A bundled, provenance-tracked Ingenium skill catalog with on-demand loading rules.
 - Model profiles, orchestration protocols, minimal context packets, verification contracts, and provider adapters.
 
-[Unreleased]: https://github.com/TunahanTuna/synorch/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/TunahanTuna/synorch/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/TunahanTuna/synorch/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/TunahanTuna/synorch/releases/tag/v0.1.0

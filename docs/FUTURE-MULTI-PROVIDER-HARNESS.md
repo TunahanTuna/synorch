@@ -1,57 +1,57 @@
-# Synorch Multi-Provider Agent Harness — Gelecek Vizyonu
+# Synorch Multi-Provider Agent Harness — Future Vision
 
-> Durum: Öneri ve gelecek planı
-> Uygulama durumu: Henüz uygulanmadı
-> Son güncelleme: 2026-09-22
-> İlişkili mevcut belge: [AI Orchestration Architecture](./AI-ORCHESTRATION-ARCHITECTURE.md)
+> Status: Proposal and future plan
+> Implementation status: Not implemented yet
+> Last updated: 2026-09-22
+> Related current document: [AI Orchestration Architecture](./AI-ORCHESTRATION-ARCHITECTURE.md)
 
-## 1. Yönetici Özeti
+## 1. Executive Summary
 
-Synorch bugün Codex ve Claude Code gibi host agent ortamları için provider-bağımsız agent, skill ve protokol yapısı üreten bir Node.js CLI'dır. `inspect`, `init`, `sync` ve `doctor` komutlarıyla bir repository veya workspace içinde orchestration sözleşmeleri kurar ve doğrular. Sürekli çalışan bir agent runtime'ı değildir; model çağrısı yapmaz, provider hesaplarına bağlanmaz ve worker süreçlerini kendisi işletmez.
+Today Synorch is a Node.js CLI that generates provider-neutral agent, skill and protocol structures for host agent environments such as Codex and Claude Code. Through the `inspect`, `init`, `sync` and `doctor` commands, it installs and validates orchestration contracts inside a repository or workspace. It is not a continuously running agent runtime; it makes no model calls, connects to no provider accounts, and does not operate worker processes itself.
 
-Bu belge, Synorch'un ileride dönüşebileceği **multi-provider agent harness** vizyonunu tanımlar. Bu gelecekteki katman; kullanıcının izin verdiği farklı AI provider hesaplarını güvenli biçimde bağlayabilecek, ana orchestrator altında farklı modelleri farklı rollerde çalıştırabilecek, görev durumunu kalıcı olarak tutabilecek ve modeller arası implementasyon–inceleme akışını yönetebilecektir.
+This document defines the **multi-provider agent harness** vision that Synorch could evolve into. That future layer would be able to securely connect the different AI provider accounts the user authorizes, run different models in different roles under a main orchestrator, persist task state, and manage the implementation-to-review flow across models.
 
-Örnek hedef akış:
+An example target flow:
 
 ```text
-Kullanıcı
+User
    │
    ▼
-Ana Orchestrator
-   ├── Provider A / Model X → analiz ve planlama
-   ├── Provider B / Model Y → implementasyon
-   ├── Provider C / Model Z → bağımsız inceleme
-   └── Yerel model          → düşük maliyetli yardımcı işler
+Main Orchestrator
+   ├── Provider A / Model X → analysis and planning
+   ├── Provider B / Model Y → implementation
+   ├── Provider C / Model Z → independent review
+   └── Local model          → low-cost auxiliary work
 ```
 
-Model ve provider adları burada yalnızca örnektir. Gerçek destek, ilgili provider'ın resmî kimlik doğrulama yollarına, kullanım koşullarına ve çalışma anındaki capability keşfine bağlı olacaktır.
+The model and provider names here are examples only. Real support will depend on each provider's official authentication paths, terms of use, and runtime capability discovery.
 
-## 2. Neden Bir Harness?
+## 2. Why a Harness?
 
-Bir model tek başına muhakeme ve üretim yapabilir; fakat güvenilir bir yazılım geliştirme organizasyonu için aşağıdaki işletim sorumlulukları ayrıca gerekir:
+A model on its own can reason and produce; but a reliable software development organization additionally requires the following operational responsibilities:
 
-- Görevi analiz etme ve alt işlere ayırma.
-- Her alt iş için uygun rol ve modeli seçme.
-- Worker'lara yeterli fakat sınırlı context verme.
-- Dosya sahipliği ve izolasyonu yönetme.
-- Görev, deneme ve onay durumunu kalıcı tutma.
-- Timeout, retry, iptal ve hata kurtarma davranışlarını uygulama.
-- Implementasyon ile bağımsız review'u ayırma.
-- Provider kullanımını, kotayı ve maliyeti gözlemleme.
-- Yapılan her önemli kararı ve kanıtı denetlenebilir biçimde kaydetme.
+- Analyzing the work and splitting it into subtasks.
+- Choosing the right role and model for each subtask.
+- Giving workers sufficient but bounded context.
+- Managing file ownership and isolation.
+- Persisting task, attempt and approval state.
+- Implementing timeout, retry, cancellation and error recovery behavior.
+- Separating implementation from independent review.
+- Observing provider usage, quota and cost.
+- Recording every significant decision and piece of evidence in an auditable form.
 
-Bu sorumlulukları üstlenen işletim katmanı **agent harness** olarak adlandırılır.
+The operational layer that takes on these responsibilities is called an **agent harness**.
 
-## 3. Bugünkü Synorch ile İlişkisi
+## 3. Relationship to Today's Synorch
 
-Gelecekteki harness mevcut projeyi geçersiz kılmayacaktır. Bugünkü yapı, harness'in provider-bağımsız sözleşme ve politika çekirdeğini oluşturabilir.
+The future harness will not supersede the current project. Today's structure can form the harness's provider-neutral contract and policy core.
 
 ```text
 Synorch Core
-├── Agent ve skill sözleşmeleri
-├── Task/context/completion packet şemaları
-├── Risk, onay ve doğrulama protokolleri
-└── Provider-bağımsız rol ve capability dili
+├── Agent and skill contracts
+├── Task/context/completion packet schemas
+├── Risk, approval and verification protocols
+└── Provider-neutral role and capability vocabulary
 
 Synorch CLI
 ├── syn inspect
@@ -61,73 +61,73 @@ Synorch CLI
 
 Synorch Harness / Runtime
 ├── Provider authentication
-├── Model ve capability registry
-├── Orchestrator ve worker lifecycle
-├── Task ledger ve scheduler
-├── İzolasyon, review ve recovery
-└── Kullanım, maliyet ve audit kayıtları
+├── Model and capability registry
+├── Orchestrator and worker lifecycle
+├── Task ledger and scheduler
+├── Isolation, review and recovery
+└── Usage, cost and audit records
 
-Opsiyonel Synorch UI
-├── Hesap ve provider bağlantıları
-├── Task görünümü
-├── Approval ve müdahale ekranları
-└── Kullanım ve sağlık panelleri
+Optional Synorch UI
+├── Account and provider connections
+├── Task view
+├── Approval and intervention screens
+└── Usage and health panels
 ```
 
-Kısa vadede CLI hafif ve öngörülebilir kalmalıdır. Runtime aynı repository içinde ayrı bir paket olarak başlayabilir; ürün ve güvenlik sınırları olgunlaştığında ayrı repository kararı yeniden değerlendirilebilir.
+In the short term the CLI must stay lightweight and predictable. The runtime can start as a separate package inside the same repository; once the product and security boundaries mature, the separate-repository decision can be reconsidered.
 
-## 4. Terminoloji
+## 4. Terminology
 
-### Ana orchestrator
+### Main orchestrator
 
-Kullanıcı hedefini alan; analiz, planlama, görev dağıtımı, izleme, review sentezi ve nihai rapordan sorumlu kontrol düzlemi agent'ıdır. Varsayılan olarak ürün dosyalarını doğrudan değiştirmez.
+The control-plane agent that takes the user's goal and is responsible for analysis, planning, task distribution, monitoring, review synthesis and the final report. By default it does not modify product files directly.
 
 ### Worker
 
-Sınırlandırılmış bir görev paketi üzerinde çalışan agent örneğidir. Implementer, explorer, debugger veya reviewer gibi bir role sahip olabilir.
+An agent instance that works on a bounded task packet. It may hold a role such as implementer, explorer, debugger or reviewer.
 
 ### Provider
 
-Bir modele erişim sağlayan servis veya yerel çalışma ortamıdır. OAuth, device-code, API key, kurumsal gateway ya da yerel endpoint gibi farklı kimlik doğrulama biçimleri olabilir.
+A service or local execution environment that provides access to a model. It may have different authentication forms such as OAuth, device-code, API key, an enterprise gateway or a local endpoint.
 
 ### Model
 
-Bir provider üzerinden erişilen muhakeme veya üretim motorudur. Model kimliği, provider kimliğinden ayrı tutulmalıdır.
+A reasoning or generation engine accessed through a provider. The model identity must be kept separate from the provider identity.
 
 ### Harness
 
-Orchestrator ve worker'ların görev, context, araç, kimlik, izolasyon, doğrulama ve lifecycle yönetimini yapan işletim sistemidir.
+The operating system that manages task, context, tool, identity, isolation, verification and lifecycle for orchestrators and workers.
 
 ### Runtime
 
-Harness politikalarını gerçekten çalıştıran, oturumlar arasında durum saklayabilen uzun ömürlü süreç veya servisler bütünüdür.
+The set of long-lived processes or services that actually execute harness policies and can retain state across sessions.
 
-## 5. Hedefler
+## 5. Goals
 
-- Farklı provider'lardaki modelleri tek görev grafiğinde birlikte çalıştırmak.
-- Model adları yerine rol ve capability odaklı yönlendirme yapmak.
-- Kullanıcının mevcut hesaplarını yalnızca resmî ve izinli yöntemlerle bağlamak.
-- Provider değişse bile aynı task ve evidence sözleşmelerini korumak.
-- Ana orchestrator, implementer ve reviewer rollerini birbirinden ayırmak.
-- Görevleri kesinti sonrası devam ettirebilmek.
-- Sessiz fallback yerine görünür ve onaylı recovery uygulamak.
-- Context maliyetini sınırlamak ve yeniden keşfi azaltmak.
-- Her önemli karar, model çağrısı ve dosya değişikliği için audit izi bırakmak.
-- Yerel, uzak veya hibrit deployment seçeneklerini destekleyebilecek sınırlar kurmak.
+- Run models from different providers together in a single task graph.
+- Route by role and capability rather than by model name.
+- Connect the user's existing accounts only through official and authorized methods.
+- Preserve the same task and evidence contracts even when the provider changes.
+- Keep the main orchestrator, implementer and reviewer roles separate from each other.
+- Resume tasks after an interruption.
+- Apply visible and approved recovery instead of silent fallback.
+- Bound context cost and reduce rediscovery.
+- Leave an audit trail for every significant decision, model call and file change.
+- Establish boundaries that can support local, remote or hybrid deployment options.
 
-## 6. Kapsam Dışı Hedefler
+## 6. Non-Goals
 
-İlk sürümlerde aşağıdakiler hedeflenmemelidir:
+The following should not be targeted in the first releases:
 
-- Her provider'ın tüketici aboneliğini destekliyormuş gibi davranmak.
-- Tarayıcı cookie'lerini veya kapalı kimlik doğrulama akışlarını taklit etmek.
-- Provider kullanım koşullarını aşmaya yönelik yöntemler geliştirmek.
-- Kullanıcı onayı olmadan ücretli veya yüksek maliyetli modele geçmek.
-- Modellerin birbirleriyle sınırsız ve denetimsiz konuştuğu bir swarm kurmak.
-- İlk aşamada genel amaçlı bir workflow otomasyon platformuna dönüşmek.
-- Synorch CLI'nin mevcut deterministik scaffold davranışını runtime bağımlılığına bağlamak.
+- Behaving as though every provider's consumer subscription were supported.
+- Imitating browser cookies or closed authentication flows.
+- Developing methods aimed at circumventing provider terms of use.
+- Switching to a paid or high-cost model without user approval.
+- Building a swarm in which models talk to each other without limits or oversight.
+- Turning into a general-purpose workflow automation platform at this first stage.
+- Making the Synorch CLI's current deterministic scaffold behavior depend on the runtime.
 
-## 7. Önerilen Üst Düzey Mimari
+## 7. Proposed High-Level Architecture
 
 ```mermaid
 flowchart TD
@@ -151,46 +151,46 @@ flowchart TD
 
 ### Control flow
 
-Control flow; onay, routing, durum geçişi, retry ve lifecycle kararlarını taşır. Ana orchestrator ve task ledger bu akışın merkezindedir.
+The control flow carries approval, routing, state transition, retry and lifecycle decisions. The main orchestrator and the task ledger sit at the center of this flow.
 
 ### Data flow
 
-Data flow; context packet, diff, test çıktısı, review bulgusu ve diğer artifact'ları taşır. Büyük artifact'lar prompt içine kopyalanmak yerine referansla aktarılmalıdır.
+The data flow carries context packets, diffs, test output, review findings and other artifacts. Large artifacts should be handed over by reference rather than copied into the prompt.
 
-Control flow ile data flow ayrılmalıdır. Credential, task context'inin veya artifact paketinin parçası olmamalıdır.
+Control flow and data flow must be separated. Credentials must not be part of a task context or an artifact package.
 
-## 8. Provider Kimlik Doğrulama ve Credential Güvenliği
+## 8. Provider Authentication and Credential Security
 
-Her provider adapter yalnızca provider'ın resmî olarak desteklediği yöntemleri kullanmalıdır:
+Every provider adapter must use only the methods the provider officially supports:
 
-- OAuth 2.0 veya device-code.
-- Kullanıcının açıkça sağladığı API key.
-- Kurumsal kimlik sağlayıcı veya gateway.
-- Kullanıcının yönettiği yerel endpoint.
+- OAuth 2.0 or device-code.
+- An API key the user explicitly supplies.
+- An enterprise identity provider or gateway.
+- A local endpoint managed by the user.
 
-Credential kuralları:
+Credential rules:
 
-- Token ve secret'lar task ledger'a, loglara veya model context'ine yazılmaz.
-- İşletim sistemi credential vault'u veya eşdeğer şifreli storage kullanılır.
-- Refresh token erişimi en az yetki ilkesiyle sınırlandırılır.
-- Log redaction varsayılan ve test edilmiş olmalıdır.
-- Provider bağlantısı kaldırıldığında ilişkili credential geri alınabilir biçimde silinmelidir.
-- Worker yalnızca kendisi için oluşturulan kısa ömürlü provider handle'ını görmelidir.
-- Credential export varsayılan olarak yasak olmalıdır.
+- Tokens and secrets are never written into the task ledger, the logs or the model context.
+- The operating system credential vault or equivalent encrypted storage is used.
+- Refresh token access is constrained by the principle of least privilege.
+- Log redaction must be the default and must be tested.
+- When a provider connection is removed, the associated credential must be deleted in a recoverable manner.
+- A worker should only see a short-lived provider handle created for it.
+- Credential export should be forbidden by default.
 
-Bir aboneliğin varlığı, üçüncü taraf kullanım hakkı anlamına gelmez. Capability keşfi şu ayrımı açıkça göstermelidir:
+The existence of a subscription does not imply a third-party right of use. Capability discovery must make the following distinction explicit:
 
-| Erişim türü | Örnek durum | Harness davranışı |
+| Access type | Example situation | Harness behavior |
 |---|---|---|
-| Resmî OAuth/device-code | Provider açıkça destekliyor | Kullanıcı onayıyla bağlanabilir |
-| Resmî API key | Kullanıcı anahtar sağlıyor | Ayrı billing ve kota gösterilir |
-| Tüketici aboneliği belirsiz | Plan kapsamı belgelenmemiş | Destek varsayılmaz, açık uyarı gösterilir |
-| Kapalı/tersine mühendislik akışı | Resmî destek yok | Kullanılmaz |
-| Yerel model | Kullanıcı endpoint'i yönetiyor | Sağlık ve capability probe uygulanır |
+| Official OAuth/device-code | The provider explicitly supports it | Can be connected with user approval |
+| Official API key | The user supplies a key | Separate billing and quota are shown |
+| Consumer subscription unclear | The plan's coverage is undocumented | Support is not assumed; an explicit warning is shown |
+| Closed/reverse-engineered flow | No official support | Not used |
+| Local model | The user manages the endpoint | Health and capability probes are applied |
 
 ## 9. Provider Adapter Contract
 
-Her adapter ortak bir sözleşmeyi uygulamalıdır:
+Every adapter must implement a common contract:
 
 ```yaml
 provider_id: provider-a
@@ -206,7 +206,7 @@ capabilities:
   session_resume: unsupported
 ```
 
-Adapter en az şu operasyonları tanımlamalıdır:
+An adapter must define at least the following operations:
 
 - `authenticate`
 - `refreshAuthentication`
@@ -218,27 +218,27 @@ Adapter en az şu operasyonları tanımlamalıdır:
 - `readUsage`
 - `revokeAuthentication`
 
-Her capability `supported`, `degraded` veya `unsupported` olarak raporlanmalıdır. Desteklenmeyen özellik varmış gibi taklit edilmemelidir.
+Every capability must be reported as `supported`, `degraded` or `unsupported`. An unsupported feature must not be imitated as though it existed.
 
-## 10. Model ve Capability Registry
+## 10. Model and Capability Registry
 
-Routing kararı yalnızca model adına bakmamalıdır. Registry çalışma anında şu gerçekleri tutmalıdır:
+A routing decision must not look at the model name alone. At runtime the registry must hold the following facts:
 
-- Provider ve model kimliği.
-- Context kapasitesi.
-- Tool calling ve structured output desteği.
-- Kodlama, review, görüntü veya uzun-context gibi doğrulanmış capability'ler.
-- Latency ve maliyet sınıfı.
-- Rate limit ve kalan kota bilgisi mevcutsa onun özeti.
-- Kimlik doğrulama sağlığı.
-- Veri yerleşimi ve kurumsal politika etiketleri.
-- Son doğrulama zamanı ve evidence kaynağı.
+- Provider and model identity.
+- Context capacity.
+- Tool calling and structured output support.
+- Verified capabilities such as coding, review, vision or long context.
+- Latency and cost class.
+- Rate limit and, where available, a summary of remaining quota.
+- Authentication health.
+- Data residency and enterprise policy labels.
+- Last verification time and the evidence source.
 
-Statik config yalnızca tercih bildirir. Gerçek kullanılabilirlik capability probe ile doğrulanmalıdır.
+Static config only expresses a preference. Actual availability must be verified with a capability probe.
 
-## 11. Rol Bazlı Model Yönlendirme
+## 11. Role-Based Model Routing
 
-Canonical politika model adı yerine ihtiyacı tarif etmelidir:
+The canonical policy must describe the need rather than the model name:
 
 ```yaml
 roles:
@@ -253,50 +253,50 @@ roles:
     requires: [low_latency]
 ```
 
-Router şu sırayla karar vermelidir:
+The router must decide in the following order:
 
-1. Kullanıcının açık provider/model seçimi.
-2. Güvenlik, veri yerleşimi ve görev politikaları.
-3. Rolün zorunlu capability'leri.
-4. Provider sağlık ve kota durumu.
-5. Kullanıcı tarafından belirlenen maliyet/latency tercihleri.
-6. Açıklanabilir tie-break kuralı.
+1. The user's explicit provider/model choice.
+2. Security, data residency and task policies.
+3. The role's mandatory capabilities.
+4. Provider health and quota status.
+5. Cost/latency preferences set by the user.
+6. An explainable tie-break rule.
 
-Seçilen model kullanılamıyorsa sessiz fallback yapılmaz. Harness nedeni, alternatifleri ve maliyet etkisini göstererek kullanıcı onayı ister.
+If the chosen model is unavailable, no silent fallback occurs. The harness asks for user approval while showing the reason, the alternatives and the cost impact.
 
-## 12. Cross-Provider Implementasyon ve Review Örneği
+## 12. Cross-Provider Implementation and Review Example
 
 ```text
-1. Ana orchestrator görevi ve kabul kriterlerini oluşturur.
-2. Router coding capability'si uygun olan implementer'ı seçer.
-3. Implementer izole çalışma alanında değişikliği yapar.
-4. Harness diff, komut ve test kanıtlarını completion packet'a bağlar.
-5. Router mümkünse farklı provider'dan bağımsız reviewer seçer.
-6. Reviewer plan, diff ve kanıtları inceler.
-7. Bulgular varsa orchestrator yeni bir delta packet üretir.
-8. Implementer düzeltir; reviewer yalnız gerekli alanı yeniden kontrol eder.
-9. Ana orchestrator kabul kriterlerini sentezleyip kullanıcıya raporlar.
+1. The main orchestrator creates the task and the acceptance criteria.
+2. The router selects an implementer with suitable coding capability.
+3. The implementer makes the change in an isolated workspace.
+4. The harness attaches diff, command and test evidence to the completion packet.
+5. Where possible, the router selects an independent reviewer from a different provider.
+6. The reviewer examines the plan, the diff and the evidence.
+7. If there are findings, the orchestrator produces a new delta packet.
+8. The implementer fixes them; the reviewer re-checks only the necessary area.
+9. The main orchestrator synthesizes the acceptance criteria and reports to the user.
 ```
 
-Farklı provider kullanımı bağımsızlığı güçlendirebilir, fakat tek başına kalite garantisi değildir. Reviewer'ın ayrı context, görev ve kanıt sözleşmesine sahip olması gerekir.
+Using different providers can strengthen independence, but on its own it is not a quality guarantee. The reviewer must have its own separate context, task and evidence contract.
 
-## 13. Task Ledger ve Durum Makinesi
+## 13. The Task Ledger and State Machine
 
-Runtime görevleri yalnız sohbet geçmişinde tutmamalıdır. Kalıcı task ledger en az şu bilgileri içermelidir:
+The runtime must not keep tasks only in the conversation history. A persistent task ledger must contain at least the following:
 
-- Task, run ve attempt kimlikleri.
-- Kullanıcı hedefi ve onaylanmış plan sürümü.
-- Risk seviyesi.
-- Görev bağımlılık grafiği.
-- Atanmış rol, provider ve model.
-- Owned, readable ve forbidden path'ler.
-- Context packet sürümü ve digest'i.
-- Approval kayıtları.
-- Artifact ve evidence referansları.
-- Retry, timeout ve failure nedeni.
-- Kullanım ve maliyet özeti.
+- Task, run and attempt identifiers.
+- The user goal and the approved plan version.
+- The risk level.
+- The task dependency graph.
+- The assigned role, provider and model.
+- Owned, readable and forbidden paths.
+- The context packet version and digest.
+- Approval records.
+- Artifact and evidence references.
+- Retry, timeout and failure reasons.
+- A usage and cost summary.
 
-Önerilen lifecycle:
+The proposed lifecycle:
 
 ```text
 DRAFT
@@ -317,263 +317,263 @@ RUNNING
           └── COMPLETED
 ```
 
-Her durum geçişi aktör, zaman, neden ve önceki state ile kaydedilmelidir.
+Every state transition must be recorded with its actor, time, reason and previous state.
 
-## 14. Context, Completion ve Review Packet'ları
+## 14. Context, Completion and Review Packets
 
-Provider'lar arasında ortak dil olarak typed packet'lar kullanılmalıdır.
+Typed packets must be used as the common language between providers.
 
 ### Task context packet
 
-- Objective ve rationale.
-- Risk seviyesi ve onay referansı.
+- Objective and rationale.
+- Risk level and approval reference.
 - Owned/read/forbidden scope.
-- Kaynak ve revision içeren doğrulanmış gerçekler.
-- İlgili semboller ve artifact referansları.
-- Kabul kriterleri.
-- Doğrulama komutları.
+- Verified facts including source and revision.
+- Relevant symbols and artifact references.
+- Acceptance criteria.
+- Verification commands.
 - Non-goals.
-- Stop ve escalation koşulları.
+- Stop and escalation conditions.
 
 ### Worker completion packet
 
-- Durum ve kısa özet.
-- Değişen dosyalar.
-- Alınan kararlar.
-- Çalıştırılan komutlar ve exit code'lar.
-- Her kabul kriteri için evidence.
-- Atlanan kontroller ve gerekçeleri.
-- Kalan riskler.
+- Status and a short summary.
+- Changed files.
+- Decisions taken.
+- Commands run and their exit codes.
+- Evidence for every acceptance criterion.
+- Skipped checks and the reasons for skipping them.
+- Remaining risks.
 
 ### Review packet
 
-- İncelenen plan, diff ve evidence digest'leri.
-- Reviewer provider/model ve bağımsızlık bilgisi.
-- Severity sınıflı bulgular.
-- Her bulgu için dosya, konum, etki ve öneri.
-- Kabul, değişiklik talebi veya bloke kararı.
+- The digests of the reviewed plan, diff and evidence.
+- Reviewer provider/model and independence information.
+- Findings classified by severity.
+- File, location, impact and recommendation for every finding.
+- The accept, request-changes or block decision.
 
-Büyük konuşma geçmişleri worker'lara kopyalanmamalıdır. Follow-up görevleri tam paket yerine versioned delta packet kullanmalıdır.
+Large conversation histories must not be copied to workers. Follow-up tasks must use a versioned delta packet instead of the full packet.
 
-## 15. İzolasyon ve Paralellik
+## 15. Isolation and Parallelism
 
-Önerilen başlangıç politikası:
+The proposed initial policy:
 
-- Tek dosya ağacında yalnız ayrık ownership'e sahip işler paralel çalışır.
-- Aynı dosya veya ortak generated artifact üzerinde işler serialize edilir.
-- Geniş, yüksek riskli veya çakışma ihtimali bulunan işler worktree/izole checkout kullanır.
-- Bir integration owner, worker sonuçlarını hedef branch'e taşır.
-- Worker başka worker'ın değişikliğini geri alamaz.
-- Ownership ihlali otomatik olarak durdurulur ve orchestrator'a yükseltilir.
+- Within a single file tree, only work with disjoint ownership runs in parallel.
+- Work on the same file or on a shared generated artifact is serialized.
+- Broad, high-risk work, or work with a chance of conflict, uses a worktree/isolated checkout.
+- An integration owner moves worker results onto the target branch.
+- A worker cannot revert another worker's change.
+- An ownership violation is stopped automatically and escalated to the orchestrator.
 
-Provider worktree desteklemiyorsa capability `degraded` olmalı ve daha güvenli seri çalışma uygulanmalıdır.
+If a provider does not support worktrees, the capability must be `degraded` and safer serial execution must be applied.
 
-## 16. Approval, Retry, Timeout ve Fallback
+## 16. Approval, Retry, Timeout and Fallback
 
 ### Approval
 
-Kullanıcı onayı en az şu durumlarda gereklidir:
+User approval is required at least in the following cases:
 
-- Planın uygulamaya geçmesi.
-- Yeni ücretli provider veya daha pahalı model kullanımı.
-- Destructive işlem.
-- Credential veya dış sisteme yazma.
-- Plan dışı scope genişlemesi.
-- Sessiz olmayan model/provider değişikliği.
+- Moving a plan into execution.
+- Using a new paid provider or a more expensive model.
+- A destructive operation.
+- Writing to a credential or an external system.
+- Scope expansion beyond the plan.
+- A non-silent model/provider change.
 
 ### Retry
 
-Retry yalnızca materially changed bir hipotez veya talimatla yapılır. Aynı prompt'u sınırsız tekrar etmek yasaktır. Attempt sayısı ve maliyeti ledger'da görünmelidir.
+A retry is performed only with a materially changed hypothesis or instruction. Repeating the same prompt indefinitely is forbidden. The attempt count and its cost must be visible in the ledger.
 
-### Timeout ve cancellation
+### Timeout and cancellation
 
-Harness provider isteğini iptal edebilmeli, worker state'ini kapatmalı ve üretilmiş kısmi artifact'ları işaretlemelidir. İptal edilmiş çıktı tamamlanmış kanıt olarak kullanılamaz.
+The harness must be able to cancel a provider request, close down the worker state and mark the partial artifacts that were produced. Cancelled output cannot be used as completed evidence.
 
 ### Fallback
 
-Fallback politikası kullanıcı tarafından açıkça tanımlanır. Varsayılan davranış sessiz provider/model değişimi değil, durup açıklama ve onay istemektir.
+The fallback policy is defined explicitly by the user. The default behavior is not a silent provider/model switch, but stopping to explain and ask for approval.
 
-## 17. Kullanım, Kota ve Maliyet
+## 17. Usage, Quota and Cost
 
-Farklı provider'lar kullanım bilgisini farklı ayrıntıda sunabilir. Harness şu ayrımı korumalıdır:
+Different providers may expose usage information at different levels of detail. The harness must preserve the following distinction:
 
-- Provider'ın doğruladığı token/maliyet verisi.
-- Harness'in tahmini kullanım verisi.
-- Abonelik içinde olduğu varsayılan fakat doğrulanamayan kullanım.
+- Token/cost data verified by the provider.
+- Usage data estimated by the harness.
+- Usage assumed to be within a subscription but not verifiable.
 
-Tahminler gerçek fatura gibi gösterilmemelidir. Kullanıcı görev veya provider bazında bütçe sınırı belirleyebilmelidir. Bütçe aşıldığında yeni çağrı başlatılmamalı ve aktif çağrıların davranışı açık politika ile belirlenmelidir.
+Estimates must not be presented as an actual bill. The user must be able to set a budget limit per task or per provider. When the budget is exceeded, no new call should be started, and the behavior of active calls must be determined by an explicit policy.
 
-## 18. Auditability ve Observability
+## 18. Auditability and Observability
 
-Her run için şu kayıtlar erişilebilir olmalıdır:
+For every run, the following records must be accessible:
 
-- Hangi kararın kim tarafından verildiği.
-- Hangi provider/modelin neden seçildiği.
-- Gönderilen packet'ın digest'i.
-- Tool ve dosya erişim özeti.
-- Üretilen artifact'lar.
-- Test ve review kanıtları.
-- Retry, fallback ve approval olayları.
-- Süre, kullanım ve maliyet bilgisi.
+- Which decision was made by whom.
+- Which provider/model was chosen and why.
+- The digest of the packet that was sent.
+- A summary of tool and file access.
+- The artifacts produced.
+- Test and review evidence.
+- Retry, fallback and approval events.
+- Duration, usage and cost information.
 
-Loglar secret, token veya gereksiz kullanıcı içeriği taşımamalıdır. Ayrıntılı tracing opt-in olabilir; temel audit izi varsayılan olmalıdır.
+Logs must not carry secrets, tokens or unnecessary user content. Detailed tracing may be opt-in; a basic audit trail must be the default.
 
-## 19. Tehdit Modeli
+## 19. Threat Model
 
-İlk güvenlik tasarımı en az şu riskleri kapsamalıdır:
+The initial security design must cover at least the following risks:
 
-- Credential sızıntısı.
-- Prompt injection ile başka provider veya tool'a yetkisiz erişim.
-- Worker'ın ownership dışına yazması.
-- Kötü niyetli repository talimatlarının constitutional kuralları aşması.
-- Log veya artifact üzerinden secret taşınması.
-- Provider endpoint spoofing ve SSRF.
-- Model çıktısının doğrudan shell komutu olarak güvenilmesi.
-- Supply-chain kaynaklı skill/plugin manipülasyonu.
-- Reviewer ve implementer'ın aynı kirli context'i paylaşması.
-- Bütçe tüketen sonsuz retry veya agent döngüsü.
+- Credential leakage.
+- Unauthorized access to another provider or tool through prompt injection.
+- A worker writing outside its ownership.
+- Malicious repository instructions overriding constitutional rules.
+- Secrets being carried through logs or artifacts.
+- Provider endpoint spoofing and SSRF.
+- Trusting model output directly as a shell command.
+- Supply-chain-sourced skill/plugin manipulation.
+- The reviewer and the implementer sharing the same tainted context.
+- Budget-consuming infinite retry or agent loops.
 
-Savunmalar arasında credential isolation, allowlist, sandbox, path sınırları, approval gates, signed/digested artifact'lar, maksimum attempt sayısı ve immutable audit kayıtları bulunmalıdır.
+Defenses must include credential isolation, allowlists, sandboxing, path boundaries, approval gates, signed/digested artifacts, a maximum attempt count and immutable audit records.
 
-## 20. Deployment Seçenekleri
+## 20. Deployment Options
 
-### Yerel runtime
+### Local runtime
 
-Tek geliştiricinin makinesinde çalışır. Credential kontrolü ve repository erişimi basittir; cihaz kapandığında görevler durur.
+Runs on a single developer's machine. Credential control and repository access are simple; tasks stop when the device shuts down.
 
-### Yerel daemon ve UI
+### Local daemon and UI
 
-Arka planda çalışan servis, CLI ve masaüstü/web arayüzü sunar. Uzun süren görevler ve bildirimler için uygundur.
+A service running in the background, offering a CLI and a desktop/web interface. Suitable for long-running tasks and notifications.
 
 ### Self-hosted server
 
-Ekip kullanımı, merkezi policy ve shared queue sağlar. Multi-tenant izolasyon ve secret yönetimi daha yüksek güvenlik gerektirir.
+Provides team usage, central policy and a shared queue. Multi-tenant isolation and secret management require a higher level of security.
 
-### Hibrit model
+### Hybrid model
 
-Control plane sunucuda; repository ve tool execution yerel runner'da olabilir. Kurumsal veri yerleşimi için değerlidir fakat protokol ve kimlik tasarımını zorlaştırır.
+The control plane can live on a server while the repository and tool execution live on a local runner. Valuable for enterprise data residency, but it complicates protocol and identity design.
 
-İlk deneysel runtime için yerel çalışma önerilir. Multi-user cloud hizmeti ilk aşama hedefi olmamalıdır.
+Local execution is recommended for the first experimental runtime. A multi-user cloud service should not be a first-stage goal.
 
-## 21. Hermes Agent ile İlişki
+## 21. Relationship to Hermes Agent
 
-Hermes Agent; provider yapılandırma, model seçimi, OAuth/API bağlantıları ve agent çalışma deneyimi açısından önemli bir ilham kaynağıdır. Synorch'un önerilen farklılaşması şunlardır:
+Hermes Agent is an important source of inspiration in terms of provider configuration, model selection, OAuth/API connections and the agent working experience. Synorch's proposed differentiation is:
 
-- Yazılım geliştirme görevleri için açık orchestrator/worker/reviewer rolleri.
-- Provider-neutral typed task ve evidence packet'ları.
-- Risk-orantılı bağımsız review.
-- Dosya ownership ve worktree izolasyonu.
-- Repository-aware discovery ve skill activation.
-- No-silent-fallback ve approval-first routing.
-- CLI scaffold ile runtime sözleşmelerinin aynı core'u paylaşması.
+- Explicit orchestrator/worker/reviewer roles for software development tasks.
+- Provider-neutral typed task and evidence packets.
+- Risk-proportional independent review.
+- File ownership and worktree isolation.
+- Repository-aware discovery and skill activation.
+- No-silent-fallback and approval-first routing.
+- The CLI scaffold and the runtime contracts sharing the same core.
 
-Bu belge Hermes uyumluluğu veya mevcut Hermes özelliklerinin yeniden uygulanacağı taahhüdü değildir. Uygulama öncesinde ilgili projelerin lisansları, güncel dokümanları ve provider kullanım koşulları ayrıca incelenmelidir.
+This document is not a commitment to Hermes compatibility or to reimplementing existing Hermes features. Before implementation, the licenses of the relevant projects, their current documentation, and provider terms of use must be reviewed separately.
 
-## 22. Aşamalı Yol Haritası
+## 22. Phased Roadmap
 
-### Aşama 0 — Contract foundation
+### Phase 0 — Contract foundation
 
 - Canonical Agent Manifest v1.
 - Canonical Skill Contract v1.
-- Task Context, Completion ve Review Packet v2.
-- Agent ve protocol registry.
-- Provider capability sözlüğü.
-- `doctor` için contract doğrulama ve negatif testler.
+- Task Context, Completion and Review Packet v2.
+- Agent and protocol registry.
+- A provider capability vocabulary.
+- Contract validation and negative tests for `doctor`.
 
-Çıkış kriteri: Runtime olmadan da bütün canonical sözleşmeler generated projede tutarlı ve makine tarafından doğrulanabilir olmalıdır.
+Exit criterion: Even without a runtime, all canonical contracts must be consistent and machine-verifiable in the generated project.
 
-### Aşama 1 — Yerel tek-provider harness prototipi
+### Phase 1 — Local single-provider harness prototype
 
-- Tek provider adapter.
-- Yerel task ledger.
-- Bir orchestrator ve bir worker lifecycle'ı.
-- Approval, cancellation ve timeout.
-- Artifact store ve temel audit log.
+- A single provider adapter.
+- A local task ledger.
+- One orchestrator and one worker lifecycle.
+- Approval, cancellation and timeout.
+- An artifact store and a basic audit log.
 
-Çıkış kriteri: Tek görev kesinti sonrası devam edebilmeli ve her durum geçişi açıklanabilmelidir.
+Exit criterion: A single task must be able to resume after an interruption, and every state transition must be explainable.
 
-### Aşama 2 — Multi-provider routing
+### Phase 2 — Multi-provider routing
 
-- En az iki resmî provider adapter.
+- At least two official provider adapters.
 - Capability discovery.
-- Rol bazlı model routing.
-- Cross-provider implementer/reviewer akışı.
-- Kota ve kullanım görünürlüğü.
+- Role-based model routing.
+- The cross-provider implementer/reviewer flow.
+- Quota and usage visibility.
 
-Çıkış kriteri: Bir provider'da implementasyon, diğerinde bağımsız review kullanıcı tarafından görünür routing kararıyla tamamlanabilmelidir.
+Exit criterion: Implementation on one provider and independent review on another must be completable with a routing decision that is visible to the user.
 
-### Aşama 3 — İzolasyon ve recovery
+### Phase 3 — Isolation and recovery
 
-- Worktree veya eşdeğer sandbox yönetimi.
+- Worktree or equivalent sandbox management.
 - Ownership enforcement.
-- Retry ve delta-context akışı.
+- Retry and delta-context flows.
 - Worker crash recovery.
-- Stale context ve artifact digest kontrolleri.
+- Stale context and artifact digest checks.
 
-Çıkış kriteri: Paralel worker'lar birbirlerinin değişikliklerini bozamamalı; yarım kalan görev kontrollü biçimde devam edebilmelidir.
+Exit criterion: Parallel workers must not be able to corrupt each other's changes; an unfinished task must be able to continue in a controlled way.
 
-### Aşama 4 — Yerel dashboard
+### Phase 4 — Local dashboard
 
-- Provider bağlantı durumu.
-- Task DAG ve worker görünümü.
-- Approval ve intervention ekranları.
-- Maliyet, kota ve audit paneli.
+- Provider connection status.
+- Task DAG and worker views.
+- Approval and intervention screens.
+- Cost, quota and audit panels.
 
-Çıkış kriteri: Kullanıcı terminal logu okumadan aktif görevleri ve bekleyen kararları anlayabilmelidir.
+Exit criterion: The user must be able to understand active tasks and pending decisions without reading terminal logs.
 
-### Aşama 5 — Ekip ve uzak runner araştırması
+### Phase 5 — Team and remote runner research
 
 - Multi-user authorization.
-- Merkezi policy.
-- Uzak ve yerel runner protokolü.
-- Kurumsal secret ve data-residency entegrasyonları.
+- Central policy.
+- A remote and local runner protocol.
+- Enterprise secret and data-residency integrations.
 
-Bu aşama, yerel runtime güvenilirliği kanıtlanmadan başlatılmamalıdır.
+This phase must not be started before local runtime reliability has been proven.
 
-## 23. Başarı Ölçütleri
+## 23. Success Criteria
 
-- Kullanıcı bir görev için orchestrator, implementer ve reviewer rollerini farklı provider'lara atayabilir.
-- Her atama capability ve policy kanıtıyla açıklanabilir.
-- Provider kullanılamadığında sessiz fallback gerçekleşmez.
-- Görev kesintiden sonra ledger üzerinden devam edebilir.
-- Worker yalnızca atanmış dosya ve araç kapsamına erişebilir.
-- Her kabul kriteri bir evidence kaydıyla eşleştirilir.
-- Reviewer implementer'dan bağımsız packet ve context alır.
-- Credential hiçbir task, prompt, log veya artifact içinde görünmez.
-- Kullanıcı provider, görev ve run bazında kullanım/maliyet durumunu görebilir.
-- Mevcut Synorch CLI runtime kurulmadan çalışmaya devam eder.
+- The user can assign the orchestrator, implementer and reviewer roles of a task to different providers.
+- Every assignment can be explained with capability and policy evidence.
+- No silent fallback occurs when a provider is unavailable.
+- A task can resume through the ledger after an interruption.
+- A worker can access only its assigned file and tool scope.
+- Every acceptance criterion is matched to an evidence record.
+- The reviewer receives a packet and context independent of the implementer.
+- Credentials never appear inside any task, prompt, log or artifact.
+- The user can see usage/cost status per provider, task and run.
+- The existing Synorch CLI keeps working without a runtime installed.
 
-## 24. Açık Kararlar
+## 24. Open Decisions
 
-Uygulama başlamadan önce şu kararlar ayrıca kayda bağlanmalıdır:
+Before implementation begins, the following decisions must additionally be put on record:
 
-1. Runtime aynı monorepo içinde ayrı paket mi, ayrı repository mi olacak?
-2. Ana orchestrator yerel süreç mi, provider-hosted agent mı olacak?
-3. Task ledger için ilk kalıcı storage biçimi nedir?
-4. Credential vault için platformlar arası minimum sözleşme nedir?
-5. Worktree hangi risk seviyesinde zorunlu olacaktır?
-6. Debugger kod yazabilen worker mı, yalnız RCA üreten rol mü olacaktır?
-7. Reviewer için farklı provider zorunluluğu mu, tercih mi olacaktır?
-8. Kullanım ve bütçe sınırı provider verisi eksikken nasıl uygulanacaktır?
-9. Hangi provider'lar ilk resmî adapter setine alınacaktır?
-10. UI, runtime ile aynı süreçte mi, ayrı istemci olarak mı çalışacaktır?
+1. Will the runtime be a separate package inside the same monorepo, or a separate repository?
+2. Will the main orchestrator be a local process or a provider-hosted agent?
+3. What is the initial persistent storage format for the task ledger?
+4. What is the minimum cross-platform contract for the credential vault?
+5. At which risk level will a worktree become mandatory?
+6. Will the debugger be a worker that can write code, or a role that only produces an RCA?
+7. Will a different provider be mandatory for the reviewer, or merely preferred?
+8. How will usage and budget limits be enforced while provider data is missing?
+9. Which providers will be included in the first official adapter set?
+10. Will the UI run in the same process as the runtime, or as a separate client?
 
-## 25. Mevcut Repository İçin Hazırlık Backlog'u
+## 25. Preparation Backlog for the Current Repository
 
-Harness geliştirmesine başlamadan önce mevcut Synorch çekirdeğinde şu işler önerilir:
+Before harness development begins, the following work is recommended on the current Synorch core:
 
-- Agent manifestlerini amaç, yetki, input, output, escalation ve completion sözleşmeleriyle derinleştirmek.
-- Skill'ler için makine tarafından doğrulanabilir canonical contract oluşturmak.
-- Agent registry eklemek ve `assigned_role` değerlerini registry'ye bağlamak.
-- Context ve completion packet dokümanlarıyla JSON Schema'ları tek kaynağa indirmek.
-- Review packet ve task ledger şemalarını eklemek.
-- Provider adapter capability sözleşmesini canonical hâle getirmek.
-- `doctor` kapsamını agent, protocol, provider adapter ve schema bütünlüğüne genişletmek.
-- Trivial, standard, high-risk, needs-context, retry ve overlapping-ownership senaryoları için contract testleri yazmak.
-- Mevcut mimari belgede uygulanmış davranışlar ile gelecek kararlarını açıkça ayırmak.
+- Deepen the agent manifests with purpose, authority, input, output, escalation and completion contracts.
+- Create a machine-verifiable canonical contract for skills.
+- Add an agent registry and bind the `assigned_role` values to that registry.
+- Collapse the context and completion packet documents and their JSON Schemas into a single source.
+- Add the review packet and task ledger schemas.
+- Make the provider adapter capability contract canonical.
+- Extend `doctor`'s scope to agent, protocol, provider adapter and schema integrity.
+- Write contract tests for the trivial, standard, high-risk, needs-context, retry and overlapping-ownership scenarios.
+- Explicitly separate implemented behavior from future decisions in the current architecture document.
 
-## 26. Sonuç
+## 26. Conclusion
 
-Önerilen multi-provider harness, Synorch'un bugünkü CLI kapsamından önemli ölçüde daha büyük bir üründür. Bununla birlikte mevcut provider-neutral sözleşme yaklaşımı, progressive disclosure, risk-orantılı doğrulama ve orchestrator/worker ayrımı bu gelecekteki sistem için doğru bir temel sunmaktadır.
+The proposed multi-provider harness is a significantly larger product than Synorch's current CLI scope. That said, the existing provider-neutral contract approach, progressive disclosure, risk-proportional verification and the orchestrator/worker separation offer a correct foundation for that future system.
 
-Önerilen yol, mevcut CLI'yi doğrudan uzun ömürlü runtime'a dönüştürmek değil; önce ortak core sözleşmelerini güçlendirmek, ardından aynı sözleşmeleri tüketen ayrı bir yerel harness katmanı geliştirmektir. Böylece Synorch hem hafif bir project bootstrap aracı olarak kalabilir hem de ileride farklı provider'lardaki modelleri tek bir güvenilir geliştirme organizasyonunda birleştiren çalışma motoruna dönüşebilir.
+The recommended path is not to convert the current CLI directly into a long-lived runtime, but first to strengthen the shared core contracts and then to develop a separate local harness layer that consumes those same contracts. That way Synorch can both remain a lightweight project bootstrap tool and later become a working engine that unites models from different providers into a single reliable development organization.

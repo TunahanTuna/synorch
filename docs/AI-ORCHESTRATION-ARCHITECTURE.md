@@ -1,51 +1,51 @@
-# Synorch — Mimari ve Uygulanan Yapı
+# Synorch — Architecture and Implemented Structure
 
-> Durum: Çalıştırılabilir çekirdek uygulanmış durumda
-> Son güncelleme: 2026-09-20  
-> Amaç: Codex ve Claude Code üzerinde çalışan, orchestrator merkezli, agent/skill/protokol tabanlı ve token-verimli bir geliştirme organizasyonu kurmak.
+> Status: The executable core is implemented
+> Last updated: 2026-09-20
+> Purpose: Establish an orchestrator-centric, agent/skill/protocol-based and token-efficient development organization that runs on Codex and Claude Code.
 
-## 1. Ürün Tanımı
+## 1. Product Definition
 
-Bu proje bir model runtime'ı, sürekli çalışan agent harness'i veya alternatif bir coding assistant değildir.
+This project is not a model runtime, a continuously running agent harness, or an alternative coding assistant.
 
-Ürün adı **Synorch**'tur. NPM paket adı `synorch`, birincil terminal komutu `syn`, keşfedilebilir uzun executable alias'ı ise `synorch` olarak tanımlanır.
+The product name is **Synorch**. The NPM package name is `synorch`, the primary terminal command is `syn`, and the discoverable long executable alias is `synorch`.
 
-Ürün; boş bir klasöre, mevcut bir repository'ye veya birden fazla repository içeren workspace'e çalıştırıldığında AI geliştirme çalışma sistemini kuran bir CLI'dır. Kurulumdan sonra günlük geliştirme doğrudan Codex veya Claude Code üzerinden devam eder.
+The product is a CLI that, when run against an empty folder, an existing repository, or a workspace containing multiple repositories, installs an AI development working system. After installation, day-to-day development continues directly inside Codex or Claude Code.
 
-CLI'nin sorumlulukları:
+Responsibilities of the CLI:
 
-- Provider'dan bağımsız agent, skill ve protokol tanımlarını kurmak.
-- Bu tanımları Codex ve Claude Code'un desteklediği yapılara uyarlamak.
-- Boş klasör, mevcut repository ve çoklu-repository workspace senaryolarını desteklemek.
-- Manuel tetiklenen keşif/senkronizasyon işlemleriyle yeni repository'leri sisteme kaydetmek.
-- Yapının tutarlılığını ve provider kabiliyetlerini denetlemek.
+- Install provider-neutral agent, skill and protocol definitions.
+- Adapt those definitions to the structures Codex and Claude Code support.
+- Support the empty-folder, existing-repository and multi-repository workspace scenarios.
+- Register new repositories into the system through manually triggered discovery/synchronization operations.
+- Audit the consistency of the structure and the provider capabilities.
 
-CLI'nin sorumluluğunda olmayanlar:
+What the CLI is not responsible for:
 
-- Geliştirme sırasında sürekli çalışan bir orchestration runtime'ı olmak.
-- Kendi model konuşma döngüsünü veya tool-calling altyapısını işletmek.
-- Kullanıcı istemeden proje mimarisi, framework veya teknoloji seçmek.
-- Boş klasörde hayali proje bilgileri üretmek.
-- Codex veya Claude Code'un desteklemediği özellikleri yalnızca prompt dosyalarıyla varmış gibi göstermek.
+- Being an orchestration runtime that runs continuously during development.
+- Operating its own model conversation loop or tool-calling infrastructure.
+- Choosing a project architecture, framework or technology without the user asking.
+- Fabricating imaginary project information in an empty folder.
+- Presenting features that Codex or Claude Code do not support as if they existed, using prompt files alone.
 
-## 2. Temel Tasarım İlkeleri
+## 2. Core Design Principles
 
-1. **Tek karar merkezi:** Kullanıcı yalnızca orchestrator ile iletişim kurar.
-2. **Orchestrator kod yazmaz:** Analiz, planlama, delegasyon, izleme ve nihai karar orchestrator'a; uygulama worker agent'lara aittir.
-3. **Her iş planlanır:** Uygulama başlamadan önce analiz ve kullanıcıya sunulan bir plan bulunur.
-4. **Kanıta dayalı çalışma:** Bilinmeyen bilgiler tahmin edilmez; gerçekler kaynaklarıyla kaydedilir.
-5. **Progressive disclosure:** Bir agent yalnızca görevi için gerekli talimat ve context'i alır.
-6. **Yeniden keşfi önleme:** Worker'lara göreve özel, kaynak gösteren bir context paketi aktarılır.
-7. **Bağımsız doğrulama:** Implementasyonu yapan agent kendi işinin tek nihai denetçisi olamaz.
-8. **Provider bağımsız çekirdek:** Roller ve protokoller ortak tanımlanır; Codex ve Claude Code için adapter'lar üretilir.
-9. **Maliyet bilinçli model seçimi:** Güçlü model yalnızca güçlü muhakeme gerektiğinde kullanılır.
-10. **Açık sınırlar:** Provider'ın teknik olarak garanti edemediği davranışlar `doctor` tarafından raporlanır.
+1. **A single decision center:** The user communicates only with the orchestrator.
+2. **The orchestrator does not write code:** Analysis, planning, delegation, monitoring and the final decision belong to the orchestrator; implementation belongs to the worker agents.
+3. **Every piece of work is planned:** Before implementation starts, there is an analysis and a plan presented to the user.
+4. **Evidence-driven work:** Unknown information is not guessed; facts are recorded together with their sources.
+5. **Progressive disclosure:** An agent receives only the instructions and context required for its own task.
+6. **Prevent rediscovery:** Workers receive a task-specific context package that cites its sources.
+7. **Independent verification:** The agent that produced an implementation cannot be the sole final auditor of its own work.
+8. **Provider-neutral core:** Roles and protocols are defined in common; adapters are generated for Codex and Claude Code.
+9. **Cost-aware model selection:** A powerful model is used only when powerful reasoning is required.
+10. **Explicit boundaries:** Behavior the provider cannot technically guarantee is reported by `doctor`.
 
-## 3. Çalışma Kapsamları
+## 3. Operating Scopes
 
-### 3.1 Workspace modu
+### 3.1 Workspace mode
 
-Ortak AI sistemi bir üst klasörde, repository'ler alt klasörlerde bulunur:
+The shared AI system lives in a parent folder and the repositories live in subfolders:
 
 ```text
 workspace/
@@ -56,11 +56,11 @@ workspace/
 └── repo-b/
 ```
 
-Agent Codex veya Claude Code ile workspace kökünde başlatıldığında ortak protokolleri ve skill'leri kullanır. Repository'ler birbirinden ayrı proje kayıtları olarak ele alınır.
+When the agent is started with Codex or Claude Code at the workspace root, it uses the shared protocols and skills. Repositories are treated as separate project records.
 
-### 3.2 Repository modu
+### 3.2 Repository mode
 
-AI yapısı doğrudan repository içinde bulunur:
+The AI structure lives directly inside the repository:
 
 ```text
 my-repo/
@@ -71,11 +71,11 @@ my-repo/
 └── src/
 ```
 
-Bu yapı Git ile paylaşılabilir ve ekip genelinde kullanılabilir.
+This structure can be shared through Git and used across the whole team.
 
-### 3.3 Boş klasör davranışı
+### 3.3 Empty folder behavior
 
-Boş klasörde proje analizi veya AI tabanlı mimari üretimi yapılmaz. Yalnızca generic orchestration çekirdeği kurulur ve workspace proje listesi boş başlar.
+In an empty folder, no project analysis or AI-based architecture generation is performed. Only the generic orchestration core is installed, and the workspace project list starts out empty.
 
 ```yaml
 schema_version: 1
@@ -83,9 +83,9 @@ scope: workspace
 projects: []
 ```
 
-## 4. CLI Yaşam Döngüsü
+## 4. CLI Lifecycle
 
-Uygulanan komutlar:
+Implemented commands:
 
 ```text
 syn inspect
@@ -94,14 +94,14 @@ syn sync [--force]
 syn doctor
 ```
 
-- `init`: Agent/skill/protokol çekirdeğini ve provider adapter'larını kurar.
-- `inspect`: Yazma yapmadan önce kurulacak veya değişecek yapıyı gösterir.
-- `sync`: Manuel olarak tetiklenir; modülleri ve kanıtları keşfeder, proje kayıtlarını ve skill registry'lerini senkronize eder. Farklılaştırılmış generated teknoloji skill'lerini varsayılan olarak korur; yalnızca açık `--force` ile yeniler.
-- `doctor`: Canonical yapılandırmayı, proje → record → skill registry → skill dosyası referans zincirini ve dosya sistemi sınırlarını doğrular.
+- `init`: Installs the agent/skill/protocol core and the provider adapters.
+- `inspect`: Shows the structure that would be created or changed, without writing anything.
+- `sync`: Manually triggered; discovers modules and evidence, and synchronizes the project records and skill registries. It preserves differentiated generated technology skills by default; it refreshes them only with an explicit `--force`.
+- `doctor`: Validates the canonical configuration, the project → record → skill registry → skill file reference chain, and the file system boundaries.
 
-Arka planda çalışan watcher veya daemon planlanmamaktadır. Yeni bir repository eklendiğinde kullanıcı `sync` çalıştırabilir. Tam yeniden `init` gerekmez.
+No background watcher or daemon is planned. When a new repository is added, the user can run `sync`. A full re-`init` is not required.
 
-## 5. Uygulanan Başlangıç Dosya Yapısı
+## 5. Implemented Initial File Structure
 
 ```text
 .ai/
@@ -148,14 +148,14 @@ Arka planda çalışan watcher veya daemon planlanmamaktadır. Yeni bir reposito
     └── claude-code.md
 ```
 
-`tasks/` çalışma kayıtlarının kalıcı mı, geçici mi ve Git'e dahil olup olmayacağı daha sonra kesinleştirilecektir.
+Whether the records under `tasks/` are persistent or temporary, and whether they are included in Git, will be finalized later.
 
-## 6. Orchestrator Modeli
+## 6. The Orchestrator Model
 
-Orchestrator kontrol düzlemidir. Worker agent'lar uygulama düzlemidir.
+The orchestrator is the control plane. Worker agents are the execution plane.
 
 ```text
-Kullanıcı
+User
    │
    ▼
 Orchestrator
@@ -165,37 +165,37 @@ Orchestrator
    └── Reviewer
 ```
 
-### 6.1 Orchestrator'ın sorumlulukları
+### 6.1 Responsibilities of the orchestrator
 
-- Kullanıcıdan işi almak ve hedefi netleştirmek.
-- Repository veya workspace hakkında gerekli analizi yapmak ya da explorer'a yaptırmak.
-- Mimari ve uygulama kararlarını vermek.
-- Her iş için plan hazırlamak ve kullanıcıya sunmak.
-- İşi bağımsız görevlere bölmek ve bir görev bağımlılık grafiği oluşturmak.
-- Her görev için doğru worker türünü ve model seviyesini seçmek.
-- Worker'lara yeterli ve sınırlandırılmış context aktarmak.
-- Paralel işleri koordine etmek ve dosya sahipliği çakışmalarını önlemek.
-- Worker raporlarını, diff'leri ve doğrulama kanıtlarını değerlendirmek.
-- Yalnızca `.ai/tasks/**` altındaki plan, context packet, karar günlüğü ve orchestration metadata'sını oluşturmak/güncellemek.
-- Nihai sonucu yalnızca kendisinin kullanıcıya raporlaması.
+- Take the work from the user and clarify the goal.
+- Perform the analysis required about the repository or workspace, or have the explorer perform it.
+- Make the architectural and implementation decisions.
+- Prepare a plan for every piece of work and present it to the user.
+- Split the work into independent tasks and build a task dependency graph.
+- Choose the right worker type and model tier for every task.
+- Hand workers sufficient and bounded context.
+- Coordinate parallel work and prevent file ownership conflicts.
+- Evaluate worker reports, diffs and verification evidence.
+- Create/update only the plan, context packets, decision log and orchestration metadata under `.ai/tasks/**`.
+- Be the only party that reports the final result to the user.
 
-### 6.2 Orchestrator'ın yasakları
+### 6.2 Prohibitions of the orchestrator
 
-- Üretim, test, config veya dokümantasyon kodunu doğrudan yazmak ya da düzenlemek.
-- `.ai/tasks/**` dışındaki proje dosyalarına doğrudan yazmak.
-- “İş küçük” gerekçesiyle worker rolünü üstlenmek.
-- Kullanıcı onayı gereken planı sessizce uygulamaya geçirmek.
-- Worker'ın iddiasını kanıt olmadan kabul etmek.
-- Başarısız worker'ın işini kendisi tamamlamak.
-- Uygulama worker'larını kullanıcıyla doğrudan iletişime yönlendirmek.
+- Writing or editing production, test, config or documentation code directly.
+- Writing directly to project files outside `.ai/tasks/**`.
+- Taking on a worker role on the grounds that "the work is small".
+- Silently moving a plan that requires user approval into execution.
+- Accepting a worker's claim without evidence.
+- Finishing a failed worker's work itself.
+- Directing implementation workers to communicate with the user directly.
 
-Orchestrator dosya okuyabilir, arama yapabilir, diff ve test sonuçlarını inceleyebilir ve kontrol-düzlemi artifact'larını `.ai/tasks/**` altında tutabilir. Ürün dosyalarına yazma yetkisinin prompt seviyesinde mi yoksa provider izinleriyle teknik olarak mı sınırlandırılabileceği adapter bazında belirlenecektir.
+The orchestrator may read files, run searches, examine diffs and test results, and keep control-plane artifacts under `.ai/tasks/**`. Whether write access to product files can be constrained at the prompt level or technically through provider permissions will be decided per adapter.
 
-## 7. Ana Orchestration Protokolü
+## 7. The Main Orchestration Protocol
 
-Ana protokol `constitutional` önceliğe sahip, zorunlu ve alt seviye protokoller tarafından geçersiz kılınamaz olmalıdır.
+The main protocol must have `constitutional` priority, be mandatory, and be non-overridable by lower-level protocols.
 
-Örnek invariant'lar:
+Example invariants:
 
 ```yaml
 id: core.orchestration
@@ -214,7 +214,7 @@ invariants:
   - worker_uncertainty_is_escalated_to_orchestrator
 ```
 
-### 7.1 Görev durum makinesi
+### 7.1 Task state machine
 
 ```text
 SESSION_BOOTSTRAP
@@ -244,81 +244,81 @@ REVIEW
 FINAL_REPORT
 ```
 
-`MODEL_PROFILE_CONFIRMATION` her yeni session'da ilk görev başlamadan önce zorunludur. Orchestrator aktif provider'ı, kendi modelini, worker model eşlemelerini, routing modunu ve geçerli override'ları kullanıcıya gösterir. Kullanıcı mevcut profille devam edebilir veya değişiklik isteyebilir.
+`MODEL_PROFILE_CONFIRMATION` is mandatory in every new session before the first task begins. The orchestrator shows the user the active provider, its own model, the worker model mappings, the routing mode and any applicable overrides. The user can continue with the current profile or request a change.
 
-Bu onay session başına bir kez alınır. Provider/model uygunluğu değişirse, session sırasında profile override uygulanırsa veya orchestrator modeliyle ilgili bir uyuşmazlık tespit edilirse kapı yeniden açılır.
+This confirmation is taken once per session. The gate reopens if provider/model availability changes, if a profile override is applied during the session, or if a mismatch regarding the orchestrator model is detected.
 
-Varsayılan onay politikası:
+Default approval policy:
 
 ```yaml
 approval:
   before_execution: always
 ```
 
-## 8. Agent ve Skill Ayrımı
+## 8. Agent and Skill Separation
 
 ### 8.1 Agent
 
-Agent “kim, hangi yetkiyle ve hangi sorumlulukla çalışıyor?” sorusunu cevaplar.
+An agent answers the question "who is working, with what authority and with what responsibility?"
 
-Agent tanımı şunları içerir:
+An agent definition contains:
 
-- Rol ve amaç
-- Yetkili/yasak işlemler
-- Sahip olduğu sorumluluk
-- Kullanabileceği skill'ler
-- Delegasyon ve escalation sınırları
-- Beklenen rapor formatı
-- Tamamlama koşulları
+- Role and purpose
+- Permitted/forbidden operations
+- The responsibility it owns
+- The skills it may use
+- Delegation and escalation boundaries
+- The expected report format
+- Completion conditions
 
-Başlangıç rolleri:
+Initial roles:
 
-- `orchestrator`: Karar, planlama ve koordinasyon.
-- `explorer`: Salt-okunur araştırma ve kanıt toplama.
-- `implementer`: Kendisine verilen kapsamda uygulama.
-- `debugger`: Belirti, hipotez, kanıt ve kök neden analizi.
-- `reviewer`: Uygulamadan bağımsız değerlendirme.
+- `orchestrator`: Decisions, planning and coordination.
+- `explorer`: Read-only research and evidence gathering.
+- `implementer`: Implementation within the given scope.
+- `debugger`: Symptom, hypothesis, evidence and root cause analysis.
+- `reviewer`: Assessment independent of the implementation.
 
-Yeni bir çalışma yöntemi gerekiyorsa önce skill oluşturulur. Ancak farklı yetki, bağımsızlık veya sorumluluk gerekiyorsa yeni agent tanımlanır.
+If a new way of working is needed, a skill is created first. However, if different authority, independence or responsibility is needed, a new agent is defined.
 
 ### 8.2 Skill
 
-Skill “belirli bir iş güvenilir ve tekrar edilebilir biçimde nasıl yapılır?” sorusunu cevaplar.
+A skill answers the question "how is a particular piece of work done reliably and repeatably?"
 
-Her skill en az şunları içermelidir:
+Every skill must contain at least:
 
-- Açık tetikleme koşulları
-- Amaç ve kapsam dışı noktalar
-- Gerekli girdiler
-- Adım adım prosedür
-- Kullanılabilecek araçlar
-- Doğrulama yöntemi
-- Durma ve escalation koşulları
-- Beklenen çıktı sözleşmesi
+- Explicit trigger conditions
+- Purpose and out-of-scope points
+- Required inputs
+- A step-by-step procedure
+- The tools that may be used
+- The verification method
+- Stop and escalation conditions
+- The expected output contract
 
-Skill'ler ihtiyaç anında yüklenir; bütün skill içerikleri her oturuma dahil edilmez.
+Skills are loaded on demand; not every skill's content is included in every session.
 
-## 9. Protokol Sistemi
+## 9. The Protocol System
 
-Protokol, agent'ların ve skill'lerin üzerinde çalışan organizasyon kuralıdır. Yeni protokoller sonradan eklenebilir.
+A protocol is an organizational rule that sits above agents and skills. New protocols can be added later.
 
-Öngörülen öncelik:
+The expected priority:
 
 ```text
-Platform ve güvenlik kuralları
+Platform and security rules
         ↓
-Constitution / core protokoller
+Constitution / core protocols
         ↓
-Kullanıcının onayladığı görev planı
+The task plan approved by the user
         ↓
-Domain ve custom protokoller
+Domain and custom protocols
         ↓
-Agent tanımları
+Agent definitions
         ↓
-Skill prosedürleri
+Skill procedures
 ```
 
-Başlangıçta zorunlu protokoller:
+Protocols mandatory from the start:
 
 - Orchestration
 - Planning and user approval
@@ -329,9 +329,9 @@ Başlangıçta zorunlu protokoller:
 - Failure, retry and escalation
 - User communication
 
-## 10. Model Yönlendirme
+## 10. Model Routing
 
-Çekirdek protokoller doğrudan provider model adlarına bağımlı olmamalıdır. Bunun yerine yetenek seviyeleri kullanılır:
+Core protocols must not depend directly on provider model names. Capability tiers are used instead:
 
 ```yaml
 model_tiers:
@@ -352,7 +352,7 @@ model_tiers:
       - low_cost
 ```
 
-OpenAI için başlangıç eşlemesi:
+The initial mapping for OpenAI:
 
 ```yaml
 provider: openai
@@ -362,7 +362,7 @@ defaults:
   fast_worker: gpt-5.6-luna
 ```
 
-Claude için kullanıcı tarafından belirlenen başlangıç eşlemesi:
+The initial mapping for Claude, as determined by the user:
 
 ```yaml
 provider: claude
@@ -372,11 +372,11 @@ defaults:
   fast_worker: sonnet-5
 ```
 
-Bu adlar canonical yapıdaki istenen logical model kimlikleridir. Adapter, kurulu provider'ın gerçek model ID'lerini ve bu modellerin erişilebilirliğini doğrulamalıdır. Bir model mevcut değilse sessiz fallback yapılamaz; kullanıcıya uyuşmazlık ve kullanılabilir alternatifler gösterilmelidir.
+These names are the desired logical model identities in the canonical structure. The adapter must verify the installed provider's real model IDs and the accessibility of those models. If a model is not available, no silent fallback may occur; the mismatch and the available alternatives must be shown to the user.
 
-### 10.1 Yapılandırma katmanları
+### 10.1 Configuration layers
 
-Model profilleri sonradan değiştirilebilir olmalıdır. Önerilen override önceliği:
+Model profiles must be changeable afterwards. The proposed override priority:
 
 ```text
 Session override
@@ -388,7 +388,7 @@ Workspace override
 Provider default
 ```
 
-Örnek canonical yapılandırma:
+Example canonical configuration:
 
 ```yaml
 model_profiles:
@@ -408,72 +408,72 @@ routing:
   silent_fallback: false
 ```
 
-Project veya workspace profilleri dosyada kalıcı olabilir. Session override yalnızca mevcut oturum için geçerlidir ve canonical default'u değiştirmez. Kullanıcı açıkça “varsayılan olarak kaydet” demedikçe geçici seçim kalıcı ayara yazılmaz.
+Project or workspace profiles may persist in a file. A session override applies only to the current session and does not change the canonical default. Unless the user explicitly says "save as default", a temporary choice is not written into persistent settings.
 
-### 10.2 Session model confirmation protokolü
+### 10.2 The session model confirmation protocol
 
-İlk görevden önce orchestrator en az şu bilgileri göstermelidir:
+Before the first task, the orchestrator must display at least the following:
 
 ```text
-Aktif provider: OpenAI veya Claude
+Active provider: OpenAI or Claude
 Orchestrator: <model>
 Complex worker: <model>
 Fast worker: <model>
 Routing: automatic/manual
 Fallback: disabled/enabled
-Override kaynağı: default/workspace/project/session
+Override source: default/workspace/project/session
 ```
 
-Ardından kullanıcıya bu profille devam etmek veya değiştirmek isteyip istemediğini sorar. Onay verilmeden görev discovery/planlama aşamasına geçmez.
+It then asks the user whether they want to continue with this profile or change it. It does not move into the discovery/planning stage of a task until approval is given.
 
-Ana session modeli bazı provider'larda oturum başladıktan sonra değiştirilemeyebilir. Böyle bir durumda orchestrator:
+The main session model may not be changeable after the session has started on some providers. In such a case the orchestrator:
 
-1. Mevcut aktif modeli doğru biçimde gösterir.
-2. İstenen modelle uyuşmazlığı açıklar.
-3. Gerekliyse yeni session/yeniden başlatma gerektiğini belirtir.
-4. Değişiklik gerçekleşmiş gibi davranmaz.
+1. Displays the currently active model correctly.
+2. Explains the mismatch with the requested model.
+3. States that a new session/restart is required, if necessary.
+4. Does not behave as if the change had taken place.
 
-Worker modelleri de yalnızca provider subagent başına model seçimini destekliyorsa uygulanabilir. Desteklenmeyen model routing'i `doctor` ve session confirmation sırasında capability eksikliği olarak gösterilir.
+Worker models are likewise applicable only if the provider supports per-subagent model selection. Unsupported model routing is surfaced as a missing capability by `doctor` and during session confirmation.
 
-Temel routing ilkesi:
+The core routing principles:
 
-- Mimari analiz ve nihai karar: orchestrator.
-- Karmaşık implementasyon/debugging: complex worker.
-- Küçük, lokal ve düşük riskli değişiklik: fast worker.
-- Küçük işlerde dahi orchestrator kod yazmaz; ekonomik worker seçer.
+- Architectural analysis and the final decision: the orchestrator.
+- Complex implementation/debugging: the complex worker.
+- Small, local and low-risk changes: the fast worker.
+- Even on small work, the orchestrator does not write code; it picks an economical worker.
 
-Provider adapter'ı aynı yetenek seviyelerini ilgili ortamın gerçek model kimliklerine eşler. Provider'ın model veya subagent seçimini desteklemediği durumlar sessizce taklit edilmez; `doctor` tarafından açıkça raporlanır.
+The provider adapter maps the same capability tiers onto the real model identities of the relevant environment. Cases where the provider does not support model or subagent selection are not silently imitated; they are explicitly reported by `doctor`.
 
-## 11. Context Aktarım Mimarisi
+## 11. Context Handoff Architecture
 
-### 11.1 Problem
+### 11.1 The problem
 
-Yeni başlatılan worker agent çoğunlukla ana oturumun context'ine sahip değildir. Worker'ın repository'yi yeniden taraması:
+A freshly started worker agent usually does not have the main session's context. Having the worker rescan the repository leads to:
 
-- Aynı tokenların tekrar tüketilmesine,
-- Gecikmeye,
-- Farklı agent'ların farklı sonuçlara ulaşmasına,
-- Orchestrator kararlarının kaybolmasına,
-- Gereksiz tool çağrılarına yol açar.
+- The same tokens being consumed again,
+- Latency,
+- Different agents reaching different conclusions,
+- Orchestrator decisions being lost,
+- Unnecessary tool calls.
 
-Diğer uçta bütün konuşma geçmişini her worker'a kopyalamak da pahalıdır ve gereksiz detaylarla dikkati dağıtır.
+At the other extreme, copying the entire conversation history to every worker is also expensive and distracts with unnecessary detail.
 
-Hedef bütün context'i paylaşmak değil, **görev için yeterli en küçük kanıtlı context'i paylaşmaktır**.
+The goal is not to share all the context, but to share **the smallest evidenced context sufficient for the task**.
 
-### 11.2 Context katmanları
+### 11.2 Context layers
 
-Context dört katmana ayrılır:
+Context is divided into four layers:
 
-1. **Constitution context:** Değişmez orchestration ve güvenlik kuralları.
-2. **Project context:** Stack, komutlar, mimari sınırlar ve doğrulanmış proje gerçekleri.
-3. **Task context:** Kullanıcı hedefi, onaylanmış plan, görev kapsamı ve kabul kriterleri.
-4. **Evidence context:** İlgili dosyalar, semboller, snippet'ler, komut çıktıları ve önceki worker raporları.
+1. **Constitution context:** Immutable orchestration and security rules.
+2. **Project context:** Stack, commands, architectural boundaries and verified project facts.
+3. **Task context:** The user goal, the approved plan, the task scope and the acceptance criteria.
+4. **Evidence context:** Relevant files, symbols, snippets, command output and previous worker reports.
 
-Worker'a constitution'ın gerekli özeti, ilgili project dilimi, kendi task context'i ve yalnızca gerekli evidence aktarılır.
+A worker receives the necessary summary of the constitution, the relevant project slice, its own task context and only the required evidence.
 
-### 11.3 Task Context Packet
+### 11.3 The Task Context Packet
 
-Her delegasyon, serbest biçimli kısa bir mesaj yerine şemalı bir görev paketi taşımalıdır:
+Every delegation must carry a schema'd task packet rather than a short free-form message:
 
 ```yaml
 task_id: auth-refresh-fix-implementation
@@ -482,10 +482,10 @@ assigned_role: implementer
 model_tier: complex_worker
 
 objective: >
-  Refresh token yenileme sırasında oluşan oturum kaybını düzelt.
+  Fix the session loss that occurs during refresh token renewal.
 
 why:
-  user_goal: Kullanıcının aktif oturumunun beklenmedik şekilde kapanmaması
+  user_goal: The user's active session must not close unexpectedly
   plan_reference: .ai/tasks/auth-refresh-fix/plan.md
 
 scope:
@@ -498,13 +498,13 @@ scope:
     - src/billing/**
 
 known_facts:
-  - statement: Token rotation refresh işleminde etkin
+  - statement: Token rotation is active on the refresh operation
     source: src/auth/refresh-service.ts
     confidence: verified
 
 decisions:
-  - Public API sözleşmesi değiştirilmeyecek
-  - Veritabanı migration'ı oluşturulmayacak
+  - The public API contract will not change
+  - No database migration will be created
 
 relevant_symbols:
   - file: src/auth/refresh-service.ts
@@ -513,9 +513,9 @@ relevant_symbols:
       - revokeTokenFamily
 
 acceptance_criteria:
-  - Eski refresh token tekrar kullanıldığında mevcut token ailesi iptal edilir
-  - Normal yenileme aktif oturumu sonlandırmaz
-  - İlgili testler geçer
+  - When an old refresh token is reused, the current token family is revoked
+  - A normal renewal does not terminate the active session
+  - The relevant tests pass
 
 verification:
   commands:
@@ -523,8 +523,8 @@ verification:
     - pnpm typecheck
 
 non_goals:
-  - Auth API'sini yeniden tasarlamak
-  - Session storage katmanını değiştirmek
+  - Redesigning the auth API
+  - Changing the session storage layer
 
 open_questions: []
 expected_report:
@@ -536,54 +536,54 @@ expected_report:
   - unresolved_risks
 ```
 
-### 11.4 Context paketini kim üretir?
+### 11.4 Who produces the context packet?
 
-Orchestrator, discovery çıktıları ve onaylanmış plandan task packet'i derler. Orchestrator'ın ham konuşma geçmişini worker'a kopyalaması beklenmez.
+The orchestrator compiles the task packet from the discovery outputs and the approved plan. The orchestrator is not expected to copy the raw conversation history to the worker.
 
-İş akışı:
+The workflow:
 
 ```text
-Kullanıcı konuşması
+User conversation
       ↓
-Orchestrator'ın canonical task ledger'ı
+The orchestrator's canonical task ledger
       ↓
-Göreve özel context packet
+Task-specific context packet
       ↓
 Worker
       ↓
 Structured completion report
       ↓
-Orchestrator task ledger güncellemesi
+Orchestrator task ledger update
 ```
 
-### 11.5 Worker keşif bütçesi
+### 11.5 The worker discovery budget
 
-Worker'ın yeniden tam repository taraması varsayılan olarak yasaktır. Ancak doğruluk için kendisine verilen kritik bilgileri gerektiğinde yerinde doğrulayabilir.
+A full repository rescan by the worker is forbidden by default. However, for accuracy, it may verify critical information it was handed in place when needed.
 
-Önerilen politika:
+The proposed policy:
 
-- Önce context packet kullanılmalıdır.
-- Yalnızca görev kapsamındaki dosyalar okunmalıdır.
-- Context yetersizse sınırsız keşif yerine orchestrator'dan ek context istenmelidir.
-- Küçük lokal doğrulamalar serbesttir.
-- Görev kapsamını değiştiren bulgu escalation gerektirir.
-- Kritik veya geri döndürülmesi zor işlem öncesinde kaynak yeniden doğrulanır.
+- The context packet must be used first.
+- Only files within the task scope should be read.
+- If the context is insufficient, additional context should be requested from the orchestrator instead of running unbounded discovery.
+- Small local verifications are allowed.
+- A finding that changes the task scope requires escalation.
+- Before a critical or hard-to-reverse operation, the source is re-verified.
 
-Bu denge, “worker hiçbir şey araştırmasın” ile “her worker her şeyi baştan okusun” uçlarının arasındadır.
+This balance sits between the extremes of "the worker must not research anything" and "every worker must read everything from scratch".
 
-### 11.6 Context paketinde içerik mi referans mı?
+### 11.6 Content or reference in the context packet?
 
-Her bilgi doğrudan pakete gömülmemelidir:
+Not every piece of information should be embedded directly in the packet:
 
-- Kısa ve kritik kararlar doğrudan pakete eklenir.
-- Büyük dosyalar path ve sembol referansıyla verilir.
-- Hassas birkaç kod satırı gerekiyorsa sınırlı snippet eklenir.
-- Büyük terminal çıktıları özetlenir; ham çıktı artifact olarak referanslanır.
-- Değişmeyen project context tekrar kopyalanmak yerine sürümlü kaynağa bağlanır.
+- Short and critical decisions are added directly to the packet.
+- Large files are given as path and symbol references.
+- If a few sensitive lines of code are needed, a limited snippet is included.
+- Large terminal outputs are summarized; the raw output is referenced as an artifact.
+- Unchanging project context is linked to a versioned source rather than copied again.
 
-### 11.7 Context freshness ve provenance
+### 11.7 Context freshness and provenance
 
-Her paket aşağıdaki bilgileri taşımalıdır:
+Every packet must carry the following information:
 
 ```yaml
 context:
@@ -595,29 +595,29 @@ context:
     - src/auth/refresh-service.ts
 ```
 
-Worker, context'in dayandığı dosyaların belirgin biçimde değiştiğini fark ederse eski kararla devam etmez; orchestrator'a geri döner.
+If the worker notices that the files its context is based on have changed significantly, it does not continue with the old decision; it goes back to the orchestrator.
 
 ### 11.8 Delta handoff
 
-Aynı worker'a takip işi verildiğinde bütün paket yeniden gönderilmez. Önceki `task_id` referans alınır ve yalnızca değişiklikler aktarılır:
+When follow-up work is given to the same worker, the entire packet is not sent again. The previous `task_id` is referenced and only the changes are handed over:
 
 ```yaml
 extends: auth-refresh-fix-implementation
 delta:
   new_acceptance_criteria:
-    - Eşzamanlı iki refresh isteği için regresyon testi ekle
+    - Add a regression test for two concurrent refresh requests
   new_evidence:
     - tests/auth/refresh-race.test.ts
 ```
 
-### 11.9 Worker completion packet
+### 11.9 The worker completion packet
 
-Worker'ın dönüşü de şemalı olmalıdır:
+The worker's return must be schema'd as well:
 
 ```yaml
 task_id: auth-refresh-fix-implementation
 status: completed
-summary: Refresh rotation yarış durumu giderildi
+summary: The refresh rotation race condition was resolved
 changed_files:
   - src/auth/refresh-service.ts
   - tests/auth/refresh-service.test.ts
@@ -629,27 +629,27 @@ unresolved_risks: []
 recommended_context_updates: []
 ```
 
-Orchestrator bu raporu canonical task ledger'a işler ve reviewer için yeni, daraltılmış bir context packet üretir.
+The orchestrator records this report in the canonical task ledger and produces a new, narrowed context packet for the reviewer.
 
-### 11.10 Provider adapter stratejisi
+### 11.10 The provider adapter strategy
 
-Provider'lar farklı context paylaşım kabiliyetlerine sahip olabilir:
+Providers may have different context-sharing capabilities:
 
-- Tam konuşma geçmişini fork etme
-- Son birkaç turu paylaşma
-- Sıfır context ile subagent başlatma
-- Görev prompt'una dosya veya artifact referansı verme
-- Ortak workspace dosyalarını okuma
+- Forking the full conversation history
+- Sharing the last few turns
+- Starting a subagent with zero context
+- Giving file or artifact references in the task prompt
+- Reading shared workspace files
 
-Varsayılan tercih, bütün geçmişi çoğaltmak yerine **sıfır/minimal inherited context + explicit task packet** olmalıdır. Bağlam açısından çok yoğun ve kısa sürecek işlerde son birkaç tur paylaşımı seçilebilir. Tam geçmiş fork'u istisnai olmalıdır.
+The default preference should be **zero/minimal inherited context + an explicit task packet**, rather than duplicating the entire history. For very context-heavy and short-lived work, sharing the last few turns may be chosen. A full history fork should be exceptional.
 
-Adapter, provider'ın desteklediği en ekonomik yöntemi seçer ancak task packet sözleşmesi değişmez.
+The adapter chooses the most economical method the provider supports, but the task packet contract does not change.
 
-## 12. Project Discovery ve Manuel Senkronizasyon
+## 12. Project Discovery and Manual Synchronization
 
-Uygulanan `sync`, repository veya workspace içindeki proje adaylarını ve modülleri deterministik olarak tarar. Manifest içeren modül dizinleri recursive keşfedilir; normal derinlik sınırının tipik Java kaynak ağacını kesmemesi için `src`, `test`, `tests` ve generated source ağaçları ayrı, limitli bir derin taramadan geçer. Güvenlik limitine ulaşılması sessiz, eksik snapshot üretmek yerine açık hata verir.
+The implemented `sync` deterministically scans the project candidates and modules inside a repository or workspace. Module directories containing a manifest are discovered recursively; so that the normal depth limit does not cut off a typical Java source tree, the `src`, `test`, `tests` and generated source trees go through a separate, limited deep scan. Reaching a safety limit raises an explicit error instead of silently producing an incomplete snapshot.
 
-Her modül için aşağıdaki verified evidence türleri kaynak path'iyle kaydedilir:
+For every module, the following verified evidence types are recorded together with their source path:
 
 - `manifest`
 - `language`
@@ -658,7 +658,7 @@ Her modül için aşağıdaki verified evidence türleri kaynak path'iyle kayded
 - `build_tool`
 - `dependency`
 
-JavaScript/TypeScript manifestleri ile Maven ve Gradle tanımları ayrıştırılır; yorumlar ve yalnız dependency/plugin management altında duran koordinatlar aktif framework kanıtı sayılmaz. Modül komutları çalıştırılacak `cwd`, kaynak ve `verified` güven seviyesiyle tutulur.
+JavaScript/TypeScript manifests and Maven and Gradle definitions are parsed; comments and coordinates that sit only under dependency/plugin management do not count as evidence of an active framework. Module commands are kept together with the `cwd` they must run in, their source and a `verified` confidence level.
 
 ```yaml
 test:
@@ -668,7 +668,7 @@ test:
   confidence: verified
 ```
 
-Her proje registry'si sekiz canonical base skill'i kaydeder:
+Every project registry records the eight canonical base skills:
 
 - `planning`
 - `project-discovery`
@@ -679,9 +679,9 @@ Her proje registry'si sekiz canonical base skill'i kaydeder:
 - `code-review`
 - `task-conductor`
 
-Bunların yanında yalnız eşleşen verified evidence için teknoloji pack'i seçilir. Mevcut pack → skill eşlemeleri:
+Alongside these, a technology pack is selected only for matching verified evidence. The current pack → skill mappings:
 
-| Pack | Üretilen skill |
+| Pack | Generated skill |
 | --- | --- |
 | TypeScript | `typescript-patterns` |
 | React | `react-patterns`, Ingenium `react-modern`, `frontend-craft` |
@@ -694,162 +694,162 @@ Bunların yanında yalnız eşleşen verified evidence için teknoloji pack'i se
 | Vue/Nuxt | Ingenium `vue-modern`, `frontend-craft` |
 | Tailwind CSS | Ingenium `tailwind-v4-tokens` |
 
-Seçimler, gerekçeleri, source id ve matched evidence `.ai/projects/<project-id>.skills.yaml` içinde tutulur. Yerel teknoloji skill'leri `.ai/skills/technology/**`, bundled havuz ise `.ai/skills/library/<source-id>/**` altında materialize edilir. `.ai/skills/catalog.yaml`, skill açıklamalarını, aktivasyon biçimini ve source provenance/lisans bilgisini taşır. Registry'deki otomatik skill'ler önceliklidir; `on-demand` skill yalnız açıklaması mevcut görevle doğrudan eşleştiğinde yüklenir. Bütün havuz aynı anda context'e alınmaz.
+The selections, their rationale, source id and matched evidence are kept in `.ai/projects/<project-id>.skills.yaml`. Local technology skills are materialized under `.ai/skills/technology/**`, and the bundled pool under `.ai/skills/library/<source-id>/**`. `.ai/skills/catalog.yaml` carries the skill descriptions, the activation mode and the source provenance/license information. Automatic skills in the registry take priority; an `on-demand` skill is loaded only when its description matches the current task directly. The entire pool is never taken into context at once.
 
-İlk bundled kaynak, 32 available skill ve bunlara ait script/reference dosyalarını içeren proje-sahipli Ingenium snapshot'ıdır. Task Conductor bu snapshot'tan ayrılarak canonical base skill yapılmıştır. Anthropic Agent Skills, Superpowers ve Microsoft Agent Skills; repository URL, lisans ve sabit commit kimliğiyle `reference-only` kaynak olarak kataloglanır. Harici repository içeriği ayrı güvenlik ve lisans incelemesi olmadan otomatik import veya execute edilmez.
+The first bundled source is a project-owned Ingenium snapshot containing 32 available skills and their script/reference files. Task Conductor was separated from that snapshot and made a canonical base skill. Anthropic Agent Skills, Superpowers and Microsoft Agent Skills are catalogued as `reference-only` sources with a repository URL, license and pinned commit id. External repository content is not automatically imported or executed without a separate security and license review.
 
-`sync`, kullanıcı tarafından değiştirilmiş herhangi bir generated skill/katalog dosyası gördüğünde durur; `sync --force` yalnız bu çakışan generated dosyayı canonical içerikle yenilemeye izin verir.
+Whenever `sync` sees any generated skill/catalog file that has been modified by the user, it stops; `sync --force` allows only that conflicting generated file to be refreshed with the canonical content.
 
-Aktivasyon sırası güvenlidir: teknoloji skill dosyaları, proje record'ları ve workspace kaydı hazırlandıktan sonra skill registry en son yazılır. Önkoşul yazımlarından biri başarısız olursa önceki aktif registry korunur.
+The activation order is safe: the skill registry is written last, after the technology skill files, project records and the workspace record have been prepared. If one of the prerequisite writes fails, the previously active registry is preserved.
 
-Yeni repo eklendiğinde uygulanan akış:
+The implemented flow when a new repo is added:
 
 ```text
 git clone
    ↓
 syn sync
    ↓
-deterministik keşif
+deterministic discovery
    ↓
-project record ve skill çözümleme
+project record and skill resolution
    ↓
-teknoloji skill'leri, record ve workspace yazımı
+writing technology skills, records and the workspace
    ↓
-skill registry'nin en son aktive edilmesi
+activating the skill registry last
 ```
 
-`doctor`; workspace entry'lerini, canonical `.ai/projects/<id>.yaml` record'larını, modül dizinlerini, manifest/source path'lerini, command `cwd` değerlerini, skill registry şemasını, canonical sekiz base skill kümesini ve seçili teknoloji skill dosyalarını uçtan uca doğrular. Kontroller hem lexical traversal/absolute path varyantlarını hem de `realpath` tabanlı symlink/junction kaçışlarını kapsar; eksik, bozuk, duplicate veya root dışına çıkan herhangi bir referans varken yapı `healthy` raporlanmaz.
+`doctor` validates end to end the workspace entries, the canonical `.ai/projects/<id>.yaml` records, the module directories, the manifest/source paths, the command `cwd` values, the skill registry schema, the canonical set of eight base skills, and the selected technology skill files. The checks cover both lexical traversal/absolute path variants and `realpath`-based symlink/junction escapes; the structure is not reported `healthy` while any missing, broken, duplicate or out-of-root reference exists.
 
-## 13. Provider Uyumluluğu ve Sınırlar
+## 13. Provider Compatibility and Boundaries
 
-Ortak yapı aynı davranış semantiğini hedefler; birebir aynı teknik çalıştırma biçimini garanti etmez.
+The shared structure targets the same behavioral semantics; it does not guarantee an identical technical execution model.
 
-- Codex adapter'ı ortak rolleri Codex'in agent, skill ve talimat mekanizmalarına çevirir.
-- Claude Code adapter'ı aynı rolleri Claude Code'un desteklediği mekanizmalara çevirir.
-- Ana modelin seçilmesi yalnızca bir markdown dosyasıyla garanti edilemez; oturum gerçekten doğru modelle başlatılmalıdır.
-- Provider subagent başına model seçimini desteklemiyorsa bu eksiklik açıkça raporlanır.
-- Codex'in Claude modellerini veya Claude Code'un OpenAI modellerini çağırması yalnızca yapı dosyalarıyla sağlanamaz. Böyle bir gereksinim ayrı bir runtime/bridge gerektirir ve mevcut ürün kapsamının dışındadır.
+- The Codex adapter translates the shared roles into Codex's agent, skill and instruction mechanisms.
+- The Claude Code adapter translates the same roles into the mechanisms Claude Code supports.
+- Selecting the main model cannot be guaranteed by a markdown file alone; the session must actually be started with the right model.
+- If the provider does not support per-subagent model selection, this gap is reported explicitly.
+- Codex calling Claude models, or Claude Code calling OpenAI models, cannot be achieved with structure files alone. Such a requirement needs a separate runtime/bridge and is outside the current product scope.
 
-## 14. Token ve Zaman Optimizasyonu
+## 14. Token and Time Optimization
 
-- Root talimatları kısa tutulur.
-- Skill'ler yalnızca tetiklendiklerinde yüklenir.
-- Worker'lara tüm sohbet değil task packet gönderilir.
-- Project context sürümlü ve tekrar kullanılabilir tutulur.
-- Büyük içerikler kopyalanmaz; path/symbol/artifact referansı kullanılır.
-- Takip görevleri delta handoff kullanır.
-- Küçük işler fast worker'a, karmaşık işler complex worker'a yönlendirilir.
-- Bağımsız olmayan işler yapay biçimde paralelleştirilmez.
-- Aynı dosyaları değiştirecek worker'lar eşzamanlı başlatılmaz.
-- Worker raporları şemalıdır; orchestrator ham konuşmaları yeniden özetlemek zorunda kalmaz.
-- “Summary of summary” bilgi kaybını önlemek için canonical task ledger korunur.
+- Root instructions are kept short.
+- Skills are loaded only when triggered.
+- Workers are sent a task packet, not the whole conversation.
+- Project context is kept versioned and reusable.
+- Large content is not copied; path/symbol/artifact references are used.
+- Follow-up tasks use delta handoff.
+- Small work is routed to the fast worker, complex work to the complex worker.
+- Non-independent work is not artificially parallelized.
+- Workers that would modify the same files are not started concurrently.
+- Worker reports are schema'd; the orchestrator is not forced to re-summarize raw conversations.
+- The canonical task ledger is preserved to prevent "summary of summary" information loss.
 
-## 15. Açık Tasarım Kararları
+## 15. Open Design Decisions
 
-Henüz kesinleştirilmesi gereken noktalar:
+Points still to be finalized:
 
-1. Canonical tanımların kesin şeması ve dosya formatı.
-2. Provider çıktılarının kopya, generated file veya referans olarak üretilmesi.
-3. Orchestrator'ın yazma yasağının her provider'da teknik olarak ne kadar enforce edilebileceği.
-4. Task ledger ve context packet dosyalarının Git'e dahil edilip edilmeyeceği.
-5. Context paketleri için token bütçesi ve sıkıştırma eşikleri.
-6. Worker'ın kendi başına yapabileceği lokal keşfin kesin sınırları.
-7. User approval kapısının her görevde mi, yoksa yalnızca yeni ana işlerde mi uygulanacağı.
-8. Reviewer modelinin risk seviyesine göre nasıl seçileceği.
-9. Çoklu worker'lar için ortak çalışma ağacı ve worktree politikası.
-10. Custom protokollerin core protokollerle çakışma çözümü.
-11. Codex ve Claude Code feature-matrix'inin resmi olarak doğrulanması.
+1. The exact schema and file format of the canonical definitions.
+2. Whether provider outputs are produced as copies, generated files or references.
+3. How far the orchestrator's write prohibition can technically be enforced on each provider.
+4. Whether task ledger and context packet files will be included in Git.
+5. Token budgets and compression thresholds for context packets.
+6. The exact limits of the local discovery a worker may do on its own.
+7. Whether the user approval gate applies to every task or only to new top-level work.
+8. How the reviewer model will be chosen based on risk level.
+9. The shared working tree and worktree policy for multiple workers.
+10. Conflict resolution between custom protocols and core protocols.
+11. Official verification of the Codex and Claude Code feature matrix.
 
-## 16. Önerilen Tasarım Sırası
+## 16. Proposed Design Order
 
-1. Constitution ve ana orchestration protokolü
-2. Protokol şeması ve öncelik sistemi
-3. Task lifecycle ve kullanıcı onay kapısı
-4. Context packet ve completion packet şemaları
-5. Agent manifest standardı
-6. Skill standardı
-7. Model tier ve routing politikası
-8. Verification/review protokolü
-9. Failure/retry/escalation protokolü
-10. Codex capability adapter'ı
-11. Claude Code capability adapter'ı
-12. CLI `init`, `sync`, `inspect` ve `doctor` komutları
+1. The constitution and the main orchestration protocol
+2. The protocol schema and priority system
+3. The task lifecycle and the user approval gate
+4. The context packet and completion packet schemas
+5. The agent manifest standard
+6. The skill standard
+7. The model tier and routing policy
+8. The verification/review protocol
+9. The failure/retry/escalation protocol
+10. The Codex capability adapter
+11. The Claude Code capability adapter
+12. The CLI `init`, `sync`, `inspect` and `doctor` commands
 
-## 17. Başarı Ölçütleri
+## 17. Success Criteria
 
-Sistem başarılı sayılmalıdır eğer:
+The system should be considered successful if:
 
-- Kullanıcı yalnızca orchestrator ile konuşarak işi baştan sona yürütebiliyorsa,
-- Orchestrator hiçbir implementasyon kodu yazmadan işi sonuçlandırabiliyorsa,
-- Her worker yalnızca gerekli context ile göreve başlayabiliyorsa,
-- Worker'lar repository'yi gereksiz yere yeniden taramıyorsa,
-- Model seçimi kalite/maliyet dengesine göre yapılabiliyorsa,
-- Plan, karar, delegasyon ve doğrulama kanıtları izlenebiliyorsa,
-- Aynı canonical yapı hem Codex hem Claude Code'a güvenilir biçimde uyarlanabiliyorsa,
-- Provider kısıtları kullanıcıdan saklanmıyorsa.
+- The user can carry work through from start to finish by talking only to the orchestrator,
+- The orchestrator can conclude the work without writing any implementation code,
+- Every worker can start its task with only the context it needs,
+- Workers do not rescan the repository unnecessarily,
+- Model selection can be made according to a quality/cost balance,
+- Plans, decisions, delegations and verification evidence are traceable,
+- The same canonical structure can be reliably adapted to both Codex and Claude Code,
+- Provider constraints are not hidden from the user.
 
-## 18. Karar Günlüğü
+## 18. Decision Log
 
-### 2026-09-20 — Orchestration ve model profilleri
+### 2026-09-20 — Orchestration and model profiles
 
-- Sistem standart bir coding assistant yapısı değil, merkezi orchestrator tarafından yönetilen hiyerarşik bir agent organizasyonu olacaktır.
-- Orchestrator hiçbir ürün kodu yazmayacak; yalnızca analiz, planlama, karar, delegasyon, koordinasyon ve nihai raporlama yapacaktır.
-- Orchestrator kontrol-düzlemi kayıtlarını yalnızca `.ai/tasks/**` altında oluşturabilecek veya güncelleyebilecektir.
-- Worker'lar repository'yi baştan taramak yerine orchestrator tarafından hazırlanan sürümlü task context packet'larıyla çalışacaktır.
-- Geniş keşif bir kez yapılacak, elde edilen kanıtlar birden fazla worker tarafından yeniden kullanılacaktır.
-- Worker dönüşleri structured completion packet olarak orchestrator'a iletilecektir.
-- OpenAI başlangıç profili: orchestrator `gpt-6-astra`, complex worker `gpt-5.6-sol`, fast worker `gpt-5.6-luna`.
-- Claude başlangıç profili: orchestrator `fable-5`, complex worker `opus-5`, fast worker `sonnet-5`.
-- Model profilleri provider, workspace, project ve session seviyelerinde yapılandırılabilir olacaktır.
-- Her yeni session'ın ilk görevinden önce aktif model profili kullanıcıya gösterilecek ve açık onay alınacaktır.
-- Session override'ları kullanıcı kalıcı kaydetmeyi açıkça istemedikçe canonical default'ları değiştirmeyecektir.
-- Model bulunamadığında veya provider gerekli routing kabiliyetini desteklemediğinde sessiz fallback yapılmayacaktır.
-- Ana orchestrator modeli oturum içinde değiştirilemiyorsa sistem bunu açıkça bildirecek ve gerekiyorsa yeni session başlatılmasını isteyecektir.
+- The system will not be a standard coding assistant structure, but a hierarchical agent organization managed by a central orchestrator.
+- The orchestrator will not write any product code; it will only do analysis, planning, decision-making, delegation, coordination and final reporting.
+- The orchestrator will be able to create or update control-plane records only under `.ai/tasks/**`.
+- Workers will operate on versioned task context packets prepared by the orchestrator instead of scanning the repository from scratch.
+- Broad discovery will be done once, and the resulting evidence will be reused by multiple workers.
+- Worker returns will be delivered to the orchestrator as structured completion packets.
+- OpenAI initial profile: orchestrator `gpt-6-astra`, complex worker `gpt-5.6-sol`, fast worker `gpt-5.6-luna`.
+- Claude initial profile: orchestrator `fable-5`, complex worker `opus-5`, fast worker `sonnet-5`.
+- Model profiles will be configurable at the provider, workspace, project and session levels.
+- Before the first task of every new session, the active model profile will be shown to the user and explicit approval will be taken.
+- Session overrides will not change the canonical defaults unless the user explicitly asks to persist them.
+- No silent fallback will occur when a model cannot be found or when the provider does not support the required routing capability.
+- If the main orchestrator model cannot be changed within a session, the system will state this explicitly and, if necessary, ask for a new session to be started.
 
-### 2026-09-20 — Node.js CLI çekirdeği
+### 2026-09-20 — The Node.js CLI core
 
-- CLI, Node.js 24+ ve strict TypeScript tabanlı ESM uygulaması olarak geliştirilecektir.
-- Package manager olarak pnpm kullanılacaktır.
-- Kaynak geliştirme ve test çalıştırması Node 24'ün yerleşik TypeScript type-stripping desteğini kullanacaktır; gereksiz runtime transpiler bağımlılığı taşınmayacaktır.
-- İlk çalıştırılabilir dikey dilimde `inspect`, `init`, `sync` ve `doctor` komutları oluşturulmuştur.
-- `inspect` yazma yapmadan üretim planını ve dosya çakışmalarını gösterir.
-- `init` mevcut farklı dosyaları varsayılan olarak korur; yalnızca açık `--force` ile günceller.
-- `sync` manuel tetiklemeyle repository/project gerçeklerini kanıt kaynaklarıyla kaydeder.
-- `doctor` canonical yapı, model profilleri, session confirmation ve silent-fallback yasağını doğrular.
-- Generated structure; constitution, sekiz core protokol, beş agent rolü, Task Conductor dahil sekiz canonical base skill, curated skill catalog, OpenAI/Claude model profilleri ve context/completion packet şemalarını içerir.
+- The CLI will be developed as a Node.js 24+ and strict-TypeScript-based ESM application.
+- pnpm will be used as the package manager.
+- Source development and test runs will use Node 24's built-in TypeScript type-stripping support; no unnecessary runtime transpiler dependency will be carried.
+- The `inspect`, `init`, `sync` and `doctor` commands were created in the first executable vertical slice.
+- `inspect` shows the generation plan and file conflicts without writing.
+- `init` preserves existing differing files by default; it updates them only with an explicit `--force`.
+- `sync` records repository/project facts with their evidence sources on manual trigger.
+- `doctor` validates the canonical structure, the model profiles, session confirmation and the silent-fallback prohibition.
+- The generated structure includes the constitution, eight core protocols, five agent roles, eight canonical base skills including Task Conductor, a curated skill catalog, OpenAI/Claude model profiles, and the context/completion packet schemas.
 
-### 2026-09-20 — Recursive discovery, skill registry ve path güvenliği
+### 2026-09-20 — Recursive discovery, the skill registry and path safety
 
-- Repository içindeki manifest tabanlı modüller recursive keşfedilir; iç içe `src`/test source ağaçları ayrı güvenlik limitleriyle taranır.
-- Dil, framework, package manager, build tool ve dependency seçimleri yalnız kaynak path'i taşıyan verified evidence üzerinden yapılır.
-- Sekiz base skill her proje registry'sinde canonical ve eksiksiz tutulur; teknoloji skill'leri yalnız eşleşen pack kanıtıyla aktive edilir.
-- `sync`, değiştirilmiş generated teknoloji skill'lerini açık `--force` olmadan ezmez ve aktif skill registry'sini önkoşul çıktılarından sonra en son yazar.
-- `doctor`, workspace'ten skill dosyasına kadar referans bütünlüğünü, canonical base setini, modül/command path'lerini ve lexical + symlink/junction root containment kurallarını doğrular.
+- Manifest-based modules inside the repository are discovered recursively; nested `src`/test source trees are scanned with separate safety limits.
+- Language, framework, package manager, build tool and dependency selections are made only through verified evidence carrying a source path.
+- The eight base skills are kept canonical and complete in every project registry; technology skills are activated only with matching pack evidence.
+- `sync` does not overwrite modified generated technology skills without an explicit `--force`, and writes the active skill registry last, after the prerequisite outputs.
+- `doctor` validates reference integrity from the workspace down to the skill file, the canonical base set, module/command paths, and lexical + symlink/junction root containment rules.
 
-### 2026-09-20 — Curated skill kaynakları ve Ingenium havuzu
+### 2026-09-20 — Curated skill sources and the Ingenium pool
 
-- Ingenium'un 32 skill ve 35 dosyadan oluşan proje-sahipli snapshot'ı destek script/reference dosyaları korunarak bundled kaynak haline getirilmiştir; Task Conductor bağımsız canonical base skill'e taşınmıştır.
-- Skill kaynakları repository, revision, license ve trust seviyesiyle kataloglanır; generated projelerde katalog `.ai/skills/catalog.yaml` olarak yazılır.
-- React, Java, Node, Vue, JPA/Hibernate ve Tailwind eşleşmeleri verified repository evidence üzerinden otomatik aktive edilir.
-- Debugging, refactoring, dokümantasyon, release, performans, tasarım, oyun ve diğer uzmanlık skill'leri on-demand kalır; orchestrator açıklama eşleşmesi olmadan bunları yüklemez.
-- Anthropic Agent Skills, Superpowers ve Microsoft Agent Skills araştırılmış, sabit commit kimlikleriyle `reference-only` kaydedilmiş ve otomatik üçüncü taraf kod/talimat çalıştırma kapsam dışında bırakılmıştır.
-- Kaynak havuzunun tamamının context'e yüklenmesi yasaktır; katalog metadata'sı ucuz keşif, `SKILL.md` ve destek kaynakları progressive disclosure için kullanılır.
+- Ingenium's project-owned snapshot of 32 skills and 35 files was turned into a bundled source with its supporting script/reference files preserved; Task Conductor was moved into an independent canonical base skill.
+- Skill sources are catalogued with repository, revision, license and trust level; in generated projects the catalog is written as `.ai/skills/catalog.yaml`.
+- React, Java, Node, Vue, JPA/Hibernate and Tailwind matches are activated automatically through verified repository evidence.
+- Debugging, refactoring, documentation, release, performance, design, game and other specialist skills remain on-demand; the orchestrator does not load them without a description match.
+- Anthropic Agent Skills, Superpowers and Microsoft Agent Skills were researched, recorded as `reference-only` with pinned commit ids, and automatic third-party code/instruction execution was left out of scope.
+- Loading the entire source pool into context is forbidden; catalog metadata is used for cheap discovery, and `SKILL.md` plus supporting resources for progressive disclosure.
 
-### 2026-09-21 — Orantılı yürütme ve canonical Task Conductor
+### 2026-09-21 — Proportional execution and the canonical Task Conductor
 
-- Optimizasyon; doğruluk sınırı korunarak token/context maliyeti ve geçen sürenin birlikte azaltılması olarak tanımlanır.
-- Her görev uygulama öncesi `trivial`, `standard` veya `high-risk` sınıfına alınır; scope veya bulgular değişirse tier yükseltilir.
-- Trivial işler bir fast worker, kompakt kullanıcı-onaylı plan ve claim-specific kanıtla yürür; broad discovery, full-project kontroller, reviewer ve browser varsayılan değildir.
-- Standard işlerde targeted kontroller ve yalnız material/boundary-crossing değişikliklerde reviewer; high-risk işlerde complex worker, kapsamlı kanıt ve bağımsız review zorunludur.
-- Headed browser kullanıcı talebi veya daha ucuz kanıtların çözemediği isimlendirilmiş bir kriter için ayrıca onay olmadıkça kullanılamaz.
-- Task Conductor Ingenium snapshot'ından ayrılıp sekizinci canonical base skill yapılmıştır; non-trivial brief'lerde merkezi decomposition ve just-in-time skill routing sağlar.
-- Skill durumu `available`, project registry ile `active` ve task context'inde `loaded` olarak ayrılır; bootstrap bütün kataloğu taramaz.
+- Optimization is defined as reducing token/context cost and elapsed time together, while preserving the accuracy boundary.
+- Every task is classified as `trivial`, `standard` or `high-risk` before execution; the tier is escalated if the scope or the findings change.
+- Trivial work runs with one fast worker, a compact user-approved plan and claim-specific evidence; broad discovery, full-project checks, a reviewer and a browser are not the default.
+- Standard work uses targeted checks and a reviewer only on material/boundary-crossing changes; high-risk work mandates a complex worker, comprehensive evidence and independent review.
+- A headed browser may not be used unless the user requests it or separate approval is given for a named criterion that cheaper evidence cannot settle.
+- Task Conductor was separated from the Ingenium snapshot and made the eighth canonical base skill; it provides central decomposition and just-in-time skill routing on non-trivial briefs.
+- Skill state is separated into `available`, `active` through the project registry, and `loaded` in the task context; bootstrap does not scan the whole catalog.
 
-### 2026-09-20 — Synorch paketleme ve yayın güvenliği
+### 2026-09-20 — Synorch packaging and release safety
 
-- Ürün, npm üzerinde `synorch` paketi olarak; kurulum sonrasında `syn` ve `synorch` executable alias'larıyla dağıtılacaktır.
-- İlk pre-stable sürüm `0.1.0` ve Git tag'i `v0.1.0` olarak tanımlanmıştır; sürüm geçmişi Keep a Changelog ve Semantic Versioning ile tutulacaktır.
-- Her paketleme öncesinde typecheck, test ve build zorunlu `prepack` kapısından geçer; paket içeriği allowlist ile sınırlandırılır.
-- CI ve npm publish workflow'ları salt-okunur varsayılan yetkiler, sabit action commit SHA'ları ve release-tag/sürüm eşleşme kontrolü kullanır.
-- İlk npm yayını 2FA ile manuel yapılır; sonraki yayınlar GitHub Actions ile token saklamadan npm Trusted Publishing/OIDC üzerinden gerçekleştirilir.
-- MIT lisansı, özel güvenlik bildirimi, changelog ve insan odaklı release notları public dağıtım sözleşmesinin parçasıdır.
+- The product will be distributed on npm as the `synorch` package, with the `syn` and `synorch` executable aliases after installation.
+- The first pre-stable version was defined as `0.1.0` with the Git tag `v0.1.0`; version history will be kept with Keep a Changelog and Semantic Versioning.
+- Before every packaging run, typecheck, test and build pass through a mandatory `prepack` gate; package contents are restricted with an allowlist.
+- The CI and npm publish workflows use read-only default permissions, pinned action commit SHAs, and a release-tag/version match check.
+- The first npm release is done manually with 2FA; subsequent releases are performed through GitHub Actions via npm Trusted Publishing/OIDC without storing a token.
+- The MIT license, a private security reporting channel, a changelog and human-focused release notes are part of the public distribution contract.

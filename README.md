@@ -328,8 +328,6 @@ pnpm dev -- inspect # run the CLI from source
 | [Release notes v0.2.0](./docs/releases/v0.2.0.md) | Human-readable notes for the current release. |
 | [Security policy](./SECURITY.md) | Report vulnerabilities through the private channel, not a public issue. |
 
-> The architecture documents are currently written in Turkish.
-
 ---
 
 ## Roadmap

@@ -550,7 +550,7 @@ export function replayTransitions(events: readonly SessionEvent[]): readonly str
         step("run", event.run_id ?? "", event.data.from, event.data.to, event.seq);
         break;
       case "plan/proposed":
-        states.set(`plan:${event.data.plan.plan_id}`, "draft");
+        states.set(`plan:${event.data.plan.plan_id}`, "proposed");
         break;
       case "plan/state_changed":
         step("plan", event.data.plan_id, event.data.from, event.data.to, event.seq);

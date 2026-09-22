@@ -8,7 +8,7 @@
 | --- | --- |
 | `createMemoryStore(root, { workspaceRoot?, now? })` | `MemoryStore` sözleşmesini düz Markdown vault üzerinde uygular (`MarkdownMemoryStore`). `workspaceRoot`, `source_ref` yollarının stale kontrolü için çözüldüğü çalışma köküdür. |
 | `resolveMemoryRoot(config, projectId, home)` | ADR-16 kök çözümü (`config: MemoryConfig`, sözleşmedeki `memoryConfigSchema`). `config.root` doluysa o kullanılır (`~` ve göreli değerler `home`'a göre çözülür); yoksa `<home>/.synorch/memory/<project-id>/`. `home` enjekte edilir, testler gerçek ev dizinine dokunmaz. |
-| `memoryCommand` / `createMemoryCommand(options)` | `syn memory ...` için `CommandHandler`. `options` ile `config`, `home`, `platform`, `obsidian` başlatıcısı ve saat enjekte edilir. |
+| `memoryCommand` / `createMemoryCommand(options)` | `syn memory ...` için `CommandHandler`. `options` ile `config`, `home`, `platform`, `obsidian` başlatıcısı ve saat enjekte edilir; I5-B ekleri: `root(projectId)` (`--root` yokken vault kökü; composition root `<SYNORCH_HOME>/memory/<project-id>` verir) ve `onDecision(outcome)` (her `accept`/`reject` sonrası denetim yükleri; CLI bunları `syn memory decisions` oturumuna olay olarak ekler). |
 | `MemoryConflictError` | `persist`/kabul yazımında dosya beklenen digest'ten farklıysa atılır; `code: store_write_failed`, `workspace_effect: none`. |
 | `decide(...)` | Sözleşmedeki `MemoryDecisionOutcome`'u döndürür: `memory/proposal_decided` ve (varsa) `memory/persisted` olay yükleri ile orchestrator kararında `runId`. Olay günlüğüne yazmak çağıranın (I4/I5) işidir. |
 | `candidates(id?)`, `candidateToProposal(...)` | Kural tabanlı ilişki/çelişki adayları ve bunları bekleyen kuyruk önerisine çeviren yardımcı. |

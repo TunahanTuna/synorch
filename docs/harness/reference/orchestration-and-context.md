@@ -36,7 +36,7 @@ const coordinator = createCoordinator({ sessions, blobs, router, policy, approva
 ## 2. Run akışı
 
 1. `run/created` → run `created → running`. Orchestrator için `PolicyEngine.compute` `taskScope.owned = [".ai/tasks/**"]` ile çağrılır ve `policy/snapshot` yazılır; orchestrator route'u `route/decided` ile kaydedilir.
-2. **Plan.** `Planner.propose` bir aday döndürür; `validatePlan` = `planSchema` + beklenen `run_id`/`plan_id`/`version`. Geçersiz aday olaya yazılmaz, sorunlar geri besleme olarak ikinci denemeye verilir (`maxPlanAttempts`, varsayılan 2). Geçerli plan `plan/proposed` + `plan/state_changed draft → proposed`.
+2. **Plan.** `Planner.propose` bir aday döndürür; `validatePlan` = `planSchema` + beklenen `run_id`/`plan_id`/`version`. Geçersiz aday olaya yazılmaz, sorunlar geri besleme olarak ikinci denemeye verilir (`maxPlanAttempts`, varsayılan 2). Geçerli plan `plan/proposed` olarak yazılır ve doğrudan `proposed` durumunda açılır; ayrı bir `draft → proposed` olayı yazılmaz (I1 projection ve recovery ile aynı kural, `attempt/started` gibi).
 3. **Onay (ADR-08).** `autonomous`: orchestrator kendi planını onaylar; `approval/requested` ve `approval/decided { decided_by: orchestrator, mode: autonomous }` olayları audit için yazılır, kullanıcıya soru sorulmaz. `ask`: run `waiting_for_approval`'a geçer, `ApprovalBroker` kullanıcıya sorar. Headless broker `unavailable` döner; plan `rejected`, run `cancelled`, exit 3. Broker'dan gelen karar `decisionAnswers` ile doğrulanır: şema, aynı `approval_id`/`subject_digest`/mod ve insan-only konular (`provider-change`, `budget`) için `decided_by: user` şartı.
 4. **DAG.** Her plan görevi için `task/created` yazılır ve görevin route'u önceden çözülür (sağlayıcı limiti için). `createDagScheduler` çevrimsizliği doğrular; bir görev yalnız tüm bağımlılıkları `completed` iken, global/sağlayıcı/çalışma alanı limitleri izin veriyorsa ve çalışan hiçbir görevle `owned_paths` kesişmiyorsa başlar. Kesişim testi sözleşmedeki muhafazakâr `pathPatternsOverlap`'tir. Plan şeması zaten bağımsız çakışan yazarları reddeder; scheduler ikinci ve bağımsız bir korumadır. Görevin slotu review ve integrate bitene kadar tutulur.
 5. **Görev hattı** (her geçiş `validateTransition` ile denetlenir, `task/state_changed` olarak yazılır):
@@ -47,7 +47,7 @@ const coordinator = createCoordinator({ sessions, blobs, router, policy, approva
 | `ready → running` | `WorkerManager.dispatch`; kaynak değişmişse `stale_packet` → `refreshPacketSources` ile yeniden paketlenir. |
 | completion `needs_context` | `running → needs_context → ready`, kaynaklar tazelenir, değişen kaynağa dayanan `known_facts` düşürülüp `open_questions`'a yazılır. |
 | completion `blocked` | `running → blocked` (görev biter). |
-| completion `failed`/`partial` | `running → failed → retry_pending → ready`, delta packet ile yeni attempt (`maxRetries`). |
+| completion `failed`/`partial` | `running → failed → retry_pending → ready`, delta packet ile yeni attempt (`maxRetries`). Retry'dan önce route yeniden çözülür: kota bitip bloklanan route (`RouteBlockedFailure`) sessizce değiştirilmez; router'ın `provider-change` önerisi `approval/requested` + `approval/decided` olarak kaydedilir ve yalnız kullanıcı onayıyla uygulanır, aksi halde görev `blocked` olur. |
 | completion `completed` | `running → verifying`, orchestrator doğrulaması (§4). |
 | doğrulama geçti, `trivial` | Değişiklik varsa `integrate`, `verifying → completed`. |
 | doğrulama geçti, `standard`/`high-risk` | `verifying → reviewing`, bağımsız review (§5). |
@@ -72,7 +72,7 @@ Her attempt:
 
 | Mod | Ne zaman | Davranış |
 | --- | --- | --- |
-| `worktree` | Git deposu (çalışma kökü = repo kökü), commit var, kullanıcının commit edilmemiş değişiklikleri `owned_paths` ile kesişmiyor | `~/.synorch/worktrees/<project-id>/<attempt-id>` altında `git worktree add --detach HEAD`. Bu provider'ın daha önce integrate ettiği (henüz commit edilmemiş) dosyalar kullanıcı değişikliği sayılmaz ve yeni worktree'ye kopyalanır. `home` test için enjekte edilir. |
+| `worktree` | Git deposu (çalışma kökü = repo kökü), commit var, kullanıcının commit edilmemiş değişiklikleri `owned_paths` ile kesişmiyor | `~/.synorch/worktrees/<project-id>/<attempt-id>` altında `git worktree add --detach HEAD`. Bu provider'ın daha önce integrate ettiği (henüz commit edilmemiş) dosyalar kullanıcı değişikliği sayılmaz ve yeni worktree'ye kopyalanır. `home` test için enjekte edilir; `worktreesRoot` kökü tamamen değiştirir (composition root `<SYNORCH_HOME>/worktrees` verir). |
 | `scoped-dir` | Git değil, veya kullanıcı değişikliği owned yollarla çakışıyor, veya packet bunu istiyor | Yerinde yazma; attempt öncesi içerik saklanır (git'te HEAD + kirli dosyaların anlık kopyası, git dışında owned dosyaların kopyası + tüm ağacın digest manifest'i) ve `revert()` ile geri alınabilir. Eşzamanlı başka bir scoped-dir attempt'in owned yollarındaki değişiklik bu attempt'e atfedilmez. |
 | `shared-read-only` | Explorer, reviewer, `rca-only` debugger | Değişiklik beklenmez; reviewer, incelenen attempt'in kökünü (`readRoot`) okur. |
 

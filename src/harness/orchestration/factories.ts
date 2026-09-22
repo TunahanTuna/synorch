@@ -6,6 +6,8 @@ import { createWorkerManager, type WorkerManagerDependencies } from "./worker-ma
 export type SharedWorkerDependencies = Omit<WorkerManagerDependencies, "run" | "budget" | "isolation"> & {
   /** Parent of `.synorch/worktrees`; defaults to the user's home directory. */
   readonly home?: string;
+  /** Overrides `<home>/.synorch/worktrees`. */
+  readonly worktreesRoot?: string;
   readonly git?: GitRunner;
 };
 
@@ -21,6 +23,7 @@ export function createWorkerFactory(shared: SharedWorkerDependencies): WorkerFac
         projectId: scope.projectId,
         blobs: shared.blobs,
         ...(shared.home === undefined ? {} : { home: shared.home }),
+        ...(shared.worktreesRoot === undefined ? {} : { worktreesRoot: shared.worktreesRoot }),
         ...(shared.git === undefined ? {} : { git: shared.git }),
         ...(shared.platform === undefined ? {} : { platform: shared.platform }),
       }),

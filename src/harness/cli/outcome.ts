@@ -1,4 +1,4 @@
-import { HarnessError, ProviderFailure, type ApprovalDecision, type HarnessErrorInfo } from "../contracts/index.ts";
+import { HarnessError, ProviderFailure, StoreFailure, type ApprovalDecision, type HarnessErrorCode, type HarnessErrorInfo } from "../contracts/index.ts";
 
 /**
  * Maps whatever ended a runtime command to the user-facing error standard and, through
@@ -14,6 +14,25 @@ export function failureInfo(error: unknown): HarnessErrorInfo {
   if (error instanceof HarnessError) return error.info;
   if (isAbortError(error)) {
     return { code: "cancelled", message: "cancelled by the user", workspace_effect: "unknown", retry_safe: false };
+  }
+  if (error instanceof StoreFailure) {
+    const code: HarnessErrorCode =
+      error.code === "session_locked"
+        ? "session_locked"
+        : error.code === "session_not_found"
+          ? "usage_invalid"
+          : error.code === "write_failed"
+            ? "store_write_failed"
+            : "session_corrupt";
+    const session = /ses_[0-9A-HJKMNP-TV-Z]{26}/.exec(error.message)?.[0];
+    return {
+      code,
+      message: error.message.slice(0, 2000),
+      ...(session === undefined ? {} : { ids: { session_id: session } }),
+      workspace_effect: "none",
+      retry_safe: code === "session_locked" || code === "usage_invalid",
+      ...(code === "session_locked" && session !== undefined ? { next_command: `syn agent --fork ${session}` } : {}),
+    };
   }
   if (error instanceof ProviderFailure) {
     const auth = error.error.code === "unauthenticated" || error.error.code === "auth_expired";

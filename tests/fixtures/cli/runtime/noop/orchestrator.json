@@ -1,0 +1,34 @@
+[
+  {
+    "text": "One read-only check is enough for this goal.",
+    "tool_calls": [
+      {
+        "name": "plan_propose",
+        "arguments": {
+          "goal": "noop",
+          "risk": "trivial",
+          "scope": ["README.md"],
+          "tasks": [
+            {
+              "key": "check-readme",
+              "role": "explorer",
+              "objective": "Confirm README.md exists and is readable.",
+              "depends_on": [],
+              "owned_paths": [],
+              "read_paths": ["README.md"],
+              "risk": "trivial",
+              "model_tier": "fast_worker",
+              "acceptance_criteria": [{ "id": "AC-1", "statement": "README.md is readable." }],
+              "verification": []
+            }
+          ],
+          "expected_external_effects": [],
+          "verification": [],
+          "budget": { "max_wall_time_seconds": 300, "max_steps": 20 },
+          "assumptions": []
+        }
+      }
+    ]
+  },
+  { "text": "Plan proposed." }
+]

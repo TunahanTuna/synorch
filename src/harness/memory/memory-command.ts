@@ -10,6 +10,7 @@ import {
   type CommandIO,
   type ExitCode,
   type MemoryConfig,
+  type MemoryDecisionOutcome,
   type MemoryKind,
   type MemoryNote,
   type MemoryProposal,
@@ -45,6 +46,10 @@ export interface MemoryCommandOptions {
   readonly platform?: NodeJS.Platform | undefined;
   readonly obsidian?: ObsidianLauncher | undefined;
   readonly now?: (() => Date) | undefined;
+  /** Vault root when `--root` is absent; defaults to `resolveMemoryRoot(config, projectId, home)`. */
+  readonly root?: ((projectId: string) => string) | undefined;
+  /** Receives every decision's audit payloads so the caller can append them as session events. */
+  readonly onDecision?: ((outcome: MemoryDecisionOutcome) => Promise<void>) | undefined;
 }
 
 interface Context {
@@ -56,6 +61,7 @@ interface Context {
   readonly positionals: readonly string[];
   readonly obsidian: ObsidianLauncher;
   readonly now: () => Date;
+  readonly onDecision: ((outcome: MemoryDecisionOutcome) => Promise<void>) | undefined;
 }
 
 interface ParsedValues {
@@ -106,7 +112,7 @@ export function createMemoryCommand(options: MemoryCommandOptions = {}): Command
     const platform = options.platform ?? process.platform;
     const home = options.home ?? io.env.HOME ?? io.env.USERPROFILE ?? homedir();
     const projectId = deriveProjectId(io.cwd, platform);
-    const root = values.root ?? resolveMemoryRoot(options.config, projectId, home);
+    const root = values.root ?? options.root?.(projectId) ?? resolveMemoryRoot(options.config, projectId, home);
     const now = options.now ?? (() => new Date());
     const context: Context = {
       io,
@@ -117,6 +123,7 @@ export function createMemoryCommand(options: MemoryCommandOptions = {}): Command
       positionals,
       obsidian: options.obsidian ?? createSystemObsidianLauncher(io.env, platform),
       now,
+      onDecision: options.onDecision,
     };
     try {
       return await HANDLERS[subcommand as (typeof MEMORY_SUBCOMMANDS)[number]](context);
@@ -299,6 +306,7 @@ async function decide(context: Context, state: "accepted" | "rejected"): Promise
   if (!id.success) return fail(context, `'${raw}' is not a proposal id (prop_<ULID>)`);
   const reason = context.values.reason?.trim() || `${state} by the user via syn memory`;
   const outcome = await context.store.decide(id.data, { by: "user", at: context.now().toISOString(), reason }, state);
+  await context.onDecision?.(outcome);
   const persisted = outcome.persisted === undefined ? "" : `; wrote ${outcome.persisted.memory_id} (${outcome.persisted.path})`;
   context.io.stdout(`${state} ${outcome.decided.proposal_id}${persisted}\n`);
   return EXIT_CODES.success;

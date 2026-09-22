@@ -7,6 +7,7 @@ import {
   HarnessError,
   isTerminalState,
   packetDigest,
+  RouteBlockedFailure,
   validateTransition,
   type ApprovalBroker,
   type AttemptId,
@@ -275,7 +276,6 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         return await finish("failed", exitCodeFor("verification_failed"), `no valid plan: ${feedback.slice(0, 5).join("; ")}`, "failed");
       }
       await recorder.record("plan/proposed", { plan, digest: planDigestValue });
-      await recorder.record("plan/state_changed", { plan_id: plan.plan_id, digest: planDigestValue, from: "draft", to: "proposed", reason: "validated plan proposed" });
 
       if (request.policyMode === "ask") await moveRun("waiting_for_approval", "plan approval requested");
       const approval = await approvePlan({ plan, digest: planDigestValue, mode: request.policyMode, broker: deps.approvals, now }, signal);
@@ -395,6 +395,28 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           ];
         });
 
+      /**
+       * A blocked route (exhausted quota) is never replaced silently: the router proposes a
+       * provider change, the broker asks a human, and only an allowing user decision applies it.
+       */
+      const changeProvider = async (entry: TaskEntry, failure: RouteBlockedFailure): Promise<boolean> => {
+        let proposal;
+        try {
+          proposal = deps.router.proposeProviderChange(failure, { runId, taskId: entry.taskId });
+        } catch {
+          return false;
+        }
+        await recorder.record("approval/requested", { request: proposal.request }, { taskId: entry.taskId, actor: { kind: "orchestrator", role: "orchestrator" } });
+        const decision = await deps.approvals.request(proposal.request, signal);
+        await recorder.record("approval/decided", { decision }, { taskId: entry.taskId, actor: decision.decided_by === "user" ? { kind: "user" } : { kind: "system" } });
+        try {
+          deps.router.applyProviderChange(decision);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
       const issueDelta = async (entry: TaskEntry, base: TaskContextPacket, notes: readonly string[], evidence: Parameters<typeof createDeltaPacket>[0]["evidence"]): Promise<TaskContextPacket> => {
         const delta = createDeltaPacket({ base, createdAt: now().toISOString(), notes: notes.slice(0, 20), evidence, newCriteria: [] });
         const blob = await recorder.putJson(delta, PACKET_MEDIA_TYPE);
@@ -432,6 +454,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           }
           let handle;
           try {
+            if (entry.attempts.length > 0) entry.route = await deps.router.resolve({ tier: entry.plan.model_tier, role: entry.plan.role }, signal);
             handle = await workers.dispatch(packet, signal, {
               ...(entry.route === undefined ? {} : { route: entry.route }),
               ...(seed === undefined ? {} : { seedArtifact: seed }),
@@ -440,6 +463,10 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             if (errorCodeOf(error) === "stale_packet" && repackages < limits.maxRepackages) {
               repackages += 1;
               packet = refreshPacketSources(packet, await currentDigests(packet.context.sources.map((source) => source.path), sources), now().toISOString());
+              continue;
+            }
+            if (error instanceof RouteBlockedFailure && (await changeProvider(entry, error))) {
+              entry.route = await deps.router.resolve({ tier: entry.plan.model_tier, role: entry.plan.role }, signal);
               continue;
             }
             await move(entry, "blocked", `dispatch failed: ${error instanceof Error ? error.message : String(error)}`);

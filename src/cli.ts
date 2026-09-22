@@ -25,6 +25,16 @@ Commands:
   sync     Discover projects after a manual trigger and refresh the registry.
   doctor   Validate structure, profiles and constitutional safety settings.
 
+Runtime commands (syn <command> --help for details):
+  agent             Interactive orchestrated session (--resume <session>, --fork <session>).
+  run "<goal>"      Run one goal to completion; --mode jsonl writes machine frames.
+  runs              List the runs of this project.
+  show <id>         Plan, workers, approvals, evidence and usage of a run or session.
+  doctor --runtime  Sandbox, store, auth and capability health; no network request.
+  login, logout     Connect or remove a provider identity.
+  auth status       Provider identities, without secrets.
+  memory <command>  Project memory: status, search, show, review, accept, reject.
+
 Safety:
   Existing differing files are never overwritten unless --force is explicit.
   Model fallback is never silent.

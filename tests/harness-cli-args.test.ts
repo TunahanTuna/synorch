@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { test } from "node:test";
+import os from "node:os";
+import path from "node:path";
+import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createId, jsonlFrameSchema, splitJsonlLines, validateFrameSequence } from "../src/harness/contracts/index.ts";
 import {
@@ -19,9 +22,14 @@ import {
 } from "../src/harness/cli/index.ts";
 
 /**
- * I5 stage A: runtime command parsing, help and exit codes are final; renderer and colour selection
- * follows the contract (AC-2); `src/cli.ts` reaches the runtime only for runtime commands.
+ * I5: runtime command parsing, help and exit codes are final; renderer and colour selection
+ * follows the contract (AC-2); `src/cli.ts` reaches the runtime only for runtime commands. Every
+ * test that reaches the runtime uses an empty temporary SYNORCH_HOME, never the user's home.
  */
+
+const HOME = mkdtempSync(path.join(os.tmpdir(), "syn-cli-args-"));
+const ISOLATED = { SYNORCH_HOME: HOME, SYNORCH_CREDENTIAL_STORE: "file" };
+after(() => rmSync(HOME, { recursive: true, force: true }));
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const SES = createId("session");
@@ -185,7 +193,7 @@ test("renderer selection: non-TTY, pipe, TERM=dumb, --plain and SYN_PLAIN are pl
   assert.equal(terminalSettingsFor(parseHarnessArgs(["runs"]), terminal.io), undefined);
 });
 
-test("runHarnessCommand: help exits 0, usage errors exit 2, unwired commands exit 1 on stderr", async () => {
+test("runHarnessCommand: help exits 0, usage errors exit 2, a run without any route is a config error", async () => {
   const help = capture();
   assert.equal(await runHarnessCommand(["run", "--help"], help.io), 0);
   assert.equal(help.out.join(""), commandHelp("run"));
@@ -197,18 +205,18 @@ test("runHarnessCommand: help exits 0, usage errors exit 2, unwired commands exi
   assert.equal(bad.err.join(""), "Error: Invalid id: nope. Expected run_<ULID> or ses_<ULID>.\nRun `syn show --help` for usage.\n");
   assert.deepEqual(bad.out, []);
 
-  const stub = capture();
-  assert.equal(await runHarnessCommand(["auth", "status"], stub.io), 1);
-  assert.match(stub.err.join(""), /^Error \[internal\]: syn auth status is not wired to the runtime yet/);
-  assert.deepEqual(stub.out, []);
+  const unconfigured = capture(false, ISOLATED);
+  assert.equal(await runHarnessCommand(["run", "fix"], unconfigured.io), 2);
+  assert.match(unconfigured.err.join(""), /^Error \[config_invalid\]: no model route is configured for tier orchestrator/);
+  assert.deepEqual(unconfigured.out, []);
 });
 
 test("JSONL mode reports even usage errors as a valid frame sequence on stdout (AC-2)", async () => {
   for (const [argv, code, exit] of [
     [["run", "x", "--json", "--plain"], "usage_invalid", 2],
-    [["run", "fix", "--mode", "jsonl"], "internal", 1],
+    [["run", "fix", "--mode", "jsonl"], "config_invalid", 2],
   ] as const) {
-    const { io, out, err } = capture();
+    const { io, out, err } = capture(false, ISOLATED);
     assert.equal(await runHarnessCommand(argv, io), exit);
     const { lines, rest } = splitJsonlLines(out.join(""));
     assert.equal(rest, "");
@@ -221,14 +229,14 @@ test("JSONL mode reports even usage errors as a valid frame sequence on stdout (
 });
 
 test("the real binary routes runtime commands and keeps stdout free of escapes in a pipe (AC-2)", () => {
-  const jsonl = cli(["run", "fix the build", "--mode", "jsonl"]);
-  assert.equal(jsonl.status, 1);
+  const jsonl = cli(["run", "fix the build", "--mode", "jsonl"], ISOLATED);
+  assert.equal(jsonl.status, 2);
   const { lines } = splitJsonlLines(jsonl.stdout);
   assert.deepEqual(validateFrameSequence(lines.map((line) => jsonlFrameSchema.parse(JSON.parse(line)))), []);
   assert.doesNotMatch(jsonl.stdout, /\r|\x1b/);
 
-  const plain = cli(["run", "fix the build"], { FORCE_COLOR: "0" });
-  assert.equal(plain.status, 1);
+  const plain = cli(["run", "fix the build"], { ...ISOLATED, FORCE_COLOR: "0" });
+  assert.equal(plain.status, 2);
   assert.equal(plain.stdout, "");
   assert.doesNotMatch(plain.stderr, /\x1b/);
 
@@ -236,9 +244,12 @@ test("the real binary routes runtime commands and keeps stdout free of escapes i
   assert.equal(help.status, 0);
   assert.equal(help.stdout, commandHelp("agent"));
 
-  const doctorRuntime = cli(["doctor", "--runtime", "--json"]);
-  assert.equal(doctorRuntime.status, 1);
-  assert.match(doctorRuntime.stderr, /syn doctor --runtime is not wired/);
+  const doctorRuntime = cli(["doctor", "--runtime", "--json"], ISOLATED);
+  const report = JSON.parse(doctorRuntime.stdout) as { schema: string; ok: boolean; network_requests: string; checks: { id: string }[] };
+  assert.equal(report.schema, "synorch.doctor.runtime");
+  assert.equal(doctorRuntime.status, report.ok ? 0 : 1);
+  assert.equal(report.network_requests, "none");
+  assert.deepEqual(report.checks.map((check) => check.id), ["node", "terminal", "config", "sandbox", "store", "auth", "capabilities"]);
 
   const usageError = cli(["login"]);
   assert.equal(usageError.status, 2);
@@ -254,7 +265,7 @@ test("the plain and JSONL paths never load pi-tui", () => {
     "} });",
   ].join("\n");
   for (const args of [["run", "x"], ["run", "x", "--json"], ["runs"], ["inspect", "--help"]]) {
-    const result = spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(hook)}`, CLI, ...args], { encoding: "utf8" });
+    const result = spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(hook)}`, CLI, ...args], { encoding: "utf8", env: { ...process.env, ...ISOLATED } });
     assert.doesNotMatch(result.stderr, /LOADED/, `${args.join(" ")} loaded pi-tui`);
   }
   const control = spawnSync(

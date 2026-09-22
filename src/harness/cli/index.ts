@@ -1,14 +1,36 @@
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
-import { createId, EXIT_CODES, exitCodeFor, type HarnessErrorInfo } from "../contracts/index.ts";
+import {
+  createId,
+  deriveProjectId,
+  EVENT_VERSIONS,
+  EXIT_CODES,
+  exitCodeFor,
+  type CommandIO,
+  type HarnessErrorInfo,
+  type MemoryDecisionOutcome,
+  type SessionEventDraft,
+} from "../contracts/index.ts";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
-import { formatHarnessError, JsonlRenderer, type FrameSink } from "../tui/index.ts";
+import { createAuthCommand } from "../auth/index.ts";
+import { createMemoryCommand, resolveMemoryRoot } from "../memory/index.ts";
+import { createSessionStore } from "../store/index.ts";
+import { formatHarnessError, JsonlRenderer, PlainLineRenderer, type FrameSink, type GuardProcess, type InputStream } from "../tui/index.ts";
 import { parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";
+import { loadRuntimeConfig, resolveHome } from "./config.ts";
+import { doctorRuntime } from "./doctor.ts";
 import { commandHelp } from "./help.ts";
+import { runsCommand, showCommand } from "./inspect.ts";
+import { failureInfo } from "./outcome.ts";
+import type { RuntimeOverrides } from "./runtime.ts";
+import { agentCommand, runCommand, type SessionIO } from "./session.ts";
 import { resolveTerminalSettings, streamHasColors, type TerminalSettings } from "./terminal.ts";
 
 /**
- * I5 — composition root for runtime commands. `src/cli.ts` reaches this module only through a
- * literal dynamic `import("./harness/cli/index.ts")`, so `inspect/init/sync/doctor` never load it.
+ * I5 — entry of the runtime commands. `src/cli.ts` reaches this module only through a literal
+ * dynamic `import("./harness/cli/index.ts")`, so `inspect/init/sync/doctor` never load it. The
+ * composition root itself is `createRuntime()` in `runtime.ts`.
  */
 export const HARNESS_COMMANDS = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory"] as const;
 export type HarnessCommand = (typeof HARNESS_COMMANDS)[number];
@@ -17,6 +39,12 @@ export { parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from 
 export { commandHelp } from "./help.ts";
 export { approvalFailure, failureInfo, isAbortError } from "./outcome.ts";
 export { resolveTerminalSettings, streamHasColors, type TerminalFacts, type TerminalRequest, type TerminalSettings } from "./terminal.ts";
+export { createRuntime, type Runtime, type RuntimeOptions, type RuntimeOverrides } from "./runtime.ts";
+export { loadRuntimeConfig, resolveHome, type RuntimeConfig } from "./config.ts";
+export { loadScript, scriptStep } from "./scripted-script.ts";
+
+/** Title of the per-project session that records `syn memory accept|reject` decisions. */
+export const MEMORY_AUDIT_TITLE = "syn memory decisions";
 
 /** Mirrors the routing rule in `src/cli.ts`: a runtime command name, or `doctor --runtime`. */
 export function isHarnessInvocation(argv: readonly string[]): boolean {
@@ -38,6 +66,13 @@ export interface HarnessProcessIO {
   readonly stdinIsTTY: boolean;
   readonly stdout: HarnessStream;
   readonly stderr: HarnessStream;
+  /** User input for `syn agent`, prompts and `syn run -`; absent means no input. */
+  readonly stdin?: InputStream;
+  /** Aborting it cancels the running command (tests; the real process uses SIGINT). */
+  readonly signal?: AbortSignal;
+  /** The real process, for signal hooks and terminal restoration. */
+  readonly process?: GuardProcess;
+  readonly platform?: NodeJS.Platform;
 }
 
 function processIO(): HarnessProcessIO {
@@ -47,10 +82,13 @@ function processIO(): HarnessProcessIO {
     stdinIsTTY: process.stdin.isTTY === true,
     stdout: process.stdout,
     stderr: process.stderr,
+    stdin: process.stdin,
+    process: process as unknown as GuardProcess,
+    platform: process.platform,
   };
 }
 
-/** The renderer an invocation will use once it runs; exposed so selection is testable in stage A. */
+/** The renderer an invocation will use once it runs. */
 export function terminalSettingsFor(parsed: ParsedCommand, io: HarnessProcessIO): TerminalSettings | undefined {
   if (parsed.kind !== "agent" && parsed.kind !== "run") return undefined;
   return resolveTerminalSettings(
@@ -81,24 +119,144 @@ async function reportAsFrames(error: HarnessErrorInfo, io: HarnessProcessIO): Pr
   return renderer.exitCode;
 }
 
-function commandLabel(parsed: ParsedCommand): string {
-  switch (parsed.kind) {
-    case "doctor-runtime":
-      return "doctor --runtime";
-    case "auth-status":
-      return "auth status";
-    case "memory":
-      return `memory ${parsed.subcommand}`;
-    default:
-      return parsed.kind;
+/** Removes the CLI's common flags so the owning module sees only its own arguments. */
+export function stripCommonFlags(args: readonly string[]): string[] {
+  const kept: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index] ?? "";
+    if (argument === "--") {
+      kept.push(...args.slice(index));
+      break;
+    }
+    if (argument === "--plain") continue;
+    if (argument === "-t" || argument === "--target" || argument === "--color") {
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--target=") || argument.startsWith("--color=")) continue;
+    kept.push(argument);
+  }
+  return kept;
+}
+
+function commandIO(io: HarnessProcessIO, cwd: string, signal: AbortSignal, interactive: boolean): { readonly io: CommandIO; readonly close: () => Promise<void> } {
+  const renderer = new PlainLineRenderer({
+    stdout: (text) => void io.stdout.write(text),
+    stderr: (text) => void io.stderr.write(text),
+    color: false,
+    policyMode: "autonomous",
+    ...(interactive && io.stdin !== undefined ? { input: io.stdin } : {}),
+    interactive: interactive && io.stdin !== undefined,
+    environment: { platform: io.platform ?? process.platform, env: io.env },
+  });
+  return {
+    io: {
+      cwd,
+      env: io.env,
+      renderer,
+      signal,
+      stdout: (text) => void io.stdout.write(text),
+      stderr: (text) => void io.stderr.write(text),
+    },
+    close: () => renderer.stop("completed"),
+  };
+}
+
+async function recordMemoryDecision(home: string, cwd: string, platform: NodeJS.Platform, outcome: MemoryDecisionOutcome): Promise<void> {
+  const sessions = createSessionStore(home);
+  const projectId = deriveProjectId(cwd, platform);
+  const existing = (await sessions.list(projectId)).find((summary) => summary.manifest.title === MEMORY_AUDIT_TITLE);
+  const log = existing
+    ? await sessions.openForWrite(existing.manifest.session_id)
+    : await sessions.create({ session_id: createId("session"), project_id: projectId, workspace_root: path.resolve(cwd), created_at: new Date().toISOString(), title: MEMORY_AUDIT_TITLE });
+  const actor = outcome.decided.decided_by === "orchestrator" ? ({ kind: "orchestrator", role: "orchestrator" } as const) : ({ kind: "user" } as const);
+  const correlation = outcome.runId === undefined ? {} : { run_id: outcome.runId };
+  try {
+    await log.append({ type: "memory/proposal_decided", event_version: EVENT_VERSIONS["memory/proposal_decided"], actor, ...correlation, data: outcome.decided } as SessionEventDraft);
+    if (outcome.persisted !== undefined) {
+      await log.append({ type: "memory/persisted", event_version: EVENT_VERSIONS["memory/persisted"], actor, ...correlation, data: outcome.persisted } as SessionEventDraft);
+    }
+  } finally {
+    await log.close();
   }
 }
 
-/**
- * Runs one runtime command and returns its exit code. Stage A: parsing, help, renderer selection
- * and exit codes are final; execution reports that the runtime is not wired yet (I5 stage B).
- */
-export async function runHarnessCommand(argv: readonly string[], io: HarnessProcessIO = processIO()): Promise<number> {
+async function dispatch(parsed: Exclude<ParsedCommand, { kind: "help" }>, io: HarnessProcessIO, overrides: RuntimeOverrides): Promise<number> {
+  const platform = io.platform ?? process.platform;
+  const home = overrides.home ?? resolveHome(io.env);
+  const signal = io.signal ?? new AbortController().signal;
+  switch (parsed.kind) {
+    case "run":
+    case "agent": {
+      const sessionIO: SessionIO = {
+        env: io.env,
+        cwd: io.cwd,
+        stdinIsTTY: io.stdinIsTTY,
+        stdout: io.stdout,
+        stderr: io.stderr,
+        stdin: io.stdin,
+        platform,
+        process: io.process,
+        signal: io.signal,
+      };
+      return parsed.kind === "run" ? runCommand(parsed, sessionIO, overrides) : agentCommand(parsed, sessionIO, overrides);
+    }
+    case "runs":
+    case "show": {
+      const inspectIO = { cwd: io.cwd, env: io.env, home, platform, stdout: (text: string) => void io.stdout.write(text) };
+      return parsed.kind === "runs" ? runsCommand(inspectIO, parsed.common.target, parsed.json) : showCommand(inspectIO, parsed.common.target, parsed.id, parsed.json);
+    }
+    case "doctor-runtime":
+      return doctorRuntime(
+        { cwd: io.cwd, env: io.env, stdinIsTTY: io.stdinIsTTY, stdoutIsTTY: io.stdout.isTTY === true, platform, stdout: (text) => void io.stdout.write(text) },
+        parsed.common.target,
+        parsed.probeModel,
+        parsed.json,
+        overrides,
+      );
+    case "login":
+    case "logout":
+    case "auth-status": {
+      const handler = createAuthCommand({
+        home: () => home,
+        ...(overrides.credentialStore === undefined ? {} : { store: overrides.credentialStore }),
+        providerOptions: { ...(overrides.authOptions ?? {}), ...(overrides.fetch === undefined ? {} : { fetch: overrides.fetch }), env: io.env },
+      });
+      const name = parsed.kind === "auth-status" ? "auth" : parsed.kind;
+      const cwd = path.resolve(io.cwd, parsed.common.target ?? ".");
+      const command = commandIO(io, cwd, signal, parsed.kind === "login" && io.stdinIsTTY);
+      try {
+        return await handler([name, ...stripCommonFlags(parsed.args)], command.io);
+      } finally {
+        await command.close();
+      }
+    }
+    case "memory": {
+      const config = await loadRuntimeConfig(home, io.cwd).catch(() => undefined);
+      const handler = createMemoryCommand({
+        config: config?.memory,
+        platform,
+        root: (projectId) => (config?.memory?.root !== undefined ? resolveMemoryRoot(config.memory, projectId, os.homedir()) : path.join(home, "memory", projectId)),
+        onDecision: async (outcome) => {
+          try {
+            await recordMemoryDecision(home, io.cwd, platform, outcome);
+          } catch (error) {
+            io.stderr.write(`warning: the decision was applied but its audit event could not be recorded: ${failureInfo(error).message}\n`);
+          }
+        },
+      });
+      const command = commandIO(io, io.cwd, signal, false);
+      try {
+        return await handler(parsed.args, command.io);
+      } finally {
+        await command.close();
+      }
+    }
+  }
+}
+
+/** Runs one runtime command and returns its exit code. */
+export async function runHarnessCommand(argv: readonly string[], io: HarnessProcessIO = processIO(), overrides: RuntimeOverrides = {}): Promise<number> {
   let parsed: ParsedCommand;
   try {
     parsed = parseHarnessArgs(argv);
@@ -117,13 +275,12 @@ export async function runHarnessCommand(argv: readonly string[], io: HarnessProc
     return EXIT_CODES.success;
   }
 
-  const notWired: HarnessErrorInfo = {
-    code: "internal",
-    message: `syn ${commandLabel(parsed)} is not wired to the runtime yet (I5 stage B)`,
-    workspace_effect: "none",
-    retry_safe: true,
-  };
-  if (parsed.kind === "run" && parsed.jsonl) return reportAsFrames(notWired, io);
-  io.stderr.write(formatHarnessError(notWired));
-  return exitCodeFor(notWired.code);
+  try {
+    return await dispatch(parsed, io, overrides);
+  } catch (error) {
+    const info = failureInfo(error);
+    if (parsed.kind === "run" && parsed.jsonl) return reportAsFrames(info, io);
+    io.stderr.write(formatHarnessError(info));
+    return exitCodeFor(info.code);
+  }
 }

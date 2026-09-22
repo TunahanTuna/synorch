@@ -64,6 +64,8 @@ export interface IsolationProviderDependencies {
   readonly projectId: ProjectId;
   /** Parent of `.synorch`; defaults to the user's home directory. */
   readonly home?: string;
+  /** Overrides `<home>/.synorch/worktrees` (the composition root passes `<SYNORCH_HOME>/worktrees`). */
+  readonly worktreesRoot?: string;
   readonly git?: GitRunner;
   readonly blobs?: BlobStore;
   readonly platform?: NodeJS.Platform;
@@ -198,7 +200,8 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
   /** After-digests of paths this provider integrated; such dirty paths are ours, not the user's. */
   const integrated = new Map<string, Digest | null>();
 
-  const worktreePath = (attemptId: AttemptId): string => path.join(home, ".synorch", "worktrees", deps.projectId, attemptId);
+  const worktreesRoot = deps.worktreesRoot ?? path.join(home, ".synorch", "worktrees");
+  const worktreePath = (attemptId: AttemptId): string => path.join(worktreesRoot, deps.projectId, attemptId);
 
   const pinned = async (
     workspace: { readonly mode: IsolatedWorkspace["mode"]; readonly root: string; readonly baseCommit: string | undefined; readonly self: () => OrchestratedWorkspace },

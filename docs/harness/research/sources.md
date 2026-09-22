@@ -34,3 +34,5 @@
 ## Araştırma sınırı
 
 Claude Code'un resmi GitHub deposu CLI çekirdeğinin kaynak ağacı değil; bu nedenle özel iç implementasyonuna dair iddia yok. OMP ve DeepSeek için yayımlanmış kod ve kendi mimari belgeleri kullanıldı. Synorch'a ilişkin tespitler yerel çalışma ağacından yapıldı.
+
+- TUI ve agent döngüsü araştırması (2026-09-22; pi `27c072e`, OMP `8cd6f8c`, Ink `02ae1e5`): [TUI araştırması ve ADR-04 önerisi](./tui/README.md), [pi/OMP agent kalıpları](./tui/pi-agent-patterns.md), [çapraz platform kontrol listesi](./tui/cross-platform-checklist.md).

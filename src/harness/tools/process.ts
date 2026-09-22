@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import type { ProcessResult } from "../contracts/index.ts";
+import { planLaunch, type LaunchPlan } from "./windows-launch.ts";
 
 export interface ProcessOptions {
   readonly cwd: string;
@@ -14,22 +15,30 @@ const INTERRUPT_GRACE_MS = 1_500;
 const CLOSE_GRACE_MS = 5_000;
 
 /**
- * Runs one argv without a shell, with piped stdio (no console code-page inheritance), an explicit
+ * Runs one argv without a shell (on Windows a `.cmd`/`.bat` shim is launched as `planLaunch`
+ * decides: its node target directly, or cmd.exe with every argument quoted), with piped stdio (no console code-page inheritance), an explicit
  * environment, a wall-clock timeout and cancellation that terminates the whole process tree:
  * `taskkill /T /F` on Windows, SIGINT then SIGKILL to the process group elsewhere. Output beyond
  * the limit is dropped (the pipes keep draining) and reported as truncated.
  */
-export function runProcess(argv: readonly [string, ...string[]], options: ProcessOptions, signal: AbortSignal): Promise<ProcessResult> {
+export async function runProcess(argv: readonly [string, ...string[]], options: ProcessOptions, signal: AbortSignal): Promise<ProcessResult> {
   const started = performance.now();
+  let launch: LaunchPlan;
+  try {
+    launch = await planLaunch(argv, { cwd: options.cwd, env: options.env });
+  } catch (error: unknown) {
+    return failedSpawn(error, started);
+  }
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawn(argv[0], argv.slice(1), {
+      child = spawn(launch.file, [...launch.args], {
         cwd: options.cwd,
-        env: { ...options.env },
+        env: { ...launch.env },
         stdio: ["pipe", "pipe", "pipe"],
         shell: false,
         windowsHide: true,
+        windowsVerbatimArguments: launch.verbatim,
         detached: process.platform !== "win32",
       });
     } catch (error: unknown) {

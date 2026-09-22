@@ -401,7 +401,9 @@ test("a declared reference with no file is reported as generated.missing-referen
   assert.deepEqual(await codes(directory), ["generated.missing-reference-file"]);
 });
 
-test("a reference over the 15000-byte ceiling is reported as generated.reference-size", async () => {
+test("a reference over the 15000-byte ceiling warns, exactly as the canonical ceiling does", async () => {
+  // A size overrun is a budget problem, not a broken contract (depth plan W5, design D13). The
+  // blocking rule is the 15KB ceiling on SKILL.md itself, which keeps generated.size-exceeded.
   const directory = await createFixture({
     frontmatter: { references: ["references/huge.md"] },
     referenceFiles: { "references/huge.md": "x".repeat(15_001) },
@@ -411,8 +413,18 @@ test("a reference over the 15000-byte ceiling is reported as generated.reference
 
   assert.deepEqual(
     diagnostics.map((diagnostic) => [diagnostic.severity, diagnostic.code]),
-    [["error", "generated.reference-size"]],
+    [["warning", "generated.reference-size"]],
   );
+  assert.match(diagnostics[0]?.message ?? "", /15001 bytes, above the 15000 byte ceiling/);
+});
+
+test("a reference at the ceiling is accepted", async () => {
+  const directory = await createFixture({
+    frontmatter: { references: ["references/exact.md"] },
+    referenceFiles: { "references/exact.md": "x".repeat(15_000) },
+  });
+
+  assert.deepEqual(await codes(directory), []);
 });
 
 test("a reference escaping through a symbolic link is rejected", async () => {
@@ -528,4 +540,61 @@ class RejectReferencePathFileSystem extends NodeFileSystem {
 function isLinkCapabilityError(error: unknown): boolean {
   if (!(error instanceof Error) || !("code" in error)) return false;
   return ["EACCES", "EPERM", "UNKNOWN"].includes(String(error.code));
+}
+
+test("a promotion that names no existing skill is reported once", async () => {
+  const directory = await createFixture({
+    ledger: stringifyYaml(ledgerWith({ promoted_to: "never-written" })),
+  });
+
+  const diagnostics = await diagnose(directory);
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => [diagnostic.severity, diagnostic.code]),
+    [["error", "generated.broken-promotion-link"]],
+  );
+  assert.equal(diagnostics[0]?.path, ".ai/tasks/observations.yaml");
+  assert.match(diagnostics[0]?.message ?? "", /never-written/);
+});
+
+test("a promotion that names the skill beside it is healthy", async () => {
+  const directory = await createFixture({
+    ledger: stringifyYaml(ledgerWith({ promoted_to: "api-test-execution" })),
+  });
+
+  assert.deepEqual(await codes(directory), []);
+});
+
+test("a promoted observation with no link is not a broken link", async () => {
+  const directory = await createFixture({ ledger: stringifyYaml(ledgerWith({})) });
+
+  assert.deepEqual(await codes(directory), []);
+});
+
+test("a retired skill still satisfies the promotion link it earned", async () => {
+  const directory = await createFixture({
+    ledger: stringifyYaml(ledgerWith({ promoted_to: "retired-one" })),
+  });
+  const retiredDirectory = path.join(directory, ".ai", "skills", "project", "retired-one");
+  await mkdir(retiredDirectory, { recursive: true });
+  await writeFile(path.join(retiredDirectory, "RETIRED.md"), "# Retired\n", "utf8");
+
+  assert.deepEqual(await codes(directory), []);
+});
+
+test("an active skill without a matching promoted observation is not an error", async () => {
+  // Only the ledger-to-skill direction is enforced; see reportBrokenPromotionLinks.
+  const directory = await createFixture({ ledger: stringifyYaml(ledgerWith({})) });
+
+  assert.deepEqual(await codes(directory), []);
+});
+
+function ledgerWith(overrides: Record<string, unknown>): unknown {
+  const ledger = ledgerFixture() as {
+    readonly observations: readonly Record<string, unknown>[];
+  };
+  return {
+    ...ledger,
+    observations: ledger.observations.map((entry) => ({ ...entry, ...overrides })),
+  };
 }

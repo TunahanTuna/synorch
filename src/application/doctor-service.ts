@@ -34,6 +34,7 @@ import {
   normalizeForComparison,
   resolveSafeRelativePath,
 } from "./safe-path.ts";
+import { checkByteCeiling } from "./size-ceiling.ts";
 
 export type DiagnosticSeverity = "error" | "warning" | "info";
 
@@ -55,16 +56,6 @@ const REQUIRED_PATHS = [
 
 const AGENTS_DIRECTORY = ".ai/agents";
 const CORE_PROTOCOLS_DIRECTORY = ".ai/protocols/core";
-
-/** One diagnostic code per layer, so an overrun names the budget it broke. */
-const SIZE_CODES: Readonly<Record<CanonicalSizeLayer, string>> = {
-  entrypoint: "size.entrypoint",
-  constitution: "size.constitution",
-  protocol: "size.protocol",
-  agentManifest: "size.agent-manifest",
-  baseSkill: "size.base-skill",
-  skillReference: "size.skill-reference",
-};
 
 /** Skill ids an agent manifest may name in allowed_skills or forbidden_skills. */
 const KNOWN_SKILL_REFERENCES: ReadonlySet<string> = new Set([
@@ -1012,23 +1003,6 @@ function checkRequiredSections(
       path: relativePath,
     });
   }
-}
-
-function checkByteCeiling(
-  relativePath: string,
-  content: string,
-  layer: CanonicalSizeLayer,
-  diagnostics: Diagnostic[],
-): void {
-  const ceiling = CANONICAL_SIZE_CEILINGS[layer];
-  const size = Buffer.byteLength(content, "utf8");
-  if (size <= ceiling) return;
-  diagnostics.push({
-    severity: "warning",
-    code: SIZE_CODES[layer],
-    message: `File is ${size} bytes, above the ${ceiling} byte ceiling for this layer.`,
-    path: relativePath,
-  });
 }
 
 function isPathWithin(root: string, target: string): boolean {

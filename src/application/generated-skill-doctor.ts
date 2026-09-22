@@ -13,7 +13,6 @@ import {
   observationLedgerSchema,
   type ObservationLedger,
 } from "../domain/observation-ledger.ts";
-import { CANONICAL_SIZE_CEILINGS } from "../domain/canonical-contracts.ts";
 import { isSafeDescendantPath } from "../domain/relative-path.ts";
 import { formatZodIssues, partitionZodIssues } from "../domain/zod-issues.ts";
 import type { FileSystem } from "../infrastructure/file-system.ts";
@@ -26,6 +25,7 @@ import {
 import { parseYaml } from "../infrastructure/serialization.ts";
 import type { Diagnostic } from "./doctor-service.ts";
 import { resolveSafeRelativePath } from "./safe-path.ts";
+import { checkByteCeiling } from "./size-ceiling.ts";
 
 /**
  * Validate the generated project-skill namespace: the ledger itself, the frontmatter contract of
@@ -44,10 +44,13 @@ export async function diagnoseGeneratedSkills(
   const knownTaskIds = collectConfirmingTaskIds(ledger);
 
   let activeSkills = 0;
+  const readableSkillIds = new Set<string>();
   for (const skillId of skillDirectories) {
     const relativePath = `${GENERATED_SKILL_DIRECTORY}/${skillId}/SKILL.md`;
     const absolutePath = path.join(root, GENERATED_SKILL_DIRECTORY, skillId, "SKILL.md");
+    if (await isRetiredSkill(fileSystem, root, skillId)) readableSkillIds.add(skillId);
     if (!(await isReadableFileWithinRoot(fileSystem, root, absolutePath))) continue;
+    readableSkillIds.add(skillId);
 
     const content = await fileSystem.readText(absolutePath);
     if (Buffer.byteLength(content, "utf8") > GENERATED_SKILL_MAX_BYTES) {
@@ -75,6 +78,8 @@ export async function diagnoseGeneratedSkills(
       reportUnknownConfirmations(parsed, knownTaskIds, relativePath, diagnostics);
     }
   }
+
+  reportBrokenPromotionLinks(ledger, readableSkillIds, diagnostics);
 
   if (activeSkills > GENERATED_SKILL_ACTIVE_BUDGET) {
     diagnostics.push({
@@ -153,6 +158,46 @@ async function readLedger(
     return undefined;
   }
   return result.data;
+}
+
+/** A retired skill keeps its directory but lives in `RETIRED.md`; the promotion link still holds. */
+async function isRetiredSkill(
+  fileSystem: FileSystem,
+  root: string,
+  skillId: string,
+): Promise<boolean> {
+  const absolutePath = path.join(root, GENERATED_SKILL_DIRECTORY, skillId, "RETIRED.md");
+  return isReadableFileWithinRoot(fileSystem, root, absolutePath);
+}
+
+/**
+ * The ledger half of the activation record must point at something real.
+ *
+ * Only this direction is enforced. The reverse — every `status: active` skill having a
+ * `promoted_to` observation that names it — would require an observation id and a skill id to
+ * be the same string, which nothing in the design states, and would reject a project skill a
+ * user placed by hand. The confirming task ids already tie a generated skill back to the
+ * ledger through `generated.unknown-confirmation`.
+ */
+function reportBrokenPromotionLinks(
+  ledger: ObservationLedger | undefined,
+  skillIds: ReadonlySet<string>,
+  diagnostics: Diagnostic[],
+): void {
+  for (const observation of ledger?.observations ?? []) {
+    if (observation.status !== "promoted") continue;
+    const promotedTo = observation.promoted_to;
+    if (promotedTo === undefined || skillIds.has(promotedTo)) continue;
+    diagnostics.push({
+      severity: "error",
+      code: "generated.broken-promotion-link",
+      message:
+        `Observation '${observation.id}' is promoted to '${promotedTo}', but ` +
+        `${GENERATED_SKILL_DIRECTORY}/${promotedTo}/SKILL.md does not exist. Restore the skill ` +
+        "or correct the ledger; a promotion that names nothing is not a record.",
+      path: OBSERVATION_LEDGER_PATH,
+    });
+  }
 }
 
 function collectConfirmingTaskIds(ledger: ObservationLedger | undefined): ReadonlySet<string> {
@@ -317,17 +362,13 @@ async function validateReferences(
       });
       continue;
     }
-    const size = Buffer.byteLength(await fileSystem.readText(resolved.absolute), "utf8");
-    if (size > CANONICAL_SIZE_CEILINGS.skillReference) {
-      diagnostics.push({
-        severity: "error",
-        code: "generated.reference-size",
-        message:
-          `Reference '${reference}' is ${size} bytes, above the ` +
-          `${CANONICAL_SIZE_CEILINGS.skillReference}-byte ceiling for a reference file.`,
-        path: relativePath,
-      });
-    }
+    checkByteCeiling(
+      `${GENERATED_SKILL_DIRECTORY}/${skillId}/${resolved.relative}`,
+      await fileSystem.readText(resolved.absolute),
+      "skillReference",
+      diagnostics,
+      "generated.reference-size",
+    );
   }
 }
 

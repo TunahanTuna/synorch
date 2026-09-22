@@ -3,6 +3,7 @@ dist/
 coverage/
 *.log
 .DS_Store
+.claude/
 
 # Runtime orchestration records are local by default.
 .ai/tasks/*

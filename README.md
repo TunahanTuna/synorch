@@ -330,7 +330,7 @@ pnpm dev -- inspect # run the CLI from source
 | [Architecture](./docs/AI-ORCHESTRATION-ARCHITECTURE.md) | The full design: orchestration model, protocol system, context architecture, model routing, discovery, open decisions, and the dated decision log. |
 | [Multi-provider harness vision](./docs/FUTURE-MULTI-PROVIDER-HARNESS.md) | Where this goes next — running different providers in different roles under one orchestrator. Proposal stage, not implemented. |
 | [CHANGELOG](./CHANGELOG.md) | Version history, Keep a Changelog + SemVer. |
-| [Release notes v0.2.0](./docs/releases/v0.2.0.md) | Human-readable notes for the current release. |
+| [Release notes v0.3.0](./docs/releases/v0.3.0.md) | Human-readable notes for the current release. |
 | [Security policy](./SECURITY.md) | Report vulnerabilities through the private channel, not a public issue. |
 
 ---

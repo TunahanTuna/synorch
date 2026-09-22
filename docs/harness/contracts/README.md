@@ -12,6 +12,7 @@
 | [task-packets.md](./task-packets.md) | Plan, Task Context Packet v2, delta, completion, review | `packets.ts` |
 | [cli-and-jsonl.md](./cli-and-jsonl.md) | Komutlar, renderer seçimi, JSONL frame, exit code | `jsonl.ts`, `errors.ts`, `renderer.ts` |
 | [memory.md](./memory.md) | Markdown hafıza notu, ilişki, öneri kuyruğu | `memory.ts` |
+| [runtime-seams.md](./runtime-seams.md) | ContextBuilder, AgentDriver, WorkerManager, IsolationProvider, projection, rapor araçları, glob eşleştirici | `runtime.ts`, `projection.ts`, `paths.ts` |
 
 ## Örnek blokları
 

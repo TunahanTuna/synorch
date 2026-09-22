@@ -297,6 +297,15 @@ export function createScriptedRouter(options: ScriptedRouterOptions = {}): Model
     adapterFor() {
       throw new Error("the scripted router has no adapters; use a scripted driver");
     },
+    reportFailure() {
+      return undefined;
+    },
+    proposeProviderChange() {
+      throw new Error("the scripted router never blocks a route");
+    },
+    applyProviderChange() {
+      return undefined;
+    },
   };
 }
 
@@ -346,6 +355,8 @@ export interface ScriptContext {
   toolCall(name: string, result?: { readonly ok?: boolean; readonly exitCode?: number; readonly text?: string }): Promise<ToolCallId>;
   say(text: string): Promise<void>;
   reply(json: unknown): Promise<void>;
+  /** Records a report tool call (assistant tool_call part + gateway events) as the real loop would. */
+  report(name: string, args: Record<string, unknown>, result?: { readonly ok?: boolean }): Promise<ToolCallId>;
 }
 
 export type TurnScript = (context: ScriptContext) => Promise<TurnOutcome["outcome"] | void>;
@@ -383,7 +394,7 @@ export function createScriptedDriverFactory(script: TurnScript, options: { reado
       }
       const requestId = createId("request");
       const context = options.context === undefined ? undefined : await options.context.build(
-        { sessionId: input.sessionId, runId: input.runId, taskId: input.taskId, role: input.role, route: input.route, policy: input.policy, packet: input.packet, requestId },
+        { sessionId: input.sessionId, runId: input.runId, taskId: input.taskId, attemptId: input.attemptId, role: input.role, route: input.route, policy: input.policy, packet: input.packet, requestId },
         signal,
       );
       turns.push({ input, context });
@@ -433,6 +444,26 @@ export function createScriptedDriverFactory(script: TurnScript, options: { reado
             request_id: requestId,
             message: { role: "assistant", content: [{ type: "text", text: `Done.\n\`\`\`json\n${JSON.stringify(json)}\n\`\`\`` }] },
           });
+        },
+        async report(name, args, result = {}) {
+          const toolCallId = createId("toolCall");
+          const providerCallId = `p-${toolCallId}`;
+          await append("message/recorded", {
+            role: "assistant",
+            request_id: requestId,
+            message: { role: "assistant", content: [{ type: "tool_call", provider_call_id: providerCallId, tool_call_id: toolCallId, name, arguments: args }] },
+          });
+          await append("tool/call_proposed", { tool_call_id: toolCallId, request_id: requestId, provider_call_id: providerCallId, tool_name: name, args_digest: digestOf(args) });
+          const ok = result.ok ?? true;
+          await append("tool/result_recorded", {
+            tool_call_id: toolCallId,
+            state: ok ? "succeeded" : "denied",
+            result: ok
+              ? { status: "ok", text: "report recorded", truncated: false, redactions: 0 }
+              : { status: "error", text: "", truncated: false, redactions: 0, error: { code: "invalid_arguments", message: "invalid report" } },
+            duration_ms: 1,
+          });
+          return toolCallId;
         },
       });
       const final = signal.aborted ? "cancelled" : (outcome ?? "completed");

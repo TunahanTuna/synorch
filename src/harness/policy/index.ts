@@ -5,4 +5,3 @@ export { classifyCommand, type CommandClassification, type CommandFinding } from
 export { DESTRUCTIVE_COMMAND_RULES, EXTERNAL_WRITE_RULES, type CommandRule, type CommandScope } from "./command-rules.ts";
 export { policyConfigSchema, readPolicyConfig, type PolicyConfig } from "./config.ts";
 export { createPolicyEngine, explainPermission, ROLE_EFFECT_CEILINGS } from "./engine.ts";
-export { hasReservedSegment, isAncestorOfAny, matchesAny, matchesPattern } from "./path-scope.ts";

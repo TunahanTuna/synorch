@@ -119,10 +119,13 @@ test("AC-6 the context builder refuses to prepare a request once the budget is e
     sandbox: { backend: "b", platform: "other", enforcement: "full", filesystem: "full", network: "full", process: "full", notes: [] },
     grants: [],
   });
-  await assert.rejects(
-    builder.build({ sessionId, runId: policy.run_id, taskId: undefined, role: "explorer", route: testRoute("openai", "m"), policy, packet: undefined, requestId: createId("request") }, new AbortController().signal),
-    (error: unknown) => error instanceof HarnessError && error.info.code === "budget_exceeded" && error.exitCode === 9,
+  const result = await builder.build(
+    { sessionId, runId: policy.run_id, taskId: undefined, attemptId: undefined, role: "explorer", route: testRoute("openai", "m"), policy, packet: undefined, requestId: createId("request") },
+    new AbortController().signal,
   );
+  assert.equal(result.ok, false);
+  assert.equal(result.ok ? undefined : result.reason, "budget-exceeded");
+  assert.match(result.ok ? "" : result.detail ?? "", /cost_usd/);
 });
 
 test("AC-6 crossing 120% of the cost budget cancels the running attempt", async () => {

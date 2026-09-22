@@ -1,21 +1,28 @@
 import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { isSafeRelativePath, normalizeRelativePath } from "../../domain/relative-path.ts";
-import type { HardRail } from "../contracts/index.ts";
+import type { HardRail, PathEscape, PathEscapeReason } from "../contracts/index.ts";
 
 /**
  * A path a tool refused to normalize because it cannot be expressed inside the workspace at all:
  * `..` escapes, absolute paths elsewhere, UNC/device paths, links that resolve outside, dangling
- * links and multiply linked files. The gateway turns it into a denied call with
- * `path_outside_scope`; for writes it carries the `write-outside-scope` rail.
+ * links and multiply linked files. Thrown from `normalize`, the gateway records it as a
+ * `NormalizedAction.escapes` entry so the PolicyEngine denies it in a recorded `tool/policy_decided`
+ * (`write-outside-scope` for writes); thrown from `execute`, it ends the call `path_outside_scope`.
  */
 export class ToolScopeViolation extends Error {
   public readonly rail: HardRail | undefined;
+  public readonly escape: PathEscape;
 
-  public constructor(message: string, rail: HardRail | undefined) {
+  public constructor(message: string, rail: HardRail | undefined, escape?: { readonly requested: string; readonly reason: PathEscapeReason }) {
     super(message);
     this.name = "ToolScopeViolation";
     this.rail = rail;
+    this.escape = {
+      requested: (escape?.requested ?? "").replaceAll("\0", "\\0").slice(0, 1024),
+      access: rail === undefined ? "read" : "write",
+      reason: escape?.reason ?? "changed-after-decision",
+    };
   }
 }
 
@@ -42,16 +49,16 @@ export async function resolveWorkspacePath(
   access: "read" | "write",
 ): Promise<ResolvedWorkspacePath> {
   const rail: HardRail | undefined = access === "write" ? "write-outside-scope" : undefined;
-  const fail = (reason: string): never => {
-    throw new ToolScopeViolation(`${candidate} ${reason}`, rail);
+  const fail = (message: string, reason: PathEscapeReason): never => {
+    throw new ToolScopeViolation(`${candidate} ${message}`, rail, { requested: candidate, reason });
   };
   const value = candidate.trim();
-  if (value.length === 0 || value.includes("\0")) fail("is not a valid path");
-  if (UNC_OR_DEVICE.test(value)) fail("is a UNC or device path outside the workspace");
+  if (value.length === 0 || value.includes("\0")) fail("is not a valid path", "invalid-path");
+  if (UNC_OR_DEVICE.test(value)) fail("is a UNC or device path outside the workspace", "unc-or-device");
 
   const lexicalRoot = path.resolve(workspaceRoot);
   const lexical = path.resolve(lexicalRoot, value);
-  if (!contains(lexicalRoot, lexical)) fail("resolves outside the workspace");
+  if (!contains(lexicalRoot, lexical)) fail("resolves outside the workspace", "outside-workspace");
 
   const canonicalRoot = await realpath(lexicalRoot);
   const segments = path.relative(lexicalRoot, lexical).split(path.sep).filter((segment) => segment.length > 0);
@@ -76,18 +83,18 @@ export async function resolveWorkspacePath(
     try {
       canonical = await realpath(current);
     } catch (error: unknown) {
-      if (isMissing(error)) fail("is a dangling link");
+      if (isMissing(error)) fail("is a dangling link", "dangling-link");
       throw error;
     }
-    if (!contains(canonicalRoot, canonical)) fail("escapes the workspace through a symbolic link or junction");
+    if (!contains(canonicalRoot, canonical)) fail("escapes the workspace through a symbolic link or junction", "link-escape");
   }
 
   const absolute = missing.length > 0 ? path.join(canonical, ...missing) : canonical;
   const relative = normalizeRelativePath(path.relative(canonicalRoot, absolute).split(path.sep).join("/"));
-  if (!isSafeRelativePath(relative)) fail("resolves outside the workspace");
+  if (!isSafeRelativePath(relative)) fail("resolves outside the workspace", "outside-workspace");
   if (access === "write" && missing.length === 0) {
     const info = await stat(absolute);
-    if (info.isFile() && info.nlink > 1) fail("has more than one hard link; its other names may be outside the scope");
+    if (info.isFile() && info.nlink > 1) fail("has more than one hard link; its other names may be outside the scope", "hard-link");
   }
   return { relative, absolute, exists: missing.length === 0 };
 }

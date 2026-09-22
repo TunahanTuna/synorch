@@ -22,7 +22,12 @@ export const AUTH_STATES = [
   "error",
 ] as const;
 
-export const CREDENTIAL_STORE_BACKENDS = ["os-keychain", "file-0600", "memory"] as const;
+/**
+ * Where secrets are kept, reported truthfully: `os-keychain` is a real OS credential store (macOS
+ * Keychain, Secret Service); `os-dpapi` is a file holding only ciphertext encrypted with Windows
+ * DPAPI for the current user; `file-0600` is plain text protected by file mode only.
+ */
+export const CREDENTIAL_STORE_BACKENDS = ["os-keychain", "os-dpapi", "file-0600", "memory"] as const;
 export type CredentialStoreBackend = (typeof CREDENTIAL_STORE_BACKENDS)[number];
 
 export const profileNameSchema = z
@@ -156,6 +161,16 @@ export interface ResolvedCredential {
   toJSON(): "[redacted]";
 }
 
+export interface ResolveOptions {
+  /**
+   * The provider rejected a credential that still looked valid locally (HTTP 401): refresh under the
+   * profile's refresh lock unless another process already rotated it since this process last
+   * issued it. Only `oauth-subscription` providers can refresh; other methods resolve as usual, so
+   * callers retry a rejected request only for that method.
+   */
+  readonly forceRefresh?: boolean;
+}
+
 export interface AuthProvider {
   readonly providerId: ProviderId;
   readonly method: AuthMethodKind;
@@ -170,7 +185,7 @@ export interface AuthProvider {
    * method or profile. A `cli-bridge` provider rejects with `invalid_request`: bridges resolve
    * their own credentials inside the user's client.
    */
-  resolve(signal: AbortSignal): Promise<ResolvedCredential>;
+  resolve(signal: AbortSignal, options?: ResolveOptions): Promise<ResolvedCredential>;
 }
 
 export interface CredentialStore {

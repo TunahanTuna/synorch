@@ -9,21 +9,14 @@ import {
 import { providerError } from "./errors.ts";
 
 /**
- * An auth provider that can refresh on demand after the provider rejected a credential that still
- * looked valid locally. The OAuth subscription provider implements it; API keys do not.
- */
-export interface RefreshableAuthProvider extends AuthProvider {
-  forceRefresh?(signal: AbortSignal): Promise<ResolvedCredential>;
-}
-
-/**
- * Resolves a credential and streams one request. A 401 before any output triggers exactly one
- * forced refresh and one resend of the same request; a second 401 ends in `auth_expired`. No other
- * method, profile or provider is ever tried.
+ * Resolves a credential and streams one request. For a refreshable (`oauth-subscription`) identity,
+ * a 401 before any output triggers exactly one `resolve({ forceRefresh: true })` and one resend of
+ * the same request; a second 401 ends in `auth_expired`. No other method, profile or provider is
+ * ever tried.
  */
 export async function* streamAuthenticated(
   adapter: ModelAdapter,
-  auth: RefreshableAuthProvider,
+  auth: AuthProvider,
   request: ModelRequest,
   signal: AbortSignal,
 ): AsyncGenerator<ModelStreamEvent> {
@@ -44,7 +37,7 @@ export async function* streamAuthenticated(
     return;
   }
   const rejected = !head.done && head.value.type === "error" && head.value.error.http_status === 401;
-  if (!rejected || auth.forceRefresh === undefined) {
+  if (!rejected || auth.method !== "oauth-subscription") {
     if (head.done) return;
     yield head.value;
     yield* drain(first, signal);
@@ -52,7 +45,7 @@ export async function* streamAuthenticated(
   }
 
   try {
-    credential = await auth.forceRefresh(signal);
+    credential = await auth.resolve(signal, { forceRefresh: true });
   } catch (error: unknown) {
     const failure = failureOf(error, signal);
     yield { type: "error", error: failure.code === "cancelled" ? failure : providerError("auth_expired", `${failure.message}; run \`syn login ${auth.providerId}\``) };

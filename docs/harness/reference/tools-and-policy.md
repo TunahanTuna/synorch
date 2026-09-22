@@ -24,7 +24,7 @@ Bu belge I3'ün **uyguladığı** davranışı anlatır. Sözleşmenin kendisi `
 
 `src/harness/tools/testing.ts` yalnız test çiftlerini içerir: `createMemoryEventStore` (her taslağı `sessionEventSchema` ile doğrular, `failWhen` ile append reddi simüle eder), `createMemoryBlobStore`, `createGatewayHarness`, `replayToolCallTransitions` (tool olaylarını sözleşmedeki `toolCall` durum makinesinden geçirir). Üretim kodu bunları kullanmaz.
 
-Modül sınırı: `tools` ve `policy` birbirini import etmez (ADR-01). Gateway `PolicyEngine` arayüzünü enjeksiyonla alır; yol eşleştirme mantığı bu yüzden iki modülde ayrı kopya olarak durur (`policy/path-scope.ts`, `tools/scope-match.ts`). Karar yetkisi policy'dedir; tools kopyası yalnız çok yollu okumaları (search, git çıktısı) ve eylem anı yeniden kontrolünü süzmek için kullanılır.
+Modül sınırı: `tools` ve `policy` birbirini import etmez (ADR-01). Gateway `PolicyEngine` arayüzünü enjeksiyonla alır. Yol eşleştirme sözleşmedeki tek eşleştiricidir (`matchesPathPattern`, `matchesAnyPathPattern`, `isAncestorOfAnyPattern`, `hasReservedSegment`; Dalga 2a'da iki yerel kopyanın yerine geçti). Karar yetkisi policy'dedir; tools eşleştiriciyi yalnız çok yollu okumaları (search, git çıktısı) ve eylem anı yeniden kontrolünü süzmek için kullanır.
 
 ## 2. Etkin politika (`compute`)
 
@@ -64,7 +64,7 @@ tool/execution_started → execute (timeout + iptal) → redaksiyon → sınırl
 - Sonraki tüm olayların `causation_seq`'i `tool/call_proposed`'un `seq`'idir. Actor `orchestrator` veya `worker` + rol + attempt'tir.
 - **Durum makinesi:** `tool/execution_started`'tan önce reddedilen her çağrı (bilinmeyen araç, geçersiz argüman, normalize hatası, policy, onay, sandbox) `denied` ile, kullanıcı iptali `cancelled` ile biter; `succeeded`/`failed` yalnız çalışmış çağrıya yazılır. `replayToolCallTransitions` testleri her senaryoda olay dizisini `validateTransition("toolCall", …)` ile doğrular (I1 projection'ı ile aynı kural).
 - **Append reddi:** `policy/snapshot` veya `tool/call_proposed` yazılamazsa hiçbir şey başlatılmaz ve olay bırakılmaz (driver bunu `write_failed` olarak görür). Sonraki olaylardan biri yazılamazsa çağrı o noktada durur; `tool/execution_started` yazılamadıysa araç çalışmaz. Sonuç kaydı yazılamazsa dönen durum `interrupted`'dır (recovery `tool/interrupted` yazar).
-- **Normalize reddi:** workspace içinde ifade edilemeyen yol (`..` kaçışı, dışarıdaki mutlak yol, UNC, dışarı çıkan link, sarkan link, çoklu hard link) `NormalizedAction` olarak temsil edilemez (`pathPatternSchema`). Gateway bu durumda `tool/policy_decided` yazmaz; `ToolCallOutcome.decision` içinde `rail: write-outside-scope` (okumada rail'siz) sentetik bir karar döner ve sonuç `path_outside_scope` olur (bkz. sözleşme değişiklik isteği CCR-1).
+- **Kaçan yol:** workspace içinde ifade edilemeyen yol (`..` kaçışı, dışarıdaki mutlak yol, UNC, dışarı çıkan link, sarkan link, çoklu hard link) normalize sırasında `ToolScopeViolation` (`escape {requested, access, reason}`) ile raporlanır. Gateway eylemi `paths: []` ve `escapes: [...]` ile kurar (`requested` redakte edilir), PolicyEngine'e değerlendirtir ve `tool/policy_decided` (v2) olarak **kaydeder**; motor yazmada `write-outside-scope` + `path-escape`, okumada rail'siz `read-outside-workspace` ile reddeder, sonuç `path_outside_scope` olur. Böylece her ret denetim kaydındadır (§11 CCR-1).
 - **Görünürlük:** rol `visible_to` içinde değilse `tool-not-visible` (role katmanı) ile reddedilir; bu karar da `tool/policy_decided` olarak kaydedilir.
 - **Onay:** yalnız `ask` kararında. İstek `subject_kind: action`, `subject_digest = action_digest`, `scope: once`. Yanıt şemaya uymuyorsa veya başka bir `approval_id`/`subject_digest` taşıyorsa broker adına `cancelled` kaydedilir ve eylem çalışmaz (AC-5). `allowed-for-scope` aynı oturumda aynı `action_digest` + `policy_digest` çifti için tekrar sorulmaz; argüman değişince digest değişir ve yeni karar gerekir. `allowed-once` önbelleğe alınmaz. Hata kodları: `rejected` → `approval_rejected`, `unavailable`/`expired` → `approval_unavailable`, `cancelled` → `cancelled`.
 - **Sandbox kontrolü:** etkin seviye = canlı `probe()` ile policy snapshot'ındaki seviyenin zayıfı. `require_full_sandbox` iken bu `full` değilse ve etki `workspace-write`/`exec` ise `sandbox_insufficient` (policy sandbox katmanında reddettiyse de aynı kod). Seviye her `tool/execution_started.sandbox_enforcement` alanına yazılır.
@@ -85,8 +85,11 @@ tool/execution_started → execute (timeout + iptal) → redaksiyon → sınırl
 | `ask_user` | control | orchestrator | `control.askUser` yoksa `approval_unavailable` |
 | `task_spawn`, `task_status` | control | orchestrator | Yalnız tanım; davranış `control.taskSpawn`/`taskStatus` (I4). Packet'i I4 doğrular |
 | `memory_propose` | control | hepsi | Yalnız öneri; davranış `control.memoryPropose` (I6) |
+| `task_report` | control | explorer, implementer, debugger | Girdi `taskReportInputSchema`; callback opsiyonel (`control.taskReport`), yoksa `report recorded` onayı |
+| `review_report` | control | reviewer | Girdi `reviewReportInputSchema`; callback opsiyonel |
+| `plan_propose` | control | orchestrator | Girdi `planProposalSchema`; callback opsiyonel |
 
-Callback bağlanmamış control aracı `execution_failed` döner. Tüm araçların `descriptor().input_schema`'sı zod şemasından `z.toJSONSchema` ile üretilir.
+Callback bağlanmamış control aracı `execution_failed` döner; rapor araçları bunun istisnasıdır: kayıtlı, doğrulanmış çağrının kendisi rapordur ve I4 onu attempt günlüğünden okur. Tüm araçların `descriptor().input_schema`'sı zod şemasından `z.toJSONSchema` ile üretilir.
 
 ## 6. Yol güvenliği (AC-1)
 
@@ -113,7 +116,7 @@ Callback bağlanmamış control aracı `execution_failed` döner. Tüm araçlar�
 ## 8. Process, env ve sandbox (AC-6, AC-8)
 
 - **Spawn:** `shell: false`, `stdio: pipe` (konsol kod sayfası mirası yok), `windowsHide`, POSIX'te `detached` (kendi process grubu). Windows'ta `.cmd/.bat` doğrudan çalıştırılamaz (Node güvenlik düzeltmesi); `cmd /c` ile çağrılmalıdır, bu da sınıflandırıcıdan geçer.
-- **İptal ve timeout:** Windows'ta `taskkill /PID <pid> /T /F`; POSIX'te gruba SIGINT, 1,5 s sonra SIGKILL. Pipe'lar 5 s içinde kapanmazsa sonuç zorla tamamlanır. İptal edilen `exec` `cancelled`, süre aşımı `timeout` döner; AC-8 testi torunu olan bir süreç ağacının tamamen sonlandığını pid kontrolüyle doğrular.
+- **İptal ve timeout:** Windows'ta `taskkill /PID <pid> /T /F`; POSIX'te gruba SIGINT, 1,5 s sonra SIGKILL. Pipe'lar 5 s içinde kapanmazsa sonuç zorla tamamlanır. `ProcessResult.termination` bunu açıkça bildirir (`exited | timeout | cancelled | spawn-failed`, başlatılamayan süreçte `spawnError`); iptal edilen `exec` `cancelled`, süre aşımı `timeout`, başlatılamayan süreç `execution_failed` döner; AC-8 testi torunu olan bir süreç ağacının tamamen sonlandığını pid kontrolüyle doğrular.
 - **Env:** yalnız `INHERITED_ENV_ALLOWLIST` (PATH, sistem kökleri, TEMP, HOME/USERPROFILE, dil/saat dilimi, CI …) üst ortamdan geçer. Model tarafından verilen `env` loader/shell kancası/yol/credential değişkenlerini (`PATH`, `NODE_OPTIONS`, `LD_*`, `DYLD_*`, `BASH_ENV`, `GIT_SSH_COMMAND`, `BRIDGE_STRIPPED_ENV` …) ayarlayamaz → `invalid_arguments`.
 - **Stdin:** shell programlarına (`bash`, `cmd`, `powershell` …) stdin ile betik verilemez; betik policy'nin görebilmesi için `-c`/`/c`/`-Command` ile satır içi verilmelidir.
 - **Çıktı:** stdout+stderr ortak `output_limit_bytes` bütçesi; fazlası atılır, `truncated: true`.
@@ -147,3 +150,12 @@ Callback bağlanmamış control aracı `execution_failed` döner. Tüm araçlar�
 - `rm -rf` hedefi owned içindeki bir junction ise hedef leksik olarak kapsam içinde görünür; bazı araçlar (eski PowerShell sürümleri) junction'ın içine inebilir.
 - Yeniden kontrol ile `rename` arasındaki çok kısa pencerede ana dizinin junction ile değiştirilmesi teorik olarak mümkündür (dosya tanıtıcısı tabanlı yazma sonraki sürüm).
 - `search` kullanıcı regex'ini çalıştırır; satır başına 2000 karakter sınırı dışında ReDoS koruması yoktur.
+
+## 12. Sözleşme değişiklik istekleri (Dalga 2a sonucu)
+
+| # | İstek | Karar |
+| --- | --- | --- |
+| CCR-1 | Workspace dışı yollar `NormalizedAction`'da ifade edilemiyor; kaçış retleri `tool/policy_decided` olmadan kalıyor | **Çözüldü:** `NormalizedAction.escapes?` (`PathEscape {requested, access, reason}`), `PATH_ESCAPE_REASON_CODE`; `tool/policy_decided` v2. Gateway her kaçışı motora değerlendirtip kaydeder. |
+| CCR-2 | `SandboxRunner.run` sonucu iptal ve spawn hatasını açıkça ifade etmeli | **Çözüldü:** `ProcessResult.termination` + `spawnError` (`timedOut` kaldırıldı); `RunProcessResult` yerel genişletmesi silindi. |
+| — | İki yerel glob eşleştiricisi (`policy/path-scope.ts`, `tools/scope-match.ts`) | **Çözüldü:** saf eşleştirici `contracts/paths.ts`'e taşındı; iki kopya silindi. |
+| — | Yapılandırılmış rapor araçları (I4 CCR-5) | **Çözüldü:** `task_report`, `review_report`, `plan_propose` kayıtta (§5). |

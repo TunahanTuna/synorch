@@ -73,6 +73,8 @@ Tablolar `TRANSITIONS` sabitinin birebir karşılığıdır. `validateTransition
 
 `queued → running | cancelled`; `running → waiting_for_approval | succeeded | failed | cancelled | interrupted`; `waiting_for_approval → running | failed | cancelled | interrupted`. `succeeded`, `failed`, `cancelled`, `interrupted` terminaldir.
 
+`attempt/started` attempt'i doğrudan `running` olarak açar (`queued → running` geçişi olayın kendisidir); ayrıca bir `attempt/state_changed {from: queued, to: running}` yazılmaz — projection bunu `state-mismatch` sayar. `queued → cancelled` yalnız attempt başlamadan iptal edilen kavramsal durumdur ve olay üretmez.
+
 ### Tool call
 
 `proposed → awaiting_approval | executing | denied | cancelled`; `awaiting_approval → executing | denied | cancelled | interrupted`; `executing → succeeded | failed | cancelled | interrupted`. Terminal: `denied`, `succeeded`, `failed`, `cancelled`, `interrupted`. `executing` halindeyken çöken çağrı `interrupted` + `outcome: unknown` olur ve **otomatik tekrar edilmez** ([tools.md](./tools.md)).

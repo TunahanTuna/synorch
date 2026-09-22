@@ -10,6 +10,7 @@ import {
   type BlobStore,
   type Digest,
   type IsolatedWorkspace,
+  type IsolationCreateOptions,
   type IsolationProvider,
   type ProjectId,
   type TaskContextPacket,
@@ -68,13 +69,8 @@ export interface IsolationProviderDependencies {
   readonly platform?: NodeJS.Platform;
 }
 
-export interface CreateOptions {
-  /** Root a read-only attempt reads from (a reviewer reads the implementer's workspace). */
-  readonly readRoot?: string;
-}
-
 export interface OrchestrationIsolationProvider extends IsolationProvider {
-  create(packet: TaskContextPacket, attemptId: AttemptId, signal: AbortSignal, options?: CreateOptions): Promise<OrchestratedWorkspace>;
+  create(packet: TaskContextPacket, attemptId: AttemptId, signal: AbortSignal, options?: IsolationCreateOptions): Promise<OrchestratedWorkspace>;
   /** Writes a previously pinned artifact into a fresh workspace (a revise attempt continues from it). */
   seed(workspace: OrchestratedWorkspace, artifactBytes: Uint8Array, signal: AbortSignal): Promise<void>;
   worktreePath(attemptId: AttemptId): string;

@@ -184,7 +184,7 @@ test("OS keychain backends keep secrets out of argv and round-trip through the p
         return { code: platform === "linux" ? 1 : 0, stdout: "", stderr: "" };
       };
       const store = createCredentialStore(path.join(home, platform), { platform, run, runSync, env: {} });
-      assert.equal(store.backend, "os-keychain", platform);
+      assert.equal(store.backend, platform === "win32" ? "os-dpapi" : "os-keychain", platform);
       assert.equal(store.notice, undefined);
       await store.set(oauthRef, oauthSecret);
       await store.set(apiRef, apiSecret);
@@ -214,7 +214,7 @@ test("Windows DPAPI round trip through real PowerShell", { skip: process.platfor
   const home = await tempHome();
   try {
     const store = createCredentialStore(home, { backend: "os-keychain" });
-    assert.equal(store.backend, "os-keychain");
+    assert.equal(store.backend, "os-dpapi");
     await store.set(oauthRef, oauthSecret);
     const fresh = createCredentialStore(home, { backend: "os-keychain" });
     assert.deepEqual(await fresh.get(oauthRef), oauthSecret);

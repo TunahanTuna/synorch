@@ -7,10 +7,10 @@
 | Sembol | Ne yapar |
 | --- | --- |
 | `createMemoryStore(root, { workspaceRoot?, now? })` | `MemoryStore` sözleşmesini düz Markdown vault üzerinde uygular (`MarkdownMemoryStore`). `workspaceRoot`, `source_ref` yollarının stale kontrolü için çözüldüğü çalışma köküdür. |
-| `resolveMemoryRoot(config, projectId, home)` | ADR-16 kök çözümü. `config.root` doluysa o kullanılır (`~` ve göreli değerler `home`'a göre çözülür); yoksa `<home>/.synorch/memory/<project-id>/`. `home` enjekte edilir, testler gerçek ev dizinine dokunmaz. |
+| `resolveMemoryRoot(config, projectId, home)` | ADR-16 kök çözümü (`config: MemoryConfig`, sözleşmedeki `memoryConfigSchema`). `config.root` doluysa o kullanılır (`~` ve göreli değerler `home`'a göre çözülür); yoksa `<home>/.synorch/memory/<project-id>/`. `home` enjekte edilir, testler gerçek ev dizinine dokunmaz. |
 | `memoryCommand` / `createMemoryCommand(options)` | `syn memory ...` için `CommandHandler`. `options` ile `config`, `home`, `platform`, `obsidian` başlatıcısı ve saat enjekte edilir. |
 | `MemoryConflictError` | `persist`/kabul yazımında dosya beklenen digest'ten farklıysa atılır; `code: store_write_failed`, `workspace_effect: none`. |
-| `decideWithAudit(...)` | `decide` ile aynı işi yapar; ayrıca `memory/proposal_decided` ve (varsa) `memory/persisted` olay yüklerini ve orchestrator kararında `run_id`'yi döndürür. Olay günlüğüne yazmak çağıranın (I4/I5) işidir. |
+| `decide(...)` | Sözleşmedeki `MemoryDecisionOutcome`'u döndürür: `memory/proposal_decided` ve (varsa) `memory/persisted` olay yükleri ile orchestrator kararında `runId`. Olay günlüğüne yazmak çağıranın (I4/I5) işidir. |
 | `candidates(id?)`, `candidateToProposal(...)` | Kural tabanlı ilişki/çelişki adayları ve bunları bekleyen kuyruk önerisine çeviren yardımcı. |
 | `status()`, `related(id)`, `rebuildIndex()`, `sourceState(...)` | CLI'ın kullandığı okuma yardımcıları. |
 | `redactSecrets(text)` | Diske gitmeden önce uygulanan sır redaksiyonu. |
@@ -90,3 +90,10 @@ Ortak seçenekler: `--root <dizin>` (vault kökünü geçersiz kılar), `--branc
 - `memory.team_root` (ekip vault'u) bu dilimde çözülmez; ekip vault'unda da decision/preference zaten yalnız kuyruk yoluyla yazılabilir.
 - Kullanıcının orchestrator kararını geri alması için ayrı bir komut yoktur; ters yönde bir `status-change` önerisiyle yapılır.
 - Digest kontrolü ile `rename` arasında küçük bir yarış penceresi vardır; aynı milisaniyede aynı boyutta yapılan dış düzenleme indeksi bir okuma boyunca eski bırakabilir (yazma güvenliği etkilenmez, çünkü çakışma kontrolü her zaman dosyanın kendisinden hesaplanır).
+
+## 9. Sözleşme değişiklik istekleri (Dalga 2a sonucu)
+
+| # | İstek | Karar |
+| --- | --- | --- |
+| 1 | `MemoryStore.decide` audit sonucunu döndürsün (`decideWithAudit` yerine) | **Çözüldü:** `decide(...) → MemoryDecisionOutcome` (`proposal`, `decided`, `persisted?`, `runId`); yükler `memory/proposal_decided` ve `memory/persisted` olaylarının `data` tipindedir. `decideWithAudit` ve yerel `ProposalDecidedAudit`/`PersistedAudit` silindi. |
+| 2 | `MemoryConfig` sözleşmeye | **Çözüldü:** `memoryConfigSchema` (`root?`, `team_root?`, strict) ve örnekleri; yerel arayüz silindi. `team_root` hâlâ ayrılmış (okunmaz/yazılmaz). |

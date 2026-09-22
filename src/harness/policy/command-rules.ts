@@ -1,7 +1,6 @@
 import path from "node:path";
 import { isSafeRelativePath, normalizeRelativePath } from "../../domain/relative-path.ts";
-import { staticPrefix } from "../contracts/index.ts";
-import { hasReservedSegment, matchesAny } from "./path-scope.ts";
+import { hasReservedSegment, matchesAnyPathPattern as matchesAny, staticPrefix } from "../contracts/index.ts";
 
 /**
  * The irreversible-command table (ADR-08 hard rail `destructive-command`). It is data: each rule

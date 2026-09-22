@@ -97,24 +97,36 @@ export const planTaskSchema = z.strictObject({
 });
 export type PlanTask = z.infer<typeof planTaskSchema>;
 
+/** The part of a plan the orchestrator model authors; identity fields are always set by the harness. */
+const planProposalShape = {
+  goal: nonEmptyTextSchema,
+  risk: riskClassSchema,
+  scope: z.array(pathPatternSchema).min(1),
+  tasks: z.array(planTaskSchema).min(1),
+  expected_external_effects: z.array(z.string().min(1)),
+  verification: z.array(z.string().min(1)),
+  budget: z.strictObject({
+    max_wall_time_seconds: z.int().positive(),
+    max_steps: z.int().positive(),
+    max_cost_usd: z.number().positive().optional(),
+  }),
+  assumptions: z.array(z.string().min(1)),
+};
+
+/**
+ * Input of the `plan_propose` tool. Structural only: DAG, ownership and overlap rules are checked
+ * by `planSchema` once the harness adds `schema_version`, `plan_id`, `run_id`, `version`, `created_at`.
+ */
+export const planProposalSchema = z.strictObject(planProposalShape);
+export type PlanProposal = z.infer<typeof planProposalSchema>;
+
 export const planSchema = z
   .strictObject({
     schema_version: z.literal(1),
     plan_id: planIdSchema,
     run_id: runIdSchema,
     version: z.int().min(1),
-    goal: nonEmptyTextSchema,
-    risk: riskClassSchema,
-    scope: z.array(pathPatternSchema).min(1),
-    tasks: z.array(planTaskSchema).min(1),
-    expected_external_effects: z.array(z.string().min(1)),
-    verification: z.array(z.string().min(1)),
-    budget: z.strictObject({
-      max_wall_time_seconds: z.int().positive(),
-      max_steps: z.int().positive(),
-      max_cost_usd: z.number().positive().optional(),
-    }),
-    assumptions: z.array(z.string().min(1)),
+    ...planProposalShape,
     created_at: timestampSchema,
   })
   .superRefine((plan, context) => {
@@ -362,6 +374,24 @@ export const completionPacketSchema = z
 export type CompletionPacket = z.infer<typeof completionPacketSchema>;
 
 export const FINDING_SEVERITIES = ["blocker", "major", "minor", "info"] as const;
+export const REVIEW_DECISIONS = ["accept", "revise", "block"] as const;
+
+const reviewCriterionSchema = z.strictObject({
+  criterion_id: acceptanceCriterionIdSchema,
+  verdict: z.enum(["met", "not_met", "unverifiable"]),
+  evidence: z.array(evidenceRefSchema),
+  note: z.string().optional(),
+});
+
+const reviewFindingSchema = z.strictObject({
+  id: z.string().regex(/^F-[1-9]\d*$/, "must be F-<n>"),
+  severity: z.enum(FINDING_SEVERITIES),
+  summary: nonEmptyTextSchema,
+  path: pathPatternSchema.optional(),
+  line: z.int().positive().optional(),
+  reproduction: z.string().min(1).optional(),
+  recommendation: z.string().min(1).optional(),
+});
 
 export const reviewPacketSchema = z
   .strictObject({
@@ -377,28 +407,9 @@ export const reviewPacketSchema = z
       same_provider: z.boolean(),
       same_model: z.boolean(),
     }),
-    criteria: z
-      .array(
-        z.strictObject({
-          criterion_id: acceptanceCriterionIdSchema,
-          verdict: z.enum(["met", "not_met", "unverifiable"]),
-          evidence: z.array(evidenceRefSchema),
-          note: z.string().optional(),
-        }),
-      )
-      .min(1),
-    findings: z.array(
-      z.strictObject({
-        id: z.string().regex(/^F-[1-9]\d*$/, "must be F-<n>"),
-        severity: z.enum(FINDING_SEVERITIES),
-        summary: nonEmptyTextSchema,
-        path: pathPatternSchema.optional(),
-        line: z.int().positive().optional(),
-        reproduction: z.string().min(1).optional(),
-        recommendation: z.string().min(1).optional(),
-      }),
-    ),
-    decision: z.enum(["accept", "revise", "block"]),
+    criteria: z.array(reviewCriterionSchema).min(1),
+    findings: z.array(reviewFindingSchema),
+    decision: z.enum(REVIEW_DECISIONS),
   })
   .superRefine((review, context) => {
     if (review.reviewed_attempt_id === review.reviewer_attempt_id) {
@@ -424,6 +435,39 @@ export const reviewPacketSchema = z
     }
   });
 export type ReviewPacket = z.infer<typeof reviewPacketSchema>;
+
+/**
+ * Structured report tools (control effect). A worker ends its attempt with `task_report`, a
+ * reviewer with `review_report`, the orchestrator proposes a plan with `plan_propose`. The gateway
+ * validates the input against these schemas (the model gets `invalid_arguments` back and can retry)
+ * and records the call; orchestration reads the arguments of the last *succeeded* report call from
+ * the attempt log. A report is a claim: identity, changed paths, the artifact digest and tool call
+ * ids are always computed by the harness, and every evidence pointer is verified against the log.
+ */
+export const REPORT_TOOL_NAMES = { task: "task_report", review: "review_report", plan: "plan_propose" } as const;
+export type ReportToolName = (typeof REPORT_TOOL_NAMES)[keyof typeof REPORT_TOOL_NAMES];
+
+export const taskReportInputSchema = z.strictObject({
+  status: z.enum(COMPLETION_STATUSES),
+  summary: nonEmptyTextSchema,
+  acceptance_evidence: z
+    .array(z.strictObject({ criterion_id: acceptanceCriterionIdSchema, evidence: z.array(evidenceRefSchema).min(1) }))
+    .default([]),
+  commands_run: z.array(z.strictObject({ command: z.string().min(1), exit_code: z.int(), evidence: evidenceRefSchema })).default([]),
+  decisions_made: z.array(nonEmptyTextSchema).default([]),
+  skipped_checks: z.array(z.strictObject({ check: z.string().min(1), reason: nonEmptyTextSchema })).default([]),
+  unresolved_risks: z.array(nonEmptyTextSchema).default([]),
+  recommended_context_updates: z.array(nonEmptyTextSchema).default([]),
+  root_cause: z.string().min(1).optional(),
+});
+export type TaskReportInput = z.infer<typeof taskReportInputSchema>;
+
+export const reviewReportInputSchema = z.strictObject({
+  criteria: z.array(reviewCriterionSchema).min(1),
+  findings: z.array(reviewFindingSchema).default([]),
+  decision: z.enum(REVIEW_DECISIONS),
+});
+export type ReviewReportInput = z.infer<typeof reviewReportInputSchema>;
 
 export function packetDigest(packet: AnyTaskPacket | CompletionPacket | ReviewPacket): Digest {
   return digestOf(packet);

@@ -5,8 +5,12 @@ import {
   effectivePolicySchema,
   HARD_RAILS,
   HarnessError,
+  hasReservedSegment,
+  isAncestorOfAnyPattern as isAncestorOfAny,
   isReservedWritePattern,
   isWholeWorkspacePattern,
+  matchesAnyPathPattern as matchesAny,
+  PATH_ESCAPE_REASON_CODE,
   pathPatternSchema,
   policyDecisionSchema,
   READ_ONLY_ROLES,
@@ -24,7 +28,6 @@ import {
 import { classifyCommand } from "./command-classifier.ts";
 import { DESTRUCTIVE_COMMAND_RULES } from "./command-rules.ts";
 import { readPolicyConfig, type PolicyConfig } from "./config.ts";
-import { hasReservedSegment, isAncestorOfAny, matchesAny } from "./path-scope.ts";
 
 type EffectMatrix = { [E in ToolEffect]: EffectDecision };
 type PolicyLayer = PolicyDecision["reasons"][number]["layer"];
@@ -181,6 +184,11 @@ function evaluatePaths(action: NormalizedAction, policy: EffectivePolicy, deny: 
     .map((layer) => layer.source)
     .filter((source) => isSafeRelativePath(source) && source.includes("."))
     .map((source) => normalizeRelativePath(source).toLowerCase());
+  for (const escape of action.escapes ?? []) {
+    const message = `${escape.requested || "<empty path>"} cannot be expressed inside the workspace (${escape.reason})`.slice(0, 500);
+    if (escape.access === "write") deny("platform", PATH_ESCAPE_REASON_CODE.write, message, "write-outside-scope");
+    else deny("platform", PATH_ESCAPE_REASON_CODE.read, message);
+  }
   for (const entry of action.paths) {
     if (entry.access === "write") {
       if (hasReservedSegment(entry.path)) deny("platform", "reserved-path", `${entry.path} is a reserved path`, "reserved-path-write");

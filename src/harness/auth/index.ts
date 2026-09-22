@@ -31,7 +31,6 @@ export {
   OPENAI_AUTH_ISSUER,
   type AuthFetch,
   type ChatGPTAuthOptions,
-  type ChatGPTAuthProvider,
 } from "./openai-chatgpt.ts";
 export { ProfileStateStore } from "./profile-state.ts";
 export { authProviderFor, createAuthProviders, SUPPORTED_AUTH_METHODS, type AuthProvidersOptions } from "./providers.ts";

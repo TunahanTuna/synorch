@@ -15,7 +15,8 @@ export {
   type BudgetTracker,
   type UsageObservation,
 } from "./budget.ts";
-export { extractJsonBlock, parseClaim, reviewerClaimSchema, workerClaimSchema } from "./claims.ts";
+export { latestReport, type AttemptLog, type RecordedReportCall } from "./attempt-log.ts";
+export { extractJsonBlock, parseClaim, readClaim, reviewerClaimSchema, workerClaimSchema } from "./claims.ts";
 export { createControlPlaneWriter, type ControlPlaneWriter } from "./control-plane.ts";
 export {
   createCoordinator,
@@ -71,7 +72,6 @@ export {
   renderReviewBrief,
   renderWorkerMessage,
   type OrchestrationWorkerManager,
-  type ReviewResult,
   type RunScope,
   type WorkerManagerDependencies,
 } from "./worker-manager.ts";

@@ -10,6 +10,7 @@ export * from "./model.ts";
 export * from "./packets.ts";
 export * from "./paths.ts";
 export * from "./policy.ts";
+export * from "./projection.ts";
 export * from "./renderer.ts";
 export * from "./runtime.ts";
 export * from "./state.ts";

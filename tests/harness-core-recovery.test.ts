@@ -244,6 +244,10 @@ test("AC-4 recovery reports the torn tail the writer quarantined", async () => {
   assert.equal(report.tornTail?.segment, 1);
   assert.equal(report.tornTail?.bytes, Buffer.byteLength(torn));
   assert.ok((await readdir(segmentsDir)).includes("000001.jsonl.torn-1"));
+  let resumed: SessionEvent | undefined;
+  for await (const item of writer.read()) if (item.status === "ok" && item.event.type === "session/resumed") resumed = item.event;
+  assert.equal(resumed?.event_version, 2);
+  assert.deepEqual(resumed?.type === "session/resumed" ? resumed.data.torn_tail : undefined, { segment: 1, bytes: Buffer.byteLength(torn) });
 });
 
 test("recovery refuses a corrupt or newer-version log instead of guessing", async () => {

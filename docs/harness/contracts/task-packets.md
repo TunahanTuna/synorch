@@ -45,6 +45,8 @@ Aynı task'a ek iş: `extends_digest` (önceki paketin digest'i), `plan_digest`,
 
 `task_id`, `attempt_id`, `packet_digest`, `status (completed|partial|failed|blocked|needs_context)`, `summary`, `changed_paths[]{path, before, after}`, `artifact_digest?` (değişiklik varsa zorunlu; izole çalışma alanının sabitlenmiş diff'i), `tool_call_ids[]`, `acceptance_evidence[]{criterion_id, evidence[]}`, `commands_run[]{command, exit_code, evidence}`, `decisions_made[]`, `skipped_checks[]{check, reason}`, `unresolved_risks[]`, `recommended_context_updates[]`, `root_cause?`. Kurallar: rezerve path değişmiş raporlanamaz; `completed` en az bir kanıt ister; worker reviewer kanıtı atfedemez. Orchestration ayrıca her `AC`'nin kanıtlandığını ve `changed_paths ⊆ owned_paths` olduğunu gerçek diff'e karşı doğrular.
 
+Completion'ın anlatı kısmı (status, summary, kanıt işaretçileri, komutlar, kararlar) worker'ın `task_report` aracı çağrısından gelir; reviewer'ın hükümleri `review_report`'tan, planın gövdesi `plan_propose`'dan (bkz. §7 "Rapor aracı girdileri"). Kimlik, `changed_paths`, `artifact_digest` ve `tool_call_ids` her zaman harness tarafından doldurulur.
+
 `EvidenceRef` = `kind (tool-call|test-run|artifact|file|event|review)`, `ref`, `digest?`, `produced_by (worker|reviewer|orchestrator|user)`. Kanıt serbest metin değildir; log'un çözebileceği bir şeyi işaret eder.
 
 ## 5. Review packet
@@ -64,7 +66,7 @@ Kurallar: her `met` hükmü reviewer'ın **kendi ürettiği** en az bir kanıta 
 | Completion `blocked` / `failed` | `running → blocked` / `failed` |
 | Doğrulama geçti, risk `standard`/`high-risk` | `verifying → reviewing` |
 | Doğrulama geçti, risk `trivial` | `verifying → completed` |
-| Review `accept` + integrate | `reviewing → completed` |
+| Review `accept` + integrate (`task/integrated`) | `reviewing → completed` |
 | Review `revise` | `reviewing → changes_requested → ready` (delta packet) |
 | Review `block` | `reviewing → failed` |
 
@@ -517,4 +519,80 @@ Reddedilenler: yalnız worker kanıtıyla `met`; karşılanmamış ölçütle `a
   criteria: [{ criterion_id: AC-1, verdict: unverifiable, evidence: [] }]
   findings: []
   decision: revise
+```
+
+### Rapor aracı girdileri
+
+`task_report`, `review_report` ve `plan_propose` araçlarının girdileri ([runtime-seams.md](./runtime-seams.md#5-yapılandırılmış-rapor-araçları)). Opsiyonel listeler boş varsayılır; bilinmeyen alan reddedilir — worker `changed_paths`, `artifact_digest` veya kimlik iddia edemez.
+
+```yaml example=task-report
+- status: completed
+  summary: Serialized refresh token rotation behind the per-profile lock.
+  acceptance_evidence:
+    - criterion_id: AC-1
+      evidence: [{ kind: test-run, ref: call_01K5T3Q8Z4X9V2M6N7P0R1S2TE, produced_by: worker }]
+  commands_run:
+    - { command: pnpm test auth, exit_code: 0, evidence: { kind: tool-call, ref: call_01K5T3Q8Z4X9V2M6N7P0R1S2TE, produced_by: worker } }
+- status: needs_context
+  summary: src/auth/refresh-service.ts changed since the packet was issued.
+```
+
+```yaml example=task-report invalid
+- status: done
+  summary: finished
+- status: completed
+  summary: finished
+  changed_paths: [src/auth/refresh-service.ts]
+```
+
+```yaml example=review-report
+criteria:
+  - criterion_id: AC-1
+    verdict: met
+    evidence: [{ kind: test-run, ref: call_01K5T3Q8Z4X9V2M6N7P0R1S2TW, produced_by: reviewer }]
+findings:
+  - { id: F-1, severity: minor, summary: "Missing comment on revocation ordering", path: src/auth/refresh-service.ts, line: 88 }
+decision: accept
+```
+
+```yaml example=review-report invalid
+- criteria: []
+  decision: accept
+- criteria: [{ criterion_id: AC-1, verdict: met, evidence: [] }]
+  decision: approve
+```
+
+```yaml example=plan-proposal
+goal: Fix refresh token rotation race
+risk: standard
+scope: [src/auth/**, tests/auth/**]
+tasks:
+  - key: fix-rotation
+    role: implementer
+    objective: Serialize refresh token rotation
+    depends_on: []
+    owned_paths: [src/auth/refresh-service.ts]
+    read_paths: [src/auth/**]
+    risk: standard
+    model_tier: complex_worker
+    acceptance_criteria: [{ id: AC-1, statement: "Concurrent refreshes rotate the token exactly once" }]
+    verification: [pnpm test auth]
+expected_external_effects: []
+verification: [pnpm test]
+budget: { max_wall_time_seconds: 1800, max_steps: 100 }
+assumptions: []
+```
+
+Kimlik alanları modelden gelmez:
+
+```yaml example=plan-proposal invalid
+goal: Fix refresh token rotation race
+plan_id: plan_01K5T3Q8Z4X9V2M6N7P0R1S2T5
+risk: standard
+scope: [src/auth/**]
+tasks: []
+expected_external_effects: []
+verification: []
+budget: { max_wall_time_seconds: 1800, max_steps: 100 }
+assumptions: []
 ```

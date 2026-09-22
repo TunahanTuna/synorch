@@ -9,6 +9,7 @@ import {
   type CommandHandler,
   type CommandIO,
   type ExitCode,
+  type MemoryConfig,
   type MemoryKind,
   type MemoryNote,
   type MemoryProposal,
@@ -16,7 +17,7 @@ import {
 import { createMemoryStore, isMemoryKind, parseMemoryId, type MarkdownMemoryStore } from "./markdown-memory-store.ts";
 import type { MemoryCandidate } from "./relations.ts";
 import { createSystemObsidianLauncher, obsidianOpenUri, type ObsidianLauncher } from "./obsidian.ts";
-import { readGitBranch, resolveMemoryRoot, type MemoryConfig } from "./vault.ts";
+import { readGitBranch, resolveMemoryRoot } from "./vault.ts";
 
 /** `syn memory status|search|show|related|review|accept|reject|open|reindex` (contracts/cli-and-jsonl.md). */
 
@@ -297,7 +298,7 @@ async function decide(context: Context, state: "accepted" | "rejected"): Promise
   const id = proposalIdSchema.safeParse(raw);
   if (!id.success) return fail(context, `'${raw}' is not a proposal id (prop_<ULID>)`);
   const reason = context.values.reason?.trim() || `${state} by the user via syn memory`;
-  const outcome = await context.store.decideWithAudit(id.data, { by: "user", at: context.now().toISOString(), reason }, state);
+  const outcome = await context.store.decide(id.data, { by: "user", at: context.now().toISOString(), reason }, state);
   const persisted = outcome.persisted === undefined ? "" : `; wrote ${outcome.persisted.memory_id} (${outcome.persisted.path})`;
   context.io.stdout(`${state} ${outcome.decided.proposal_id}${persisted}\n`);
   return EXIT_CODES.success;

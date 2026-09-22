@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { calendarDateSchema, evidenceRefSchema, nonEmptyTextSchema, timestampSchema } from "./common.ts";
 import { digestSchema } from "./digest.ts";
-import { projectIdSchema, proposalIdSchema, runIdSchema, taskIdSchema } from "./ids.ts";
+import type { SessionEventOf } from "./events.ts";
+import { projectIdSchema, proposalIdSchema, runIdSchema, taskIdSchema, type RunId } from "./ids.ts";
 
 /**
  * Markdown memory store (ADR-16/17). Notes are plain Markdown with YAML frontmatter under
@@ -156,6 +157,17 @@ export type MemoryProposal = z.infer<typeof memoryProposalSchema>;
 /** Where personal memory lives unless overridden: `~/<segments>/<project-id>/`. */
 export const DEFAULT_MEMORY_ROOT_SEGMENTS = [".synorch", "memory"] as const;
 
+/**
+ * The `memory` configuration section (ADR-16). `root` replaces the personal vault root for this
+ * project (`~` expands to home, relative paths resolve against home); `team_root` names a shared
+ * team vault, which is reserved: v1 accepts it but neither reads nor writes it.
+ */
+export const memoryConfigSchema = z.strictObject({
+  root: z.string().trim().min(1).max(1024).optional(),
+  team_root: z.string().trim().min(1).max(1024).optional(),
+});
+export type MemoryConfig = z.infer<typeof memoryConfigSchema>;
+
 export interface MemoryQuery {
   readonly projectId: string;
   readonly branch: string | undefined;
@@ -180,6 +192,16 @@ export interface RecalledMemory {
   readonly stale: boolean;
 }
 
+/** The audit trail of one decision, as `memory/proposal_decided` and `memory/persisted` payloads. */
+export interface MemoryDecisionOutcome {
+  readonly proposal: MemoryProposal;
+  readonly decided: SessionEventOf<"memory/proposal_decided">["data"];
+  /** The note an accepted proposal created or changed; absent for rejected/deferred. */
+  readonly persisted: SessionEventOf<"memory/persisted">["data"] | undefined;
+  /** Set when the orchestrator decided: the run accountable for it (the event's `run_id`). */
+  readonly runId: RunId | undefined;
+}
+
 export interface MemoryStore {
   readonly root: string;
   get(id: MemoryId): Promise<MemoryNote | undefined>;
@@ -188,6 +210,14 @@ export interface MemoryStore {
   persist(note: Omit<MemoryNote, "path" | "digest">, expectedDigest: string | undefined): Promise<MemoryNote>;
   propose(proposal: MemoryProposal): Promise<void>;
   pending(): Promise<readonly MemoryProposal[]>;
-  decide(proposalId: z.infer<typeof proposalIdSchema>, decision: NonNullable<MemoryProposal["decision"]>, state: "accepted" | "rejected" | "deferred"): Promise<void>;
+  /**
+   * Applies a decision and returns what the caller must append to the session log: the store
+   * persists notes, it never writes events itself.
+   */
+  decide(
+    proposalId: z.infer<typeof proposalIdSchema>,
+    decision: NonNullable<MemoryProposal["decision"]>,
+    state: "accepted" | "rejected" | "deferred",
+  ): Promise<MemoryDecisionOutcome>;
   reindex(): Promise<{ readonly notes: number; readonly broken_links: number }>;
 }

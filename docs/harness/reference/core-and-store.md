@@ -95,7 +95,7 @@ Tabloda olmayan geçiş, `from` uyuşmazlığı, bilinmeyen varlık, yinelenen o
 
 ## 5. Crash recovery
 
-`recoverSession(store)` log'u projekte eder; `corrupt` ise `session_corrupt`, `unsupported` ise `unsupported_version` fırlatır ve hiçbir şey yazmaz. Aksi halde önce `session/resumed {previous_last_seq, recovered[]}` yazar, ardından kapanış olaylarını `causation_seq = resumed.seq` ile ekler:
+`recoverSession(store)` log'u projekte eder; `corrupt` ise `session_corrupt`, `unsupported` ise `unsupported_version` fırlatır ve hiçbir şey yazmaz. Aksi halde önce `session/resumed {previous_last_seq, recovered[], torn_tail?}` (v2; `torn_tail` store'un `quarantinedTail`'inden) yazar, ardından kapanış olaylarını `causation_seq = resumed.seq` ile ekler:
 
 | Açık varlık | Yazılan olay |
 | --- | --- |
@@ -110,12 +110,13 @@ Tabloda olmayan geçiş, `from` uyuşmazlığı, bilinmeyen varlık, yinelenen o
 
 ## 6. Agent driver
 
-`createAgentDriver({events, blobs, router, context, tools, gateway, credentials?, backendEnv?})`. Her `runTurn`:
+`createAgentDriver({events, blobs, router, context, tools, gateway, credentials, backendEnv?})`. Her `runTurn`:
 
 1. `turn/started`; varsa kullanıcı mesajı `message/recorded`.
 2. Her step başında steer kuyruğu `steer/queued` olarak boşaltılır, sonra `step/started {step_id, turn_id, request_id}`.
 3. `ContextBuilder.build` → istek `modelRequestSchema`, `request_id`, route ve `envelopeDigest = digestOf(request)` ile doğrulanır; canonical JSON olarak blob'a yazılır ve `model/request_prepared` kaydedilir. Böylece `envelope_blob.digest == envelope_digest` ve istek log'dan bayt bayt yeniden kurulur (AC-5, `rebuildModelRequest`).
-4. `ModelAdapter`: `credentials(route)` ile kimlik alınır, stream tüketilir. Her stream olayı şemayla doğrulanır; stream throw ederse, bozuk olay verirse veya `done`/`error` olmadan biterse `stream_interrupted`/`protocol_mismatch`.
+3a. Context builder `budget-exceeded` ile reddederse istek hazırlanmaz: `step/ended {aborted}`, `turn/ended {budget_exceeded}`. Diğer retler step'i `errored`, turu `failed` bitirir.
+4. `ModelAdapter`: `credentials(route, signal)` ile kimlik alınır, stream tüketilir. `oauth-subscription` route'unda ilk olay HTTP 401 hatasıysa kimlik bir kez `{forceRefresh: true}` ile yeniden çözülür ve aynı istek yeniden gönderilir. Her stream olayı şemayla doğrulanır; stream throw ederse, bozuk olay verirse veya `done`/`error` olmadan biterse `stream_interrupted`/`protocol_mismatch`.
 5. Başarılı cevap: her `tool_call` parçasına yeni `ToolCallId` atanır, `message/recorded`, `model/response_settled`, usage varsa `provider/usage`.
 6. Tool çağrıları **kaynak sırasıyla, sıralı** `ToolGateway.invoke` ile çalışır; her sonuç ayrı bir `message/recorded {role: tool}` olarak hemen kaydedilir. Gateway çağrısından sonra `events.lastSeq` ilerlememişse (kayıt yok) driver durur.
 7. `stop_reason: length` ise mesajdaki tool çağrıları çalıştırılmaz, sentetik hata sonucu alır ve döngü devam eder.
@@ -144,9 +145,16 @@ Append reddi (AC-7): driver'ın herhangi bir `append`'i reddedilirse (veya gatew
 
 ## 8. Bilinen sınırlar
 
-- `SessionProjection` ve `RecoveryReport` core'da tanımlıdır, contracts'ta değil; I4/I5 bunları `core` üzerinden (yalnız `cli` birleştirebilir) veya sözleşmeye taşındıktan sonra kullanır.
-- Torn tail bilgisi `session/resumed` olayına yazılamaz (şemada alan yok); yalnız `RecoveryReport.tornTail`'de ve karantina dosyasında bulunur.
-- Model route'u için kimlik `AgentDriverDependencies`'te yoktur; `credentials` ek bağımlılığı composition root tarafından verilir.
-- `attempt/started` attempt'i `running` durumunda açar; I4 ayrıca `queued → running` geçişi yazarsa projection bunu `state-mismatch` sayar.
 - Tool çağrılarının `concurrency: parallel` metadata'sına rağmen driver v1'de hepsini sıralı çalıştırır.
 - Aynı host'ta PID yeniden kullanımı, ölü bir yazıcının lease'inin TTL dolana kadar canlı görünmesine yol açabilir (güvenli yönde hata).
+
+## 9. Sözleşme değişiklik istekleri (Dalga 2a sonucu)
+
+| # | İstek | Karar |
+| --- | --- | --- |
+| 1 | `AgentDriverDependencies.credentials(route, signal)` | **Çözüldü:** zorunlu `credentials: CredentialResolver` (`(route, signal, options?: ResolveOptions)`); yerel opsiyonel bağımlılık kaldırıldı. Driver `oauth-subscription` route'unda ilk olaydan önceki 401'de bir kez `forceRefresh` ile yeniden çözer ve aynı isteği yeniden gönderir. |
+| 2 | `session/resumed.data.torn_tail?` | **Çözüldü:** `session/resumed` v2 `torn_tail {segment, bytes}`; `EventStore.quarantinedTail?` sözleşmeye alındı, recovery'deki yapısal yoklama silindi. |
+| 3 | `SessionProjection` ve `RecoveryReport` sözleşmeye | **Çözüldü:** `contracts/projection.ts` (tüm `Projected*`, `ProjectionIssue*`, `RecoveredEntity`); fabrikalar core'da. |
+| 4 | `attempt/started` ⇒ `running` | **Çözüldü (belge):** [identity-and-state.md](../contracts/identity-and-state.md) ve [runtime-seams.md](../contracts/runtime-seams.md#3-projection-ve-recovery-core--cli-orchestration); ayrı `queued → running` olayı yazılmaz. |
+
+Ayrıca: `ContextBuildInput.attemptId` driver'dan iletilir; `ContextBuildResult.reason: budget-exceeded` step'i `aborted`, turu `budget_exceeded` bitirir; `ContextBlockReport.source` enum olduğundan `model/request_prepared` cast'i kaldırıldı.

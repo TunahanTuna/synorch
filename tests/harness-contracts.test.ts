@@ -26,13 +26,24 @@ import {
   isTerminalState,
   isWholeWorkspacePattern,
   jsonlFrameSchema,
+  CONTEXT_BLOCK_SOURCES,
+  EVENT_FIELD_VERSIONS,
+  hasReservedSegment,
+  isAncestorOfAnyPattern,
+  matchesAnyPathPattern,
+  matchesPathPattern,
+  memoryConfigSchema,
   memoryNoteFrontmatterSchema,
   memoryProposalSchema,
   modelStreamEventSchema,
   normalizedActionSchema,
   parseSessionEvent,
   pathPatternsOverlap,
+  planProposalSchema,
   planSchema,
+  REPORT_TOOL_NAMES,
+  reviewReportInputSchema,
+  taskReportInputSchema,
   policyDecisionSchema,
   providerCapabilitiesSchema,
   providerErrorSchema,
@@ -88,6 +99,10 @@ const EXAMPLE_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "harness-error": harnessErrorSchema,
   "memory-note": memoryNoteFrontmatterSchema,
   "memory-proposal": memoryProposalSchema,
+  "memory-config": memoryConfigSchema,
+  "task-report": taskReportInputSchema,
+  "review-report": reviewReportInputSchema,
+  "plan-proposal": planProposalSchema,
   "session-manifest": sessionManifestSchema,
   "segment-header": segmentHeaderSchema,
   "session-lease": sessionLeaseSchema,
@@ -239,6 +254,62 @@ test("path overlap errs towards overlapping and whole-workspace patterns are det
     assert.equal(isWholeWorkspacePattern(pattern), true, pattern);
   }
   assert.equal(isWholeWorkspacePattern("src/**"), false);
+});
+
+test("the shared glob matcher: ** spans segments, literals cover subtrees, grants vs denials choose case", () => {
+  const exact = { caseInsensitive: false };
+  const folded = { caseInsensitive: true };
+  assert.equal(matchesPathPattern("src/auth/a.ts", "src/**", exact), true);
+  assert.equal(matchesPathPattern("src", "src/**", exact), true);
+  assert.equal(matchesPathPattern("src/auth/deep/a.ts", "src/*/a.ts", exact), false);
+  assert.equal(matchesPathPattern("src/auth/a.ts", "src/auth", exact), true);
+  assert.equal(matchesPathPattern("src/authx/a.ts", "src/auth", exact), false);
+  assert.equal(matchesPathPattern("src/a.test.ts", "src/*.{ts,md}", exact), true);
+  assert.equal(matchesPathPattern("SRC/auth/a.ts", "src/**", exact), false);
+  assert.equal(matchesPathPattern("SRC/auth/a.ts", "src/**", folded), true);
+  assert.equal(matchesAnyPathPattern("docs/x.md", ["src/**", "docs/*.md"], exact), true);
+  assert.equal(isAncestorOfAnyPattern("src", ["src/auth/**"], exact), true);
+  assert.equal(isAncestorOfAnyPattern("tests", ["src/auth/**"], exact), false);
+  assert.equal(hasReservedSegment("src/.GIT/config"), true);
+  assert.equal(hasReservedSegment("src/gitignore"), false);
+});
+
+test("event payload versions: new fields bump the version, older versions still parse, a v1 event cannot carry a v2 field", () => {
+  assert.equal(EVENT_VERSIONS["session/resumed"], 2);
+  assert.equal(EVENT_VERSIONS["attempt/started"], 2);
+  assert.equal(EVENT_VERSIONS["tool/policy_decided"], 2);
+  assert.equal(EVENT_VERSIONS["task/integrated"], 1);
+  assert.equal(EVENT_VERSIONS["session/closed"], 1);
+  for (const [type, fields] of Object.entries(EVENT_FIELD_VERSIONS)) {
+    assert.equal(EVENT_VERSIONS[type as keyof typeof EVENT_VERSIONS], Math.max(...Object.values(fields)), type);
+  }
+  const resumed = (version: number, data: Record<string, unknown>) => ({
+    schema_version: 1,
+    event_id: createId("event"),
+    session_id: createId("session"),
+    seq: 9,
+    event_version: version,
+    timestamp: "2026-09-22T10:00:00Z",
+    actor: { kind: "system" },
+    type: "session/resumed",
+    data: { previous_last_seq: 8, recovered: [], ...data },
+  });
+  assert.equal(parseSessionEvent(resumed(1, {})).status, "ok");
+  assert.equal(parseSessionEvent(resumed(2, { torn_tail: { segment: 1, bytes: 40 } })).status, "ok");
+  const early = parseSessionEvent(resumed(1, { torn_tail: { segment: 1, bytes: 40 } }));
+  assert.equal(early.status, "invalid");
+  assert.match(JSON.stringify(early), /torn_tail requires event_version >= 2/);
+  assert.equal(parseSessionEvent(resumed(3, {})).status, "unsupported");
+  assert.deepEqual([...CONTEXT_BLOCK_SOURCES].slice(-2), ["history", "tool-result"]);
+});
+
+test("report tool inputs: defaults for optional lists, strict keys, and a plan proposal lacks identity fields", () => {
+  assert.deepEqual(Object.values(REPORT_TOOL_NAMES).sort(), ["plan_propose", "review_report", "task_report"]);
+  const report = taskReportInputSchema.parse({ status: "needs_context", summary: "the packet cites a changed file" });
+  assert.deepEqual(report.acceptance_evidence, []);
+  assert.equal(taskReportInputSchema.safeParse({ status: "completed", summary: "x", changed_paths: ["src/a.ts"] }).success, false, "a worker cannot claim changed paths");
+  assert.equal(reviewReportInputSchema.safeParse({ criteria: [], decision: "accept" }).success, false);
+  assert.equal(planProposalSchema.safeParse({ plan_id: "plan_x" }).success, false);
 });
 
 test("the dispatch freshness gate reports changed and missing sources", async () => {

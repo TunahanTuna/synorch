@@ -17,13 +17,13 @@ import {
   type SessionManifest,
   type SessionStore,
   type SessionSummary,
+  type QuarantinedTail,
 } from "../contracts/index.ts";
 import { errnoCode, isMissing, PRIVATE_DIRECTORY_MODE, syncDirectory, writeFileDurably } from "./durable-file.ts";
 import {
   firstOwnSeq,
   JsonlEventStore,
   JsonlReadOnlyEventStore,
-  type QuarantinedTail,
   type SessionLocation,
   type WriterPosition,
   type WriterSettings,

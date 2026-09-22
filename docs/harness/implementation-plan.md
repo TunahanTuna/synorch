@@ -190,3 +190,33 @@ Her seam için sağlayan iş akışı bir sözleşme testi (arayüz davranışı
 | Faz 2 | I4 AC-1…5, I3 AC-2, I5 AC-5 |
 | Faz 3 | I2 AC-6 + ikinci sağlayıcı ile A-implement/B-review e2e |
 | Faz 4 | I3 platform matrisi, I1 çift resume/crash, I5 çapraz platform |
+
+## 6. Dalga 2a sonucu (sözleşme entegrasyonu, 2026-09-23)
+
+Dalga 1 iş akışlarının bildirdiği 20 sözleşme değişiklik isteği entegrasyon sahibi tarafından tek commit'te işlendi; sözleşmeler yeniden tek doğruluk kaynağıdır ve modüllerdeki yerel geçici çözümler silindi. Ayrıntı: [runtime-seams.md](./contracts/runtime-seams.md) ve her referans belgenin "Sözleşme değişiklik istekleri" bölümü.
+
+| CCR | Karar |
+| --- | --- |
+| I1-1 `AgentDriverDependencies.credentials` | Kabul: zorunlu `CredentialResolver(route, signal, options?)`; driver `oauth-subscription` 401'inde tek zorunlu refresh + yeniden gönderim yapar. |
+| I1-2 `session/resumed.torn_tail` | Kabul: `session/resumed` v2; `EventStore.quarantinedTail?` sözleşmede. |
+| I1-3 `SessionProjection`, `RecoveryReport` | Kabul: `contracts/projection.ts`. |
+| I1-4 `attempt/started` ⇒ `running` | Kabul (belge): identity-and-state + runtime-seams. |
+| I2-5 zorunlu refresh | Uyarlandı: `resolve(signal, { forceRefresh })`; yenileyebilirlik yöntemden (`oauth-subscription`) anlaşılır. |
+| I2-6 router kota/onay yöntemleri + config | Kabul: `ModelRouter` + `RouteBlockedFailure`, `ProviderChangeProposal`, `ModelRouterConfig`, `RouteRule`; config ayrıştırma şeması bilinçli olarak eklenmedi (I5-B). |
+| I2-7 `BackendTurnInput.requestId: RequestId` | Kabul. |
+| I2-8 `os-dpapi` | Kabul: DPAPI deposu doğru raporlanır. |
+| I3-9 kaçan yollar ve denetim | Kabul: `NormalizedAction.escapes?`; `tool/policy_decided` v2; her ret kaydedilir. |
+| I3-10 `SandboxRunner.run` sonucu | Kabul: `ProcessResult.termination` + `spawnError` (`timedOut` kaldırıldı). |
+| I4-11 `ContextBuildInput.attemptId` | Kabul (+ `requestId: RequestId`). |
+| I4-12 `budget-exceeded` | Kabul: ret sonucu, istisna değil; tur `budget_exceeded`. |
+| I4-13 `dispatch` seçenekleri + `dispatchReview` | Kabul. |
+| I4-14 `readRoot` | Kabul: `IsolationCreateOptions`. |
+| I4-15 rapor araçları | Uyarlandı: `task_report` + ayrı `review_report` + `plan_propose`; I3 kaydında, I4 günlükten okur; JSON bloğu güvenli geri dönüş olarak kaldı. |
+| I4-16 `task/integrated` | Kabul: yeni olay (v1). |
+| I4-17 `attempt/started.session_id` | Kabul: `attempt/started` v2. |
+| I4-18 `ContextBlockReport.source` enum | Kabul: `CONTEXT_BLOCK_SOURCES`. |
+| I6-19 `decide` audit sonucu | Kabul: `decide → MemoryDecisionOutcome`; `decideWithAudit` silindi. |
+| I6-20 `MemoryConfig` | Kabul: `memoryConfigSchema`. |
+| Glob eşleştirici | Kabul: üç kopya (I3 ×2, I4) yerine `contracts/paths.ts` içindeki saf eşleştirici. |
+
+Olay sürümleme kuralı uygulandı: yeni alanlar opsiyonel, `EVENT_FIELD_VERSIONS` tablosu tip sürümünü yükseltir, eski sürüm olaylar okunmaya devam eder, eski sürümle damgalanmış yeni alan `invalid`'dir. Kapı: `pnpm check` 507 test, 506 geçti, 1 platform atlaması, 0 hata. Sonraki adım I5-B (composition root, e2e); bilmesi gerekenler runtime-seams.md'de: `credentials` resolver'ı auth sağlayıcılarına bağlamak, rapor araçlarının kayıtta hazır olması (callback gerekmez), `MemoryStore.decide` sonucunu olay olarak yazmak, router yapılandırmasını `ModelRouterConfig`'e çevirmek.

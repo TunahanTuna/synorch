@@ -20,7 +20,7 @@ Varsayılan mod `autonomous`'tur (ürün sahibi kararı, ADR-08): orchestrator o
 | workspace-write (write_scope içinde) | allow | ask |
 | exec (yıkıcı olmayan) | allow | ask |
 | external-write (`git push`, publish, dış API yazma) | yalnız kullanıcı allowlist'iyle allow, aksi halde **deny** | ask |
-| control (task_spawn, memory_propose) | rol izin veriyorsa allow | allow |
+| control (task_spawn, memory_propose, task_report, review_report, plan_propose) | rol izin veriyorsa allow | allow |
 | Plan onayı | orchestrator onaylar (`decided_by: orchestrator`, denetlenir) | kullanıcı |
 | Paid provider değişimi / bütçe artışı | **insan** (`HUMAN_ONLY_APPROVAL_SUBJECTS`) | insan |
 | Hard rail | **deny** | **deny** |
@@ -51,7 +51,9 @@ Yıkıcı komut sınıflandırması (I3 veri olarak tutar, liste genişletilebil
 
 ## 5. Normalize eylem, karar ve digest
 
-`NormalizedAction` = `tool_name`, `tool_version`, `effect`, `role`, `task_id?`, `args_digest`, `paths[]{path, access}`, `command?{argv, cwd}`, `network_hosts`, `destructive`. Onaylar `digestOf(action)` değerine bağlanır: aynı onay farklı argümana, yeni kapsama veya credential'a taşınamaz.
+`NormalizedAction` = `tool_name`, `tool_version`, `effect`, `role`, `task_id?`, `args_digest`, `paths[]{path, access}`, `escapes?[]{requested, access, reason}`, `command?{argv, cwd}`, `network_hosts`, `destructive`. Onaylar `digestOf(action)` değerine bağlanır: aynı onay farklı argümana, yeni kapsama veya credential'a taşınamaz.
+
+**Kaçan yollar (`escapes`).** Workspace içinde ifade edilemeyen bir yol (`..` kaçışı, dışarıdaki mutlak yol, UNC/cihaz yolu, dışarı çıkan link, sarkan link, çoklu hard link) `paths`'e yazılamaz (`pathPatternSchema`); yine de eylem normalize edilir ve yol `escapes`'e girer (`requested` ≤ 1024 karakter, redakte edilmiş ham argüman; `reason` ∈ `PATH_ESCAPE_REASONS`). PolicyEngine her kaçışı reddeder: yazmada `rail: write-outside-scope` + `code: path-escape`, okumada rail'siz `code: read-outside-workspace` (`PATH_ESCAPE_REASON_CODE`). Böylece her ret `tool/policy_decided` (v2) olarak denetim kaydına girer; gateway sonucu `path_outside_scope` olur. `escapes` yalnız boş değilse bulunur, bu yüzden kaçış içermeyen eylemlerin digest'i değişmez.
 
 `PolicyDecision` = `decision (allow|ask|deny)`, `action_digest`, `policy_digest`, `reasons[]{code, layer, message}` (en az bir), `rail?`. `rail` varsa karar `deny`'dır. `--explain-permission` (salt okunur) aynı `evaluate` fonksiyonunu çağırır.
 
@@ -225,6 +227,18 @@ network_hosts: [github.com]
 destructive: true
 ```
 
+```yaml example=normalized-action
+tool_name: read_file
+tool_version: "1.0.0"
+effect: read
+role: explorer
+args_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+paths: []
+escapes: [{ requested: "C:\\Users\\dev\\.ssh\\id_ed25519", access: read, reason: outside-workspace }]
+network_hosts: []
+destructive: false
+```
+
 ```yaml example=normalized-action invalid
 tool_name: apply_patch
 tool_version: "1.0.0"
@@ -232,6 +246,20 @@ effect: workspace-write
 role: implementer
 args_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 paths: [{ path: ../outside/secrets.env, access: write }]
+network_hosts: []
+destructive: false
+```
+
+Boş `escapes` listesi de reddedilir (alan yalnız kaçış varken bulunur):
+
+```yaml example=normalized-action invalid
+tool_name: write_file
+tool_version: "1.0.0"
+effect: workspace-write
+role: implementer
+args_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+paths: [{ path: src/auth/a.ts, access: write }]
+escapes: []
 network_hosts: []
 destructive: false
 ```

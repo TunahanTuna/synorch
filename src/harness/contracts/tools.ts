@@ -116,13 +116,22 @@ export interface ProcessSpec {
   readonly network: "deny" | "allow";
 }
 
+/**
+ * How a child ended. `exited`: it ran and exited (with a code or a signal of its own); `timeout`
+ * and `cancelled`: the runner terminated the whole tree; `spawn-failed`: nothing ran.
+ */
+export const PROCESS_TERMINATIONS = ["exited", "timeout", "cancelled", "spawn-failed"] as const;
+export type ProcessTermination = (typeof PROCESS_TERMINATIONS)[number];
+
 export interface ProcessResult {
+  readonly termination: ProcessTermination;
   readonly exitCode: number | null;
   readonly signal: string | null;
   readonly stdout: string;
   readonly stderr: string;
   readonly truncated: boolean;
-  readonly timedOut: boolean;
+  /** Why the child could not be started (e.g. `ENOENT`); always set for `spawn-failed`. */
+  readonly spawnError: string | undefined;
   readonly durationMs: number;
 }
 

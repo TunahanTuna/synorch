@@ -1,21 +1,23 @@
-import type {
-  AgentDriver,
-  BlobStore,
-  EffectivePolicy,
-  EventStore,
-  ModelRoute,
-  PlanId,
-  PolicyMode,
-  RunId,
-  SessionId,
+import {
+  REPORT_TOOL_NAMES,
+  type AgentDriver,
+  type BlobStore,
+  type EffectivePolicy,
+  type EventStore,
+  type ModelRoute,
+  type PlanId,
+  type PolicyMode,
+  type RunId,
+  type SessionId,
 } from "../contracts/index.ts";
-import { buildAttemptLog, readEvents } from "./attempt-log.ts";
+import { buildAttemptLog, latestReport, readEvents } from "./attempt-log.ts";
 import { extractJsonBlock } from "./claims.ts";
 
 /**
  * Plan production. The coordinator only needs a candidate; `validatePlan` decides whether it is a
  * plan. The model planner runs one orchestrator turn in the run session and reads the plan from the
- * final message; identity fields (ids, version, timestamp) are always set by the harness.
+ * last succeeded `plan_propose` call (fallback: the final message's JSON block); identity fields
+ * (ids, version, timestamp) are always set by the harness.
  */
 
 export interface PlannerInput {
@@ -39,7 +41,7 @@ export interface Planner {
 }
 
 export const PLAN_FORMAT = [
-  "Reply with exactly one ```json block holding the plan:",
+  `Call the \`${REPORT_TOOL_NAMES.plan}\` tool with the plan (if the tool is unavailable, reply with exactly one \`\`\`json block holding it):`,
   '{"goal": "...", "risk": "trivial|standard|high-risk", "scope": ["src/**"],',
   ' "tasks": [{"key": "kebab-key", "role": "explorer|implementer|debugger|reviewer", "objective": "...", "depends_on": [],',
   '   "owned_paths": [], "read_paths": [], "risk": "trivial|standard|high-risk", "model_tier": "complex_worker|fast_worker|orchestrator",',
@@ -87,7 +89,7 @@ export function createModelPlanner(deps: ModelPlannerDependencies): Planner {
         signal,
       );
       const log = await buildAttemptLog(input.sessionId, await readEvents(input.events), deps.blobs);
-      const raw = extractJsonBlock(log.finalAssistantText ?? "");
+      const raw = latestReport(log, REPORT_TOOL_NAMES.plan) ?? extractJsonBlock(log.finalAssistantText ?? "");
       if (typeof raw !== "object" || raw === null) return raw;
       return {
         ...(raw as Record<string, unknown>),

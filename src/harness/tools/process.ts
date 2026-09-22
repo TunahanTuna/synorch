@@ -10,11 +10,6 @@ export interface ProcessOptions {
   readonly outputLimitBytes: number;
 }
 
-export interface RunProcessResult extends ProcessResult {
-  readonly cancelled: boolean;
-  readonly spawnError: string | undefined;
-}
-
 const INTERRUPT_GRACE_MS = 1_500;
 const CLOSE_GRACE_MS = 5_000;
 
@@ -24,7 +19,7 @@ const CLOSE_GRACE_MS = 5_000;
  * `taskkill /T /F` on Windows, SIGINT then SIGKILL to the process group elsewhere. Output beyond
  * the limit is dropped (the pipes keep draining) and reported as truncated.
  */
-export function runProcess(argv: readonly [string, ...string[]], options: ProcessOptions, signal: AbortSignal): Promise<RunProcessResult> {
+export function runProcess(argv: readonly [string, ...string[]], options: ProcessOptions, signal: AbortSignal): Promise<ProcessResult> {
   const started = performance.now();
   return new Promise((resolve) => {
     let child: ChildProcess;
@@ -74,14 +69,14 @@ export function runProcess(argv: readonly [string, ...string[]], options: Proces
       clearTimeout(timer);
       if (forceTimer !== undefined) clearTimeout(forceTimer);
       signal.removeEventListener("abort", onAbort);
+      const neverStarted = spawnError !== undefined && child.pid === undefined;
       resolve({
+        termination: neverStarted ? "spawn-failed" : cancelled ? "cancelled" : timedOut ? "timeout" : "exited",
         exitCode,
         signal: exitSignal,
         stdout: decode(stdout),
         stderr: decode(stderr),
         truncated,
-        timedOut,
-        cancelled,
         spawnError,
         durationMs: Math.round(performance.now() - started),
       });
@@ -156,15 +151,14 @@ function decode(chunks: readonly Buffer[]): string {
   return Buffer.concat(chunks).toString("utf8").replace(/�$/, "");
 }
 
-function failedSpawn(error: unknown, started: number): RunProcessResult {
+function failedSpawn(error: unknown, started: number): ProcessResult {
   return {
+    termination: "spawn-failed",
     exitCode: null,
     signal: null,
     stdout: "",
     stderr: "",
     truncated: false,
-    timedOut: false,
-    cancelled: false,
     spawnError: error instanceof Error ? error.message : String(error),
     durationMs: Math.round(performance.now() - started),
   };

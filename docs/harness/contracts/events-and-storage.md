@@ -36,7 +36,7 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | Tip | `data` alanları | Model | Üreten |
 | --- | --- | --- | --- |
 | `session/opened` | `writer`, `project_id`, `workspace_root`, `cwd`, `platform`, `git`, `policy_mode`, `parent?` | Hayır | store/cli |
-| `session/resumed` | `previous_last_seq`, `recovered[]` | Hayır | core |
+| `session/resumed` (v2) | `previous_last_seq`, `recovered[]`, `torn_tail?{segment, bytes}` (v2) | Hayır | core |
 | `session/closed` | `reason` | Hayır | cli |
 | `run/created` | `goal`, `policy_mode`, `headless`, `budget` | Hedef metni evet | orchestration |
 | `run/state_changed` | `from`, `to`, `reason` | Hayır | orchestration |
@@ -50,8 +50,9 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | `task/created` | `task_id`, `plan_id`, `key`, `role`, `depends_on`, `owned_paths`, `risk` | Hayır | orchestration |
 | `task/state_changed` | `task_id`, `from`, `to`, `reason` | Hayır | orchestration |
 | `task/packet_issued` | `task_id`, `kind`, `packet_digest`, `blob` | Worker'a packet | orchestration |
-| `attempt/started` | `attempt_id`, `task_id`, `role`, `route`, `packet_digest`, `isolation` | Hayır | orchestration |
+| `attempt/started` (v2) | `attempt_id`, `task_id`, `role`, `route`, `packet_digest`, `isolation`, `session_id?` (v2: attempt'in kendi session'ı) | Hayır | orchestration |
 | `attempt/state_changed` | `attempt_id`, `from`, `to`, `reason` | Hayır | orchestration |
+| `task/integrated` | `task_id`, `attempt_id`, `artifact_digest`, `paths[]` | Hayır | orchestration |
 | `attempt/completion_recorded` | `attempt_id`, `task_id`, `status`, `completion_digest`, `blob` | Orchestrator'a | orchestration |
 | `review/recorded` | `task_id`, `reviewer_attempt_id`, `review_digest`, `decision`, `blob` | Orchestrator'a | orchestration |
 | `turn/started`, `turn/ended` | `turn_id`, `trigger` / `outcome` | Hayır | core |
@@ -62,7 +63,7 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | `model/response_failed` | `request_id`, `error`, `partial_blob?` | Gerekli hata | core |
 | `provider/usage` | `request_id`, `usage`, `quota?` | Hayır | core |
 | `tool/call_proposed` | `tool_call_id`, `request_id?`, `provider_call_id`, `tool_name`, `args_digest`, `args_blob?` | Call evet | tools |
-| `tool/policy_decided` | `tool_call_id`, `action`, `decision` | Hayır | tools/policy |
+| `tool/policy_decided` (v2) | `tool_call_id`, `action` (v2: `action.escapes?`), `decision` | Hayır | tools/policy |
 | `tool/execution_started` | `tool_call_id`, `sandbox_enforcement` | Hayır | tools |
 | `tool/result_recorded` | `tool_call_id`, `state`, `result`, `duration_ms` | Result evet | tools |
 | `tool/interrupted` | `tool_call_id`, `outcome: unknown`, `idempotent` | Bildirim | core (recovery) |
@@ -79,6 +80,8 @@ Eşleşme invariant'ları: her `tool/call_proposed` bir `tool/result_recorded` v
 ## 4. Okuma, sürüm ve migration
 
 `parseSessionEvent(raw)` üç sonuç verir: `ok`, `unsupported` (bilinmeyen `type` veya bilinen tipte daha yüksek `event_version`), `invalid` (bilinen tip şemaya uymuyor = bozulma). `unsupported` sessizce atlanmaz; projection "bu session daha yeni bir sürümle yazılmış" hatası verir ve yazma için açmaz. Payload değişikliği: alan eklemek bile `event_version` artırır; okuyucu eski sürümleri desteklemeye devam eder; eski log hiçbir zaman yeniden yazılmaz.
+
+Sürümlü alanlar `EVENT_FIELD_VERSIONS` tablosundadır (tip → alan → alanı getiren sürüm); `EVENT_VERSIONS[type]` bu tablodaki en yüksek sürümdür ve yazıcılar her zaman onu damgalar. Yeni alanlar şemada opsiyoneldir, böylece eski sürüm olaylar aynı şemayla okunur; daha eski sürümle damgalanmış ama yeni alanı taşıyan olay `invalid`'dir (o sürüm yazamazdı). Dalga 2a: `session/resumed` v2 (`torn_tail`), `attempt/started` v2 (`session_id`), `tool/policy_decided` v2 (`action.escapes`); `task/integrated` yeni tip (v1) — onu tanımayan eski okuyucu `unsupported` raporlar.
 
 ## 5. Disk yerleşimi
 
@@ -241,7 +244,89 @@ worktrees/<project-id>/<attempt-id>/   (ADR-07)
       - { block_id: history, source: history, trust: untrusted, tokens_estimate: 8800, truncated: false }
 ```
 
-Reddedilmesi gerekenler: `seq: 0`, runtime kimliği olmayan kayıtlı tool call, strict payload'a fazladan alan (yetki alanı sızdırma denemesi):
+Dalga 2a sürümlü olaylar (v2 alanları ve yeni `task/integrated`):
+
+```yaml example=session-event
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V1
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 49
+  event_version: 2
+  timestamp: "2026-09-22T11:00:00.000Z"
+  actor: { kind: system }
+  type: session/resumed
+  data:
+    previous_last_seq: 48
+    recovered:
+      - { machine: toolCall, id: call_01K5T3Q8Z4X9V2M6N7P0R1S2TE, from: executing, to: interrupted }
+    torn_tail: { segment: 1, bytes: 37 }
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V2
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 11
+  event_version: 2
+  timestamp: "2026-09-22T10:02:00.000Z"
+  actor: { kind: orchestrator, role: orchestrator }
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+  attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+  type: attempt/started
+  data:
+    attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+    task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+    role: implementer
+    route: { provider_id: openai, model_id: gpt-5.6-sol, adapter_id: openai-chatgpt, adapter_kind: model, auth_method: oauth-subscription, profile: default, tier: complex_worker }
+    packet_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    isolation: { mode: worktree, path: /home/dev/.synorch/worktrees/synorch-1a2b3c4d/att_01K5T3Q8Z4X9V2M6N7P0R1S2T8, base_commit: 62f0b12 }
+    session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2V9
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V3
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 40
+  event_version: 1
+  timestamp: "2026-09-22T10:20:00.000Z"
+  actor: { kind: orchestrator, role: orchestrator }
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+  attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+  type: task/integrated
+  data:
+    task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+    attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+    artifact_digest: "sha256:abababababababababababababababababababababababababababababababab"
+    paths: [src/auth/refresh.ts, tests/auth/refresh.test.ts]
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V4
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 17
+  event_version: 2
+  timestamp: "2026-09-22T10:02:12.000Z"
+  actor: { kind: policy }
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+  type: tool/policy_decided
+  data:
+    tool_call_id: call_01K5T3Q8Z4X9V2M6N7P0R1S2TF
+    action:
+      tool_name: write_file
+      tool_version: "1.0.0"
+      effect: workspace-write
+      role: implementer
+      task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+      args_digest: "sha256:acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac"
+      paths: []
+      escapes: [{ requested: ../outside/secret.txt, access: write, reason: outside-workspace }]
+      network_hosts: []
+      destructive: false
+    decision:
+      decision: deny
+      action_digest: "sha256:adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad"
+      policy_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      reasons: [{ code: path-escape, layer: platform, message: "../outside/secret.txt cannot be expressed inside the workspace (outside-workspace)" }]
+      rail: write-outside-scope
+```
+
+Reddedilmesi gerekenler: `seq: 0`, runtime kimliği olmayan kayıtlı tool call, strict payload'a fazladan alan (yetki alanı sızdırma denemesi), v2 alanı taşıyan v1 olay:
 
 ```yaml example=session-event invalid
 - schema_version: 1
@@ -281,6 +366,18 @@ Reddedilmesi gerekenler: `seq: 0`, runtime kimliği olmayan kayıtlı tool call,
     to: verifying
     reason: done
     grant_write: true
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V5
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 5
+  event_version: 1
+  timestamp: "2026-09-22T10:00:00Z"
+  actor: { kind: system }
+  type: session/resumed
+  data:
+    previous_last_seq: 4
+    recovered: []
+    torn_tail: { segment: 1, bytes: 12 }
 ```
 
 Okuyucunun `unsupported` raporlaması gerekenler (bilinmeyen tip, daha yeni payload sürümü):

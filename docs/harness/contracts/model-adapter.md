@@ -99,6 +99,16 @@ Her kabiliyet `supported | degraded | unsupported | unknown`'dır; bilinmeyen `f
 
 `ModelRouter.resolve({tier, role})` → `RouteDecision` (`source`: `session | project | workspace | user | provider-default`, `reason`, `capabilities_probed_at`, `fallback`). `fallback.used: true` ise `from` ve `approval_id` zorunludur; `provider-change` onayı yalnız insan tarafından verilir ([policy-and-approval.md](./policy-and-approval.md)). Reviewer rolü için router mümkünse implementer'dan farklı model/sağlayıcı tercih eder ([ADR-09](../decisions/ADR-09-reviewer-independence.md)).
 
+`ModelRouter` sözleşmesi ayrıca kota ve onay akışını taşır:
+
+- `reportFailure(route, error)`: driver/orchestration sağlayıcı hatasını bildirir; `quota_exhausted` route'u sıfırlanana kadar bloke eder.
+- Bloke route'u çözmek `RouteBlockedFailure` (`ProviderFailure` alt sınıfı, `quota_exhausted`; `blocked`, `tier`, `role`, `alternatives`) fırlatır; router kendiliğinden route değiştirmez.
+- `proposeProviderChange(failure, {runId, taskId?, to?}) → ProviderChangeProposal {request, from, to}`: insan onayı gereken `provider-change` isteğini kurar.
+- `applyProviderChange(decision)`: yalnız tam o öneriye bağlı, izin veren **kullanıcı** kararı fallback'i açar; sonraki `resolve` `fallback {used: true, from, approval_id}` döner.
+- `ModelRouterConfig { rules: RouteRule[] }`, `RouteRule {source, tier, role?, route: RouteBinding {provider_id, model_id, adapter_id, profile?}}`: composition root session/project/workspace/user yapılandırmasından kurar; router kayıtlı adapter'larla doğrular.
+
+`BackendTurnInput.requestId` bir `RequestId`'dir (driver'ın `step/started.request_id`'si); köprü `start` olayında aynen kullanır.
+
 ## 7. Kimlik doğrulama soyutlaması
 
 | Yöntem | Kim sahip? | Saklanan secret | v1 |
@@ -107,9 +117,9 @@ Her kabiliyet `supported | degraded | unsupported | unknown`'dır; bilinmeyen `f
 | `api-key` | Synorch | `api_key` | OpenAI, Anthropic (P0) |
 | `cli-bridge` | Kullanıcının istemcisi | **Yok** (şemada yer almaz) | Claude Code (P1 deneysel) |
 
-- `AuthProvider`: `status`, `login(interaction)`, `logout`, `resolve(signal) → ResolvedCredential`. `resolve` gerekirse profil kilidi altında refresh eder; başka yönteme/profile **asla** düşmez. `cli-bridge` provider'ı `resolve`'u reddeder.
+- `AuthProvider`: `status`, `login(interaction)`, `logout`, `resolve(signal, options?) → ResolvedCredential`. `resolve` gerekirse profil kilidi altında refresh eder; başka yönteme/profile **asla** düşmez. `cli-bridge` provider'ı `resolve`'u reddeder. `options.forceRefresh: true`: sağlayıcı yerelde geçerli görünen credential'ı reddettiğinde (HTTP 401) profil kilidi altında refresh eder — başka bir süreç bu süreç en son verdiğinden beri token'ı zaten yenilediyse onu döner. Yalnız `oauth-subscription` yenileyebilir; diğer yöntemler normal çözer, bu yüzden çağıranlar 401 sonrası tek yeniden denemeyi yalnız bu yöntem için yapar.
 - `ResolvedCredential`: secret'ı kapalı tutar; yalnız `applyTo(headers)`, `redactionValues()` ve `toJSON() → "[redacted]"` sunar. Log, packet, tool env veya diff'e yazılamaz.
-- `CredentialStore`: `backend` = `os-keychain` (servis `synorch`, hesap `<provider>:<method>:<profile>`) öncelikli; yoksa `file-0600` = `~/.synorch/credentials.json` (dosya `0600`, dizin `0700`, Windows'ta kullanıcı profili ACL'i; atomik temp+rename) ve `plaintext-credential-file` bildirimi. `withRefreshLock` süreçler arası profil kilidi + süreç içi tek uçuşlu refresh sağlar; yeni token kalıcı yazılmadan eski silinmez; kalıcı refresh hatası profili `login_required` yapar.
+- `CredentialStore`: `backend` doğru raporlanır: `os-keychain` (macOS Keychain / Secret Service; servis `synorch`, hesap `<provider>:<method>:<profile>`) veya `os-dpapi` (Windows: yalnız kullanıcıya bağlı DPAPI şifreli metnin tutulduğu `~/.synorch/credentials.dpapi.json`) öncelikli; yoksa `file-0600` = `~/.synorch/credentials.json` (dosya `0600`, dizin `0700`, Windows'ta kullanıcı profili ACL'i; atomik temp+rename) ve `plaintext-credential-file` bildirimi. `withRefreshLock` süreçler arası profil kilidi + süreç içi tek uçuşlu refresh sağlar; yeni token kalıcı yazılmadan eski silinmez; kalıcı refresh hatası profili `login_required` yapar.
 - `AuthInteraction`: tarayıcı açma, device-code gösterme, secret isteme, bildirim onayı. TUI ve plain renderer uygular; headless modda `interactive: false` ve login komutu exit 7 ile biter.
 - OpenAI ChatGPT akışı: PKCE loopback `http://localhost:1455/auth/callback` (meşgulse device-code'a geçilir), `originator: synorch`, istekler `store: false` ve her istekte tam geçmiş (encrypted reasoning `thinking.opaque` ile taşınır). Ayrıntılı parametreler [openai-chatgpt-oauth.md](../research/provider-auth/openai-chatgpt-oauth.md); uygulama sprintinde yeniden doğrulanır.
 
@@ -262,6 +272,7 @@ fallback: { used: true, from: { provider_id: openai, model_id: gpt-5.6-sol, adap
 - { provider_id: openai, method: oauth-subscription, profile: default, state: connected, account_label: "t***@example.com", plan_label: plus, entitlement: verified, billing: subscription, expires_at: "2026-09-22T11:00:00Z", store_backend: os-keychain }
 - { provider_id: anthropic, method: cli-bridge, profile: default, state: connected, entitlement: unknown, billing: unknown, detail: "Claude Code 2.4.1, apiKeySource=oauth" }
 - { provider_id: anthropic, method: api-key, profile: work, state: connected, entitlement: unverified, billing: metered, store_backend: file-0600 }
+- { provider_id: openai, method: api-key, profile: default, state: connected, entitlement: unverified, billing: metered, store_backend: os-dpapi }
 ```
 
 ```yaml example=credential-secret

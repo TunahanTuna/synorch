@@ -30,7 +30,7 @@ export const DPAPI_FILE_NAME = "credentials.dpapi.json";
 const VAULT_INDEX_ACCOUNT = "synorch:index";
 
 export interface CredentialStoreOptions {
-  /** `auto` probes the OS keychain and falls back to the 0600 file. `SYNORCH_CREDENTIAL_STORE` may set it. */
+  /** `auto` probes the OS store and falls back to the 0600 file; `os-keychain`/`os-dpapi` require an OS store (whichever the platform has). `SYNORCH_CREDENTIAL_STORE` may set it. */
   readonly backend?: "auto" | Exclude<CredentialStoreBackend, "memory">;
   readonly platform?: NodeJS.Platform;
   readonly run?: CommandRunner;
@@ -75,7 +75,7 @@ export function createCredentialStore(home: string, options: CredentialStoreOpti
       dpapiFile: path.join(home, DPAPI_FILE_NAME),
     });
     if (vault !== undefined) return buildStore(vaultPersistence(vault, home), home);
-    if (requested === "os-keychain") {
+    if (requested === "os-keychain" || requested === "os-dpapi") {
       throw new HarnessError({
         code: "config_invalid",
         message: "the OS keychain was requested but is not available on this system",
@@ -118,6 +118,7 @@ function backendFromEnv(env: Readonly<Record<string, string | undefined>>): Cred
   const value = env.SYNORCH_CREDENTIAL_STORE?.trim().toLowerCase();
   if (value === "file" || value === "file-0600") return "file-0600";
   if (value === "keychain" || value === "os-keychain") return "os-keychain";
+  if (value === "dpapi" || value === "os-dpapi") return "os-dpapi";
   if (value === "auto") return "auto";
   return undefined;
 }
@@ -199,7 +200,7 @@ function vaultPersistence(vault: SecretVault, home: string): Persistence {
     await vault.set(VAULT_INDEX_ACCOUNT, encode(refs));
   }
   const persistence: Persistence & { invalidate(account: string): void } = {
-    backend: "os-keychain",
+    backend: vault.kind === "windows-dpapi" ? "os-dpapi" : "os-keychain",
     location: vault.kind,
     async read(account) {
       if (cache.has(account)) return structuredCloneOrUndefined(cache.get(account));

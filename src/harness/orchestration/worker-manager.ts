@@ -8,6 +8,7 @@ import {
   findStaleSources,
   HarnessError,
   packetDigest,
+  REPORT_TOOL_NAMES,
   reviewPacketSchema,
   sha256,
   taskContextPacketSchema,
@@ -24,8 +25,8 @@ import {
   type PolicyEngine,
   type PolicyMode,
   type ProjectId,
-  type ReviewPacket,
-  type RouteDecision,
+  type DispatchOptions,
+  type ReviewOutcome,
   type RunId,
   type SandboxReport,
   type SessionId,
@@ -38,7 +39,7 @@ import {
 import { buildAttemptLog, readEvents, type AttemptLog } from "./attempt-log.ts";
 import type { BudgetTracker } from "./budget.ts";
 import {
-  parseClaim,
+  readClaim,
   REVIEWER_REPORT_INSTRUCTIONS,
   reviewerClaimSchema,
   WORKER_REPORT_INSTRUCTIONS,
@@ -46,7 +47,7 @@ import {
   type ClaimResult,
   type WorkerClaim,
 } from "./claims.ts";
-import { verifyCompletion, verifyReview, type CompletionVerification, type EvidenceIndex, type ReviewVerification } from "./evidence.ts";
+import { verifyCompletion, verifyReview, type CompletionVerification, type EvidenceIndex } from "./evidence.ts";
 import type { ChangeSet, OrchestratedWorkspace, OrchestrationIsolationProvider } from "./isolation.ts";
 import { matchesAny, normalizeWorkspacePath } from "./paths.ts";
 import {
@@ -92,12 +93,6 @@ export interface WorkerManagerDependencies {
   readonly platform?: NodeJS.Platform;
 }
 
-export interface DispatchOptions {
-  readonly route?: RouteDecision;
-  /** Artifact of an earlier attempt that a revise attempt continues from. */
-  readonly seedArtifact?: Uint8Array;
-}
-
 export interface AttemptRecord {
   readonly attemptId: AttemptId;
   readonly taskId: TaskId;
@@ -112,22 +107,8 @@ export interface AttemptRecord {
   outcome: TurnOutcome | undefined;
 }
 
-export interface ReviewResult {
-  readonly attemptId: AttemptId;
-  readonly review: ReviewPacket | undefined;
-  readonly verification: ReviewVerification;
-}
-
-export interface ReviewHandle {
-  readonly attemptId: AttemptId;
-  readonly result: Promise<ReviewResult>;
-  cancel(reason: string): void;
-}
-
+/** The contract `WorkerManager` plus the coordinator's own verification and integration steps. */
 export interface OrchestrationWorkerManager extends WorkerManager {
-  dispatch(packet: TaskContextPacket, signal: AbortSignal, options?: DispatchOptions): Promise<AttemptHandle>;
-  /** Starts an independent review of `target` in a fresh session on the pinned artifact. */
-  dispatchReview(packet: TaskContextPacket, target: AttemptId, signal: AbortSignal, options?: DispatchOptions): Promise<ReviewHandle>;
   attempt(attemptId: AttemptId): AttemptRecord | undefined;
   verify(attemptId: AttemptId): Promise<CompletionVerification>;
   integrate(attemptId: AttemptId, expectedArtifact: Digest, signal: AbortSignal): Promise<void>;
@@ -303,6 +284,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
           path: workspace.root,
           ...(workspace.baseCommit === undefined ? {} : { base_commit: workspace.baseCommit }),
         },
+        session_id: events.sessionId,
       },
       { taskId: valid.task_id, attemptId },
     );
@@ -397,7 +379,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
   };
 
   const indexFor = (record: AttemptRecord, artifact: ChangeSet | undefined, root: string): EvidenceIndex => ({
-    log: record.log ?? { sessionId: record.sessionId, toolCalls: new Map(), eventTypes: new Map(), compactionBlobs: new Set(), finalAssistantText: undefined, assistantTexts: [] },
+    log: record.log ?? { sessionId: record.sessionId, toolCalls: new Map(), eventTypes: new Map(), compactionBlobs: new Set(), finalAssistantText: undefined, assistantTexts: [], reports: [] },
     artifactDigest: artifact?.artifactDigest,
     changedPaths: artifact?.changes.map((change) => change.path) ?? [],
     fileDigest: (relative) => fileDigestIn(root, relative),
@@ -491,7 +473,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       }
     }
     const cancelledReason = controller.signal.aborted ? String((controller.signal.reason as Error | undefined)?.message ?? controller.signal.reason) : undefined;
-    const completion = assemble(record, execution, changeSet, parseClaim(workerClaimSchema, execution.log.finalAssistantText), stale, cancelledReason);
+    const completion = assemble(record, execution, changeSet, readClaim(workerClaimSchema, execution.log, REPORT_TOOL_NAMES.task), stale, cancelledReason);
     record.completion = completion;
     await finishAttempt(record, execution, cancelledReason !== undefined);
     const blob = await recorder.putJson(completion, COMPLETION_MEDIA_TYPE);
@@ -550,10 +532,10 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       const pinned = target.changeSet;
       const completion = target.completion;
       const { record, controller } = await prepare(packet, signal, options, target.workspace.root);
-      const run = async (): Promise<ReviewResult> => {
+      const run = async (): Promise<ReviewOutcome> => {
         const execution = await execute(record, renderReviewBrief(target, completion, pinned), controller);
         await finishAttempt(record, execution, controller.signal.aborted);
-        const claim = parseClaim(reviewerClaimSchema, execution.log.finalAssistantText);
+        const claim = readClaim(reviewerClaimSchema, execution.log, REPORT_TOOL_NAMES.review);
         if (!claim.ok) return { attemptId: record.attemptId, review: undefined, verification: { decision: "invalid", problems: claim.problems } };
         const candidate = {
           schema_version: 2 as const,
@@ -597,7 +579,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         });
         return { attemptId: record.attemptId, review, verification };
       };
-      const result = run().catch(async (error: unknown): Promise<ReviewResult> => {
+      const result = run().catch(async (error: unknown): Promise<ReviewOutcome> => {
         await failUnfinished(record, error);
         return {
           attemptId: record.attemptId,
@@ -624,6 +606,19 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       const record = records.get(attemptId);
       if (record === undefined) throw harnessError("internal", `unknown attempt ${attemptId}`);
       await deps.isolation.integrate(record.workspace, expectedArtifact, signal);
+      await recorder.record(
+        "task/integrated",
+        {
+          task_id: record.taskId,
+          attempt_id: record.attemptId,
+          artifact_digest: expectedArtifact,
+          paths: (record.changeSet?.changes ?? []).flatMap((change) => {
+            const normalized = normalizeWorkspacePath(change.path);
+            return normalized === undefined ? [] : [normalized];
+          }),
+        },
+        { taskId: record.taskId, attemptId: record.attemptId, actor: { kind: "orchestrator", role: "orchestrator" } },
+      );
     },
     async revert(attemptId, signal) {
       const record = records.get(attemptId);

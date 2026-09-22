@@ -25,7 +25,7 @@ import {
   turnIdSchema,
 } from "./ids.ts";
 import { memoryIdSchema, MEMORY_KINDS } from "./memory.ts";
-import { modelMessageSchema, modelRouteSchema, providerErrorSchema, quotaSnapshotSchema, routeDecisionSchema, STOP_REASONS, TRUST_LEVELS, usageSchema, SYSTEM_BLOCK_SOURCES } from "./model.ts";
+import { CONTEXT_BLOCK_SOURCES, modelMessageSchema, modelRouteSchema, providerErrorSchema, quotaSnapshotSchema, routeDecisionSchema, STOP_REASONS, TRUST_LEVELS, usageSchema } from "./model.ts";
 import { planSchema } from "./packets.ts";
 import { pathPatternSchema } from "./paths.ts";
 import {
@@ -124,6 +124,8 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
           to: z.string().min(1),
         }),
       ),
+      /** v2: the torn final line the writer quarantined when it opened the session. */
+      torn_tail: z.strictObject({ segment: z.int().min(1), bytes: z.int().min(1) }).optional(),
     }),
   ),
   eventOf("session/closed", z.strictObject({ reason: z.enum(["user", "completed", "error", "signal"]) })),
@@ -180,6 +182,8 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
         path: z.string().min(1).optional(),
         base_commit: z.string().min(1).optional(),
       }),
+      /** v2: the attempt's own session, where its turns, tool calls and report live. */
+      session_id: sessionIdSchema.optional(),
     }),
   ),
   eventOf("attempt/state_changed", z.strictObject({ attempt_id: attemptIdSchema, ...transition(ATTEMPT_STATES) })),
@@ -191,6 +195,15 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
       status: z.enum(["completed", "partial", "failed", "blocked", "needs_context"]),
       completion_digest: digestSchema,
       blob: blobRefSchema,
+    }),
+  ),
+  eventOf(
+    "task/integrated",
+    z.strictObject({
+      task_id: taskIdSchema,
+      attempt_id: attemptIdSchema,
+      artifact_digest: digestSchema,
+      paths: z.array(pathPatternSchema),
     }),
   ),
   eventOf(
@@ -229,7 +242,7 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
       context: z.array(
         z.strictObject({
           block_id: z.string().min(1),
-          source: z.enum([...SYSTEM_BLOCK_SOURCES, "history", "tool-result"]),
+          source: z.enum(CONTEXT_BLOCK_SOURCES),
           trust: z.enum(TRUST_LEVELS),
           tokens_estimate: z.int().min(0),
           truncated: z.boolean(),
@@ -337,10 +350,41 @@ export type SessionEvent = z.infer<typeof sessionEventSchema>;
 export type SessionEventType = SessionEvent["type"];
 export type SessionEventOf<T extends SessionEventType> = Extract<SessionEvent, { type: T }>;
 
+/**
+ * Payload fields added after version 1, per type: the version that introduced each one. A writer
+ * always stamps `EVENT_VERSIONS[type]`; a reader accepts every older version, and an older-version
+ * event that carries a newer field is `invalid` (it cannot have been written by that version).
+ */
+export const EVENT_FIELD_VERSIONS = {
+  "session/resumed": { torn_tail: 2 },
+  "attempt/started": { session_id: 2 },
+  "tool/policy_decided": { "action.escapes": 2 },
+} as const satisfies { readonly [T in SessionEventType]?: Readonly<Record<string, number>> };
+
 /** Current payload version per type. A reader meeting a higher version reports `unsupported`. */
 export const EVENT_VERSIONS: { readonly [T in SessionEventType]: number } = Object.fromEntries(
-  sessionEventSchema.options.map((option) => [option.shape.type.value, 1]),
+  sessionEventSchema.options.map((option) => {
+    const type = option.shape.type.value;
+    const fields: Readonly<Record<string, number>> = (EVENT_FIELD_VERSIONS as Readonly<Record<string, Readonly<Record<string, number>>>>)[type] ?? {};
+    return [type, Math.max(1, ...Object.values(fields))];
+  }),
 ) as { readonly [T in SessionEventType]: number };
+
+function fieldAt(data: unknown, dotted: string): unknown {
+  let current: unknown = data;
+  for (const key of dotted.split(".")) {
+    if (typeof current !== "object" || current === null) return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function newerFieldIssues(event: SessionEvent): { readonly path: readonly PropertyKey[]; readonly message: string }[] {
+  const fields: Readonly<Record<string, number>> = (EVENT_FIELD_VERSIONS as Readonly<Record<string, Readonly<Record<string, number>>>>)[event.type] ?? {};
+  return Object.entries(fields)
+    .filter(([field, since]) => event.event_version < since && fieldAt(event.data, field) !== undefined)
+    .map(([field, since]) => ({ path: ["data", ...field.split(".")], message: `${field} requires event_version >= ${since}` }));
+}
 
 export const SESSION_EVENT_TYPES = Object.keys(EVENT_VERSIONS) as SessionEventType[];
 
@@ -368,6 +412,9 @@ export function parseSessionEvent(raw: unknown): EventParseResult {
     }
   }
   const parsed = sessionEventSchema.safeParse(raw);
-  if (parsed.success) return { status: "ok", event: parsed.data };
+  if (parsed.success) {
+    const issues = newerFieldIssues(parsed.data);
+    return issues.length === 0 ? { status: "ok", event: parsed.data } : { status: "invalid", issues };
+  }
   return { status: "invalid", issues: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) };
 }

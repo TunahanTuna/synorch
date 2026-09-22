@@ -3,7 +3,6 @@ import {
   digestOf,
   digestText,
   findStaleSources,
-  HarnessError,
   requestIdSchema,
   SYSTEM_BLOCK_SOURCES,
   TRUST_LEVELS,
@@ -161,14 +160,13 @@ function overflowPending(events: readonly SessionEvent[], history: History): boo
   return false;
 }
 
-function budgetError(admission: Extract<RequestBudgetAdmission, { ok: false }>): HarnessError {
-  return new HarnessError({
-    code: "budget_exceeded",
-    message: `budget exhausted before the next model request: ${admission.metric} used ${admission.used} of ${admission.limit}`,
-    workspace_effect: "none",
-    retry_safe: false,
-    next_command: "raise the budget (requires a human decision) or stop the run",
-  });
+function budgetRefusal(admission: Extract<RequestBudgetAdmission, { ok: false }>): ContextBuildResult {
+  return {
+    ok: false,
+    reason: "budget-exceeded",
+    stale: [],
+    detail: `budget exhausted before the next model request: ${admission.metric} used ${admission.used} of ${admission.limit}`,
+  };
 }
 
 async function readAll(store: ReadOnlyEventStore): Promise<SessionEvent[]> {
@@ -275,7 +273,7 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
   };
 
   const assemble = async (input: ContextBuildInput, events: readonly SessionEvent[], signal: AbortSignal) => {
-    const history = await reconstructHistory(events, deps.blobs, { role: input.role, taskId: input.taskId });
+    const history = await reconstructHistory(events, deps.blobs, { role: input.role, taskId: input.taskId, attemptId: input.attemptId });
     const { blocks, memories } = await baseBlocks(input, history, signal);
     const messages = history.messages.map((entry) => entry.message);
     return { history, blocks, memories, messages };
@@ -294,7 +292,7 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
           event.type === "provider/usage" ? [{ sessionId: input.sessionId, seq: event.seq, usage: event.data.usage }] : [],
         );
         const admission = deps.budget.admit(observations);
-        if (!admission.ok) throw budgetError(admission);
+        if (!admission.ok) return budgetRefusal(admission);
       }
       const tools = deps.tools.visibleTo(input.role, input.policy);
       const window = deps.contextWindow?.(input.route) ?? DEFAULT_CONTEXT_WINDOW;

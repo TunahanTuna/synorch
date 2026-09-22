@@ -8,6 +8,7 @@ import {
   createId,
   deriveProjectId,
   digestOf,
+  ProviderFailure,
   StoreFailure,
   type EventReadItem,
   type EventStore,
@@ -394,7 +395,61 @@ test("a provider error is recorded with usage, the step errors and the turn fail
   assert.equal(ofType(events, "step/ended")[0]?.data.state, "errored");
 });
 
-test("a malformed stream or a missing credential resolver fails the step without throwing", async () => {
+test("a budget refusal from the context builder ends the turn budget_exceeded without a model request", async () => {
+  const adapter = new ScriptedModelAdapter([lazy((request) => textTurn(request, "unreachable"))]);
+  const h = await harness(adapter);
+  const driver = createAgentDriver({
+    events: h.events,
+    blobs: h.blobs,
+    router: testRouter(adapter),
+    context: { build: async () => ({ ok: false, reason: "budget-exceeded", stale: [], detail: "cost_usd used 2 of 1" }) },
+    tools: testRegistry(),
+    gateway: h.gateway,
+    credentials: async () => testCredential(),
+  });
+  const outcome = await driver.runTurn(h.input(), new AbortController().signal);
+  assert.equal(outcome.outcome, "budget_exceeded");
+  const events = await h.log();
+  assert.equal(ofType(events, "step/ended")[0]?.data.state, "aborted");
+  assert.equal(ofType(events, "turn/ended")[0]?.data.outcome, "budget_exceeded");
+  assert.equal(ofType(events, "model/request_prepared").length, 0);
+  assert.equal(adapter.requests.length, 0);
+});
+
+test("a subscription credential rejected with 401 is force-refreshed once and the same request is resent", async () => {
+  const rejected = (): ModelStreamEvent[] => [
+    { type: "error", error: { code: "auth_expired", message: "401", retryable: false, http_status: 401 } },
+  ];
+  const adapter = new ScriptedModelAdapter([lazy(rejected), lazy((request) => textTurn(request, "Done."))]);
+  const resolutions: (boolean | undefined)[] = [];
+  const h = await harness(adapter);
+  const driver = createAgentDriver({
+    events: h.events,
+    blobs: h.blobs,
+    router: testRouter(adapter),
+    context: createLogContextBuilder(h.events, h.blobs, testRegistry()),
+    tools: testRegistry(),
+    gateway: h.gateway,
+    credentials: async (_route, _signal, options) => {
+      resolutions.push(options?.forceRefresh);
+      return testCredential();
+    },
+  });
+  const subscription = { ...testRoute("model"), auth_method: "oauth-subscription" as const };
+  const outcome = await driver.runTurn(h.input({ route: subscription }), new AbortController().signal);
+  assert.equal(outcome.outcome, "completed");
+  assert.deepEqual(resolutions, [undefined, true]);
+  assert.equal(adapter.requests.length, 2);
+  assert.equal(adapter.requests[0]?.request_id, adapter.requests[1]?.request_id);
+  assert.equal(ofType(await h.log(), "model/response_failed").length, 0);
+
+  const apiKey = new ScriptedModelAdapter([lazy(rejected)]);
+  const h2 = await harness(apiKey);
+  assert.equal((await h2.driver.runTurn(h2.input(), new AbortController().signal)).outcome, "failed");
+  assert.equal(apiKey.requests.length, 1, "an API key is never retried after a 401");
+});
+
+test("a malformed stream or a refusing credential resolver fails the step without throwing", async () => {
   const malformed = new ScriptedModelAdapter([lazy(() => [{ type: "text_delta", index: -1, text: "x" } as unknown as ModelStreamEvent])]);
   const h1 = await harness(malformed);
   assert.equal((await h1.driver.runTurn(h1.input(), new AbortController().signal)).outcome, "failed");
@@ -409,6 +464,9 @@ test("a malformed stream or a missing credential resolver fails the step without
     context: createLogContextBuilder(h2.events, h2.blobs, testRegistry()),
     tools: testRegistry(),
     gateway: h2.gateway,
+    credentials: async () => {
+      throw new ProviderFailure({ code: "unauthenticated", message: "no credential for this route", retryable: false });
+    },
   });
   assert.equal((await plain.runTurn(h2.input(), new AbortController().signal)).outcome, "failed");
   assert.equal(ofType(await h2.log(), "model/response_failed")[0]?.data.error.code, "unauthenticated");

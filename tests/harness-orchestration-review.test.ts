@@ -103,6 +103,53 @@ test("AC-2 the reviewer never sees the implementer transcript and a standard tas
   }
 });
 
+test("report tools are the claim channel; attempt sessions and the integrate step are recorded", async () => {
+  const workspace = await createTempWorkspace({ "src/index.ts": "export {};\n" }, { git: true });
+  try {
+    const planner = createScriptedPlanner((input) => testPlan(input, [{ key: "feature", owned_paths: ["src/feature.ts"], risk: "standard", verification: ["pnpm test"] }]));
+    const runtime = createTestRuntime({
+      workspace,
+      planner,
+      script: async (context) => {
+        if (context.input.role === "reviewer") {
+          const call = await context.toolCall("exec", { exitCode: 0, text: "reviewer ran tests" });
+          await context.report("review_report", { decision: "block" }, { ok: false });
+          await context.report("review_report", reviewerClaim(context, call, "accept"));
+          await context.say("```json\n{\"decision\": \"block\"}\n```");
+          return;
+        }
+        await context.write("src/feature.ts", "export const feature = true;\n");
+        const call = await context.toolCall("exec", { exitCode: 0, text: "tests passed" });
+        await context.report("task_report", workerClaim(context, call));
+        await context.say("```json\n{\"status\": \"failed\", \"summary\": \"a stale block the tool report overrides\"}\n```");
+      },
+    });
+    const outcome = await runtime.run();
+    assert.equal(outcome.status, "succeeded", outcome.summary);
+    const events = runtime.runEvents(outcome);
+    assert.deepEqual(replayTransitions(events), []);
+    assert.equal(ofType(events, "review/recorded")[0]?.data.decision, "accept");
+
+    const started = ofType(events, "attempt/started");
+    assert.equal(started.length, 2);
+    for (const attempt of started) {
+      assert.equal(attempt.event_version, 2);
+      const turn = runtime.driver.turns.find((entry) => entry.input.attemptId === attempt.data.attempt_id);
+      assert.equal(attempt.data.session_id, turn?.input.sessionId);
+    }
+
+    const integrated = ofType(events, "task/integrated");
+    assert.equal(integrated.length, 1);
+    assert.deepEqual(integrated[0]?.data.paths, ["src/feature.ts"]);
+    assert.equal(integrated[0]?.data.attempt_id, started.find((attempt) => attempt.data.role === "implementer")?.data.attempt_id);
+    const integratedAt = events.findIndex((event) => event.type === "task/integrated");
+    const completedAt = events.findIndex((event) => event.type === "task/state_changed" && event.data.to === "completed");
+    assert.ok(integratedAt >= 0 && integratedAt < completedAt);
+  } finally {
+    await workspace.cleanup();
+  }
+});
+
 test("AC-2 a reviewer that only cites worker evidence cannot accept; the task fails and nothing is integrated", async () => {
   const workspace = await createTempWorkspace({ "src/index.ts": "export {};\n" }, { git: true });
   try {
@@ -240,6 +287,7 @@ function emptyLog(overrides: Partial<AttemptLog> = {}): AttemptLog {
     compactionBlobs: new Set(),
     finalAssistantText: undefined,
     assistantTexts: [],
+    reports: [],
     ...overrides,
   };
 }

@@ -120,6 +120,34 @@ export const effectivePolicySchema = z
   });
 export type EffectivePolicy = z.infer<typeof effectivePolicySchema>;
 
+/** Why a requested path cannot be expressed as a workspace-relative `paths` entry. */
+export const PATH_ESCAPE_REASONS = [
+  "invalid-path",
+  "unc-or-device",
+  "outside-workspace",
+  "link-escape",
+  "dangling-link",
+  "hard-link",
+  "changed-after-decision",
+] as const;
+export type PathEscapeReason = (typeof PATH_ESCAPE_REASONS)[number];
+
+/**
+ * A requested path that resolved outside the workspace (or could not be resolved safely). It keeps
+ * the audit trail complete: such an action is still normalized, evaluated and recorded in
+ * `tool/policy_decided`, and the PolicyEngine always denies it (`write-outside-scope` for writes).
+ * `requested` is the model's raw argument, bounded; it is evidence, never a scope.
+ */
+export const pathEscapeSchema = z.strictObject({
+  requested: z.string().max(1024),
+  access: z.enum(["read", "write"]),
+  reason: z.enum(PATH_ESCAPE_REASONS),
+});
+export type PathEscape = z.infer<typeof pathEscapeSchema>;
+
+/** Decision reason codes the PolicyEngine uses for escapes (layer `platform`); writes also carry the rail. */
+export const PATH_ESCAPE_REASON_CODE = { read: "read-outside-workspace", write: "path-escape" } as const;
+
 /** The canonical form of one requested action; its digest is what an approval binds to. */
 export const normalizedActionSchema = z.strictObject({
   tool_name: z.string().min(1),
@@ -129,6 +157,8 @@ export const normalizedActionSchema = z.strictObject({
   task_id: taskIdSchema.optional(),
   args_digest: digestSchema,
   paths: z.array(z.strictObject({ path: pathPatternSchema, access: z.enum(["read", "write"]) })),
+  /** Paths that escape the workspace; present only when non-empty (`tool/policy_decided` v2). */
+  escapes: z.array(pathEscapeSchema).min(1).optional(),
   command: z
     .strictObject({ argv: z.array(z.string()).min(1), cwd: pathPatternSchema })
     .optional(),

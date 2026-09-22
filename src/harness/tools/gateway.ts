@@ -7,7 +7,10 @@ import {
   canonicalJson,
   createId,
   digestOf,
+  EVENT_VERSIONS,
   INLINE_PAYLOAD_MAX_BYTES,
+  normalizedActionSchema,
+  PATH_ESCAPE_REASON_CODE,
   policyDecisionSchema,
   sha256,
   toolResultSchema,
@@ -96,7 +99,7 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
     const append = (body: EventBody): Promise<SessionEvent> =>
       dependencies.events.append({
         ...body,
-        event_version: 1,
+        event_version: EVENT_VERSIONS[body.type],
         actor: { kind: scope.role === "orchestrator" ? "orchestrator" : "worker", role: scope.role, ...(scope.attemptId === undefined ? {} : { attempt_id: scope.attemptId }) },
         run_id: scope.runId,
         ...(scope.taskId === undefined ? {} : { task_id: scope.taskId }),
@@ -185,13 +188,21 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
     try {
       action = await tool.normalize(parsed.data, context);
     } catch (error: unknown) {
-      if (error instanceof ToolScopeViolation) {
-        decision = gatewayDecision({ tool: request.tool_name, args: sha256(argsJson), role: scope.role }, scope.policy, [
-          { code: error.rail === undefined ? "read-outside-workspace" : "path-escape", layer: "platform", message: error.message.slice(0, 500) },
-        ], error.rail);
-        return finish("denied", errorResult("path_outside_scope", error.message));
+      if (!(error instanceof ToolScopeViolation)) {
+        return finish("denied", errorResult("invalid_arguments", error instanceof Error ? error.message : String(error)));
       }
-      return finish("denied", errorResult("invalid_arguments", error instanceof Error ? error.message : String(error)));
+      action = normalizedActionSchema.parse({
+        tool_name: tool.metadata.name,
+        tool_version: tool.metadata.version,
+        effect: tool.metadata.effect,
+        role: scope.role,
+        task_id: scope.taskId,
+        args_digest: digestOf(parsed.data),
+        paths: [],
+        escapes: [{ ...error.escape, requested: redact(error.escape.requested).text.slice(0, 1024) }],
+        network_hosts: [],
+        destructive: false,
+      });
     }
 
     decision = decide(tool.metadata.visible_to.includes(scope.role), action, scope, argsJson);
@@ -356,6 +367,7 @@ function gatewayDecision(subject: unknown, policy: EffectivePolicy, reasons: rea
 
 function denialCode(decision: PolicyDecision): ToolErrorCode {
   if (decision.rail === "write-outside-scope" || decision.rail === "reserved-path-write") return "path_outside_scope";
+  if (decision.reasons.some((reason) => reason.code === PATH_ESCAPE_REASON_CODE.read)) return "path_outside_scope";
   if (decision.reasons.some((reason) => reason.layer === ("sandbox" satisfies PolicyLayer))) return "sandbox_insufficient";
   return "policy_denied";
 }

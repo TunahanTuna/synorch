@@ -31,7 +31,7 @@ Bu belge I2'nin gerçekte ne yaptığını, hangi varsayımlara dayandığını 
 | --- | --- |
 | `createCredentialStore(home, options?)` | `home` = Synorch kökü (`~/.synorch` veya `$SYNORCH_HOME`). Senkron; keychain yoklaması oluşturma anında bir kez yapılır. |
 | `createAuthProviders(store, options?)` | `default` profil (+ `options.profiles`) için desteklenen tüm (sağlayıcı, yöntem) çiftleri. Tekil kimlik için `authProviderFor(store, ref)`. |
-| `createModelRouter(config, providers)` | `config.rules: RouteRule[]` (`source`, `tier`, `role?`, `route`); `providers` = adapter listesi. Dönen tip `SynorchModelRouter` (sözleşmedeki `ModelRouter` + kota/onay yöntemleri). |
+| `createModelRouter(config, providers)` | `config: ModelRouterOptions` = sözleşmedeki `ModelRouterConfig` (`rules: RouteRule[]`) + test için `now?`, `capabilityTtlMs?`; `providers` = adapter listesi. Dönen tip sözleşmedeki `ModelRouter` (kota/onay yöntemleri dahil). |
 | `createScriptedAdapter(script)` | Test ve e2e için; ağ yok, aynı iptal/never-throw kuralları. |
 | `authCommand` / `createAuthCommand(deps)` | `args[0]` komut adıdır: `login`, `logout`, `auth`. |
 | `createOpenAIChatGPTAdapter`, `createOpenAIResponsesAdapter`, `createAnthropicMessagesAdapter`, `createClaudeCodeAdapter`, `createCodexAppServerAdapter` | Adapter'lar; model listesi `options.models` ile statik verilir (keşif ücretli istek atmaz). |
@@ -83,7 +83,7 @@ Kota: `x-codex-{primary,secondary}-used-percent` ve `-reset-at` (epoch saniye/ms
 
 ### 3.5 401 ve zorunlu refresh (`streamAuthenticated`)
 
-Credential `AuthProvider.resolve` ile alınır (süresi dolmak üzereyse refresh orada yapılır). İlk yanıt çıktı üretmeden HTTP 401 ile dönerse ve auth sağlayıcısı `forceRefresh` sunuyorsa **tek** refresh ve aynı isteğin **tek** yeniden gönderimi yapılır; ikinci 401 `auth_expired` ile biter. Başka yönteme, profile veya sağlayıcıya asla geçilmez. `forceRefresh`, profil kilidi altında depodaki token'ın reddedilen token'dan farklı olup olmadığına bakar; başka süreç zaten yenilediyse ağ çağrısı yapmaz.
+Credential `AuthProvider.resolve` ile alınır (süresi dolmak üzereyse refresh orada yapılır). İlk yanıt çıktı üretmeden HTTP 401 ile dönerse ve kimlik `oauth-subscription` ise **tek** `resolve(signal, { forceRefresh: true })` ve aynı isteğin **tek** yeniden gönderimi yapılır; ikinci 401 `auth_expired` ile biter. Başka yönteme, profile veya sağlayıcıya asla geçilmez. Zorunlu refresh, profil kilidi altında depodaki token'ın bu sürecin en son verdiği token'dan farklı olup olmadığına bakar; başka süreç zaten yenilediyse ağ çağrısı yapmaz. Aynı kural I1 driver'ında da uygulanır (`CredentialResolver` `options` alır).
 
 ## 4. `claude-code` köprüsü (`AgentBackendAdapter`, deneysel)
 
@@ -129,7 +129,7 @@ Secret yoktur. `login` = kurulu `claude`'u `claude --version` ile yoklama + dene
 - **Seçim:** `auto` (varsayılan) → OS kasası yoklaması → yoksa dosya. `SYNORCH_CREDENTIAL_STORE=file|keychain|auto` veya `options.backend` ile zorlanır; `keychain` istenip yoksa `config_invalid`.
 - **macOS:** `security`; yazma `security -i` ile **stdin** üzerinden (`add-generic-password -U -a <hesap> -s synorch -w <base64>`), okuma `find-generic-password -w`, silme `delete-generic-password` (çıkış 44 = yok).
 - **Linux:** `secret-tool store/lookup/clear service synorch account <hesap>`; değer stdin ile. Yoklama: D-Bus hatası (stderr) varsa kasa yok sayılır.
-- **Windows:** PowerShell `ConvertTo-SecureString`/`ConvertFrom-SecureString` ile DPAPI (geçerli Windows kullanıcısına bağlı) şifreleme; düz metin stdin'den girer, yalnız şifreli hex `credentials.dpapi.json`'a yazılır. Bu backend sözleşmede `os-keychain` etiketiyle raporlanır (Credential Manager değildir; bkz. §9).
+- **Windows:** PowerShell `ConvertTo-SecureString`/`ConvertFrom-SecureString` ile DPAPI (geçerli Windows kullanıcısına bağlı) şifreleme; düz metin stdin'den girer, yalnız şifreli hex `credentials.dpapi.json`'a yazılır. Bu backend `os-dpapi` olarak raporlanır (Credential Manager değildir). `SYNORCH_CREDENTIAL_STORE=os-keychain|os-dpapi` (veya `keychain|dpapi`) platformdaki OS deposunu zorunlu kılar; yoksa `config_invalid`.
 - Hesap anahtarı `<provider>:<method>:<profile>`, değer `base64(JSON{ref, secret})`; `list()` için kasada `synorch:index` kaydı tutulur. Secret hiçbir zaman argv'ye girmez (test edilir). Kasa okumaları süreç içinde önbelleğe alınır; `withRefreshLock` önbelleği o profil için temizler.
 - **Dosya yedeği:** `<home>/credentials.json`, `credentialFileSchema`, geçici dosya (`0600`) + fsync + rename, dizin `0700`; Windows'ta mod bitleri yok sayılır ve kullanıcı profili ACL'i geçerlidir. `plaintext-credential-file` bildirimi `syn login` sırasında gösterilir. Bozuk dosya okunamaz ve üzerine yazılmaz (`config_invalid`).
 - **Kilitler:** `<home>/locks/credentials.lock` (yazma) ve `<home>/locks/refresh-<sha256(hesap)[0:16]>.lock` (refresh); `O_EXCL` dosyası (pid + token), sahibi ölmüş veya 60 sn'den eski kilit devralınır; süreç içinde anahtar başına mutex.
@@ -174,9 +174,9 @@ Hiçbir test ağa veya gerçek hesaba çıkmaz; aşağıdakiler kullanıcının 
 5. macOS `security -i` ve Linux `secret-tool` davranışı sahte runner ile test edildi; gerçek macOS/Linux makinede CI matrisi gerekir.
 6. Anthropic Messages eşlemesi resmi şemaya göre yazıldı, kayıtlı fixture ile test edildi; canlı API ile denenmedi.
 
-## 10. Sözleşme değişiklik istekleri
+## 10. Sözleşme değişiklik istekleri (Dalga 2a sonucu)
 
-1. **`AuthProvider.resolve` zorunlu refresh:** 401 sonrası refresh için sözleşmede yol yok; `streamAuthenticated` isteğe bağlı `forceRefresh(signal)` yöntemini yapısal olarak arar. Öneri: `resolve(signal, options?: { forceRefresh?: boolean })`. Etkilenen: I1 (driver), I5.
-2. **`ModelRouter` kota/onay yöntemleri:** `reportFailure`, `proposeProviderChange`, `applyProviderChange` sözleşmede yok (`SynorchModelRouter` olarak eklendi). Öneri: sözleşmeye taşınması; `ModelRouterConfig`/`RouteRule` tipinin de `contracts`'a alınması (I5 composition root'u yapılandırmayı kurar). Etkilenen: I1, I4, I5.
-3. **`BackendTurnInput.requestId: string`:** `start.request_id` `RequestId` markası ister; köprü geçersiz kimliği `invalid_request` ile reddeder. Öneri: `requestId: RequestId`. Etkilenen: I1.
-4. **`CREDENTIAL_STORE_BACKENDS`:** Windows DPAPI dosyası `os-keychain` olarak raporlanıyor. Öneri: ya `os-dpapi` değeri eklenmesi ya da `AuthStatus.detail`'de açıklanmasının kabulü. Etkilenen: I5 (`doctor --runtime`).
+1. **`AuthProvider.resolve` zorunlu refresh — çözüldü:** `resolve(signal, options?: ResolveOptions)`, `ResolveOptions.forceRefresh`. Yenileyebilen yalnız `oauth-subscription`; çağıranlar 401 sonrası tek denemeyi yöntemle belirler (yapısal `forceRefresh` yoklaması, `RefreshableAuthProvider` ve `ChatGPTAuthProvider` silindi).
+2. **`ModelRouter` kota/onay yöntemleri — çözüldü:** `reportFailure`, `proposeProviderChange`, `applyProviderChange`, `RouteBlockedFailure`, `ProviderChangeProposal`, `ModelRouterConfig`, `RouteRule`, `RouteBinding`, `RouteSource` sözleşmede (`model.ts`); `SynorchModelRouter` silindi. Saat/TTL yalnız fabrika seçeneği (`ModelRouterOptions`). Yapılandırma dosyasının ayrıştırılması I5-B'nindir (şema bilinçli olarak eklenmedi).
+3. **`BackendTurnInput.requestId: RequestId` — çözüldü.** Köprünün `start` doğrulaması savunma olarak kalır.
+4. **`CREDENTIAL_STORE_BACKENDS` — çözüldü:** `os-dpapi` eklendi; Windows DPAPI deposu artık doğru raporlanır.

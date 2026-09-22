@@ -6,7 +6,7 @@ export {
   createAnthropicMessagesAdapter,
   type AnthropicMessagesOptions,
 } from "./anthropic-messages.ts";
-export { streamAuthenticated, type RefreshableAuthProvider } from "./authenticated-stream.ts";
+export { streamAuthenticated } from "./authenticated-stream.ts";
 export {
   authSourceOf,
   buildClaudeArgs,
@@ -29,13 +29,6 @@ export {
   SYNORCH_ORIGINATOR,
   type ResponsesAdapterOptions,
 } from "./responses.ts";
-export {
-  createModelRouter,
-  RouteBlockedFailure,
-  type ModelRouterConfig,
-  type ProviderChangeProposal,
-  type RouteBinding,
-  type RouteRule,
-  type SynorchModelRouter,
-} from "./router.ts";
+export { RouteBlockedFailure, type ModelRouterConfig, type ProviderChangeProposal, type RouteBinding, type RouteRule } from "../contracts/index.ts";
+export { createModelRouter, type ModelRouterOptions } from "./router.ts";
 export { createScriptedAdapter, type ScriptedAdapterOptions, type ScriptedModelAdapter, type ScriptStep } from "./scripted.ts";

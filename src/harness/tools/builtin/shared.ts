@@ -1,6 +1,8 @@
 import { z } from "zod";
 import {
   digestOf,
+  hasReservedSegment,
+  matchesAnyPathPattern as matchesAny,
   normalizedActionSchema,
   toolMetadataSchema,
   type NormalizedAction,
@@ -10,7 +12,6 @@ import {
   type ToolMetadata,
   type ToolResult,
 } from "../../contracts/index.ts";
-import { hasReservedSegment, matchesAny } from "../scope-match.ts";
 import { resolveWorkspacePath, ToolScopeViolation } from "../workspace-path.ts";
 
 export type BuiltinMetadataFields = Omit<ToolMetadata, "version" | "source" | "effect_source">;

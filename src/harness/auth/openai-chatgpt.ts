@@ -50,11 +50,6 @@ export interface ChatGPTAuthOptions {
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
-export interface ChatGPTAuthProvider extends AuthProvider {
-  /** Refreshes after the provider rejected a credential (HTTP 401), unless another process already did. */
-  forceRefresh(signal: AbortSignal): Promise<ResolvedCredential>;
-}
-
 interface TokenResponse {
   readonly access_token?: unknown;
   readonly refresh_token?: unknown;
@@ -110,7 +105,7 @@ async function readErrorCode(response: Response): Promise<string | undefined> {
  * `localhost:1455`, device-code fallback), identifying honestly as `originator=synorch`. Tokens go
  * only to Synorch's credential store; the Codex CLI's own token file is never read or written.
  */
-export function createChatGPTAuthProvider(store: CredentialStore, profile: string, options: ChatGPTAuthOptions): ChatGPTAuthProvider {
+export function createChatGPTAuthProvider(store: CredentialStore, profile: string, options: ChatGPTAuthOptions): AuthProvider {
   const fetchImpl: AuthFetch = options.fetch ?? ((input, init) => fetch(input, init));
   const now = options.now ?? (() => new Date());
   const issuer = (options.issuer ?? OPENAI_AUTH_ISSUER).replace(/\/+$/, "");
@@ -366,6 +361,21 @@ export function createChatGPTAuthProvider(store: CredentialStore, profile: strin
     return { ...base, ...labels, state: expired ? "expired" : "connected", ...(expired ? { detail: "access token expired; it is refreshed on next use" } : {}) };
   }
 
+  async function forceRefresh(signal: AbortSignal): Promise<ResolvedCredential> {
+    const refreshed = await singleFlight(() =>
+      store.withRefreshLock(
+        ref,
+        async () => {
+          const latest = await current();
+          if (latest.method === "oauth-subscription" && latest.access_token !== lastIssuedAccess) return latest;
+          return refreshTokens(latest, signal);
+        },
+        signal,
+      ),
+    );
+    return issue(refreshed);
+  }
+
   return {
     providerId: ref.provider_id,
     method: "oauth-subscription",
@@ -403,7 +413,8 @@ export function createChatGPTAuthProvider(store: CredentialStore, profile: strin
       await store.delete(ref);
       await options.state.clearLoginRequired(ref);
     },
-    async resolve(signal) {
+    async resolve(signal, resolveOptions) {
+      if (resolveOptions?.forceRefresh === true) return forceRefresh(signal);
       const secret = await current();
       if (!needsRefresh(secret)) return issue(secret);
       const refreshed = await singleFlight(() =>
@@ -412,20 +423,6 @@ export function createChatGPTAuthProvider(store: CredentialStore, profile: strin
           async () => {
             const latest = await current();
             return needsRefresh(latest) ? refreshTokens(latest, signal) : latest;
-          },
-          signal,
-        ),
-      );
-      return issue(refreshed);
-    },
-    async forceRefresh(signal) {
-      const refreshed = await singleFlight(() =>
-        store.withRefreshLock(
-          ref,
-          async () => {
-            const latest = await current();
-            if (latest.method === "oauth-subscription" && latest.access_token !== lastIssuedAccess) return latest;
-            return refreshTokens(latest, signal);
           },
           signal,
         ),

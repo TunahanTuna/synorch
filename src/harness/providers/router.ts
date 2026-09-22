@@ -7,79 +7,25 @@ import {
   modelRouteSchema,
   ProviderFailure,
   ROUTE_SOURCES,
+  RouteBlockedFailure,
   routeDecisionSchema,
   type AgentRole,
   type AnyModelAdapter,
-  type ApprovalDecision,
   type ApprovalRequest,
   type ModelRoute,
   type ModelRouter,
+  type ModelRouterConfig,
   type ModelTier,
   type ProviderCapabilities,
-  type ProviderError,
   type RouteDecision,
-  type RouteRequest,
-  type RunId,
-  type TaskId,
+  type RouteRule,
 } from "../contracts/index.ts";
 import { providerError } from "./errors.ts";
 
-export type RouteSource = (typeof ROUTE_SOURCES)[number];
-
-export interface RouteBinding {
-  readonly provider_id: string;
-  readonly model_id: string;
-  readonly adapter_id: string;
-  readonly profile?: string;
-}
-
-/** One configured mapping. `role` narrows it to one role (e.g. an independent reviewer model). */
-export interface RouteRule {
-  readonly source: RouteSource;
-  readonly tier: ModelTier;
-  readonly role?: AgentRole;
-  readonly route: RouteBinding;
-}
-
-export interface ModelRouterConfig {
-  readonly rules: readonly RouteRule[];
+/** Construction options on top of the contract configuration; tests inject the clock. */
+export interface ModelRouterOptions extends ModelRouterConfig {
   readonly now?: () => Date;
   readonly capabilityTtlMs?: number;
-}
-
-/** A tier whose route is blocked (subscription quota exhausted). The router never reroutes on its own. */
-export class RouteBlockedFailure extends ProviderFailure {
-  public readonly blocked: ModelRoute;
-  public readonly tier: ModelTier;
-  public readonly role: AgentRole | undefined;
-  public readonly alternatives: readonly ModelRoute[];
-
-  public constructor(error: ProviderError, blocked: ModelRoute, request: RouteRequest, alternatives: readonly ModelRoute[]) {
-    super(error);
-    this.name = "RouteBlockedFailure";
-    this.blocked = blocked;
-    this.tier = request.tier;
-    this.role = request.role;
-    this.alternatives = alternatives;
-  }
-}
-
-export interface ProviderChangeProposal {
-  readonly request: ApprovalRequest;
-  readonly from: ModelRoute;
-  readonly to: ModelRoute;
-}
-
-export interface SynorchModelRouter extends ModelRouter {
-  /** Records a provider failure for a route; `quota_exhausted` blocks the route until it resets. */
-  reportFailure(route: ModelRoute, error: ProviderError): void;
-  /** Builds the human-only `provider-change` approval request for a blocked route. */
-  proposeProviderChange(
-    failure: RouteBlockedFailure,
-    context: { readonly runId: RunId; readonly taskId?: TaskId; readonly to?: ModelRoute },
-  ): ProviderChangeProposal;
-  /** Applies a human decision; only an allowing user decision for the exact proposal enables the fallback. */
-  applyProviderChange(decision: ApprovalDecision): void;
 }
 
 interface Candidate {
@@ -101,7 +47,7 @@ const DEFAULT_CAPABILITY_TTL_MS = 5 * 60_000;
  * probes capabilities without paid calls and never falls back silently: a blocked route raises
  * `quota_exhausted` until a human approves a `provider-change`.
  */
-export function createModelRouter(config: ModelRouterConfig, providers: readonly AnyModelAdapter[]): SynorchModelRouter {
+export function createModelRouter(config: ModelRouterOptions, providers: readonly AnyModelAdapter[]): ModelRouter {
   const now = config.now ?? (() => new Date());
   const ttl = config.capabilityTtlMs ?? DEFAULT_CAPABILITY_TTL_MS;
   const adapters = new Map<string, AnyModelAdapter>();
@@ -171,7 +117,7 @@ export function createModelRouter(config: ModelRouterConfig, providers: readonly
     }
   }
 
-  const router: SynorchModelRouter = {
+  const router: ModelRouter = {
     async resolve(request, signal): Promise<RouteDecision> {
       const options = ordered(request.tier, request.role);
       const primary = options[0];

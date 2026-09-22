@@ -171,6 +171,25 @@ test("process output beyond the tool limit is truncated and flagged", async (t) 
   assert.equal(result.truncated, true);
   assert.equal(result.stdout.length, 1024);
   assert.equal(result.exitCode, 0);
+  assert.equal(result.termination, "exited");
+});
+
+test("SandboxRunner.run reports spawn failures, timeouts and cancellation explicitly", async (t) => {
+  const root = await workspace(t);
+  const runner = createSandboxRunner(PARTIAL);
+  const spec = { cwd: root, env: childEnvironment(process.env), stdin: undefined, timeoutMs: 10_000, outputLimitBytes: 4096, writeRoots: [], network: "deny" as const };
+  const missing = await runner.run({ ...spec, argv: ["synorch-no-such-program-4f1c"] }, new AbortController().signal);
+  assert.equal(missing.termination, "spawn-failed");
+  assert.ok(missing.spawnError !== undefined && missing.spawnError.length > 0);
+  assert.equal(missing.exitCode, null);
+
+  const slow = await runner.run({ ...spec, argv: [NODE, "-e", "setTimeout(() => {}, 30000)"], timeoutMs: 300 }, new AbortController().signal);
+  assert.equal(slow.termination, "timeout");
+
+  const controller = new AbortController();
+  const cancelled = runner.run({ ...spec, argv: [NODE, "-e", "setTimeout(() => {}, 30000)"] }, controller.signal);
+  setTimeout(() => controller.abort(), 200);
+  assert.equal((await cancelled).termination, "cancelled");
 });
 
 test("probeSandbox reports platform backends and fails closed on probe errors", async () => {

@@ -1,11 +1,12 @@
+import type { ResolvedCredential, ResolveOptions } from "./auth.ts";
 import type { AgentRole } from "./common.ts";
 import type { Digest } from "./digest.ts";
 import type { ExitCode } from "./errors.ts";
 import type { EventStore, BlobStore } from "./store.ts";
-import type { AttemptId, RunId, SessionId, TaskId, TurnId } from "./ids.ts";
+import type { AttemptId, RequestId, RunId, SessionId, TaskId, TurnId } from "./ids.ts";
 import type { RecalledMemory } from "./memory.ts";
-import type { ModelRequest, ModelRoute, ModelRouter } from "./model.ts";
-import type { CompletionPacket, TaskContextPacket } from "./packets.ts";
+import type { ContextBlockSource, ModelRequest, ModelRoute, ModelRouter, RouteDecision } from "./model.ts";
+import type { CompletionPacket, ReviewPacket, TaskContextPacket } from "./packets.ts";
 import type { EffectivePolicy, PolicyMode } from "./policy.ts";
 import type { RenderEvent, TerminalRenderer } from "./renderer.ts";
 import type { ToolGateway, ToolRegistry } from "./tools.ts";
@@ -19,20 +20,28 @@ export interface ContextBuildInput {
   readonly sessionId: SessionId;
   readonly runId: RunId;
   readonly taskId: TaskId | undefined;
+  /** Separates two attempts of the same role that share a session; history keeps only this attempt's turns. */
+  readonly attemptId: AttemptId | undefined;
   readonly role: AgentRole;
   readonly route: ModelRoute;
   readonly policy: EffectivePolicy;
   readonly packet: TaskContextPacket | undefined;
-  readonly requestId: string;
+  readonly requestId: RequestId;
 }
 
 export interface ContextBlockReport {
   readonly blockId: string;
-  readonly source: string;
+  readonly source: ContextBlockSource;
   readonly trust: "harness" | "project" | "untrusted";
   readonly tokensEstimate: number;
   readonly truncated: boolean;
 }
+
+/**
+ * A refused build. `budget-exceeded` means the run/task budget admits no further model request:
+ * the driver ends the step without a request and the turn as `budget_exceeded` (not `failed`).
+ */
+export type ContextBuildRefusal = "stale-sources" | "context-overflow" | "compaction-thrash" | "budget-exceeded";
 
 export type ContextBuildResult =
   | {
@@ -44,8 +53,10 @@ export type ContextBuildResult =
     }
   | {
       readonly ok: false;
-      readonly reason: "stale-sources" | "context-overflow" | "compaction-thrash";
+      readonly reason: ContextBuildRefusal;
       readonly stale: readonly { readonly path: string; readonly expected: Digest; readonly actual: Digest | undefined }[];
+      /** Human-readable cause (budget metric and usage, overflow size); never model-facing. */
+      readonly detail?: string;
     };
 
 /** Rebuilds the model input for one step from the event log, blobs, packet and memory. Owned by context. */
@@ -73,6 +84,13 @@ export interface TurnOutcome {
   readonly steps: number;
 }
 
+/**
+ * Resolves the credential for a Synorch-owned (`adapter_kind: model`) route; the composition root
+ * maps the route's `(provider_id, auth_method, profile)` to its `AuthProvider.resolve`. It throws
+ * `ProviderFailure` (`auth_expired` / `unauthenticated`) and never falls back to another identity.
+ */
+export type CredentialResolver = (route: ModelRoute, signal: AbortSignal, options?: ResolveOptions) => Promise<ResolvedCredential>;
+
 export interface AgentDriverDependencies {
   readonly events: EventStore;
   readonly blobs: BlobStore;
@@ -80,6 +98,7 @@ export interface AgentDriverDependencies {
   readonly context: ContextBuilder;
   readonly tools: ToolRegistry;
   readonly gateway: ToolGateway;
+  readonly credentials: CredentialResolver;
 }
 
 /** The fixed, small loop: context -> request -> stream -> tool calls via gateway -> next step. Owned by core. */
@@ -98,10 +117,18 @@ export interface IsolatedWorkspace {
   dispose(): Promise<void>;
 }
 
+export interface IsolationCreateOptions {
+  /**
+   * Root a `shared-read-only` workspace reads from instead of the main workspace: a reviewer reads
+   * the isolated workspace holding the pinned artifact under review.
+   */
+  readonly readRoot?: string;
+}
+
 /** Creates per-attempt isolation (ADR-07). Owned by orchestration. */
 export interface IsolationProvider {
-  create(packet: TaskContextPacket, attemptId: AttemptId, signal: AbortSignal): Promise<IsolatedWorkspace>;
-  /** Applies a reviewed artifact onto the main workspace; an explicit, recorded coordination step. */
+  create(packet: TaskContextPacket, attemptId: AttemptId, signal: AbortSignal, options?: IsolationCreateOptions): Promise<IsolatedWorkspace>;
+  /** Applies a reviewed artifact onto the main workspace; the caller records it as `task/integrated`. */
   integrate(workspace: IsolatedWorkspace, expectedArtifact: Digest, signal: AbortSignal): Promise<void>;
 }
 
@@ -112,9 +139,35 @@ export interface AttemptHandle {
   cancel(reason: string): void;
 }
 
+export interface DispatchOptions {
+  /** A route already decided (and recorded) by the caller, e.g. an independent reviewer model. */
+  readonly route?: RouteDecision;
+  /** Artifact bytes of an earlier attempt that a revise attempt continues from. */
+  readonly seedArtifact?: Uint8Array;
+}
+
+export interface ReviewOutcome {
+  readonly attemptId: AttemptId;
+  /** The recorded review packet; absent when the reviewer produced no valid report. */
+  readonly review: ReviewPacket | undefined;
+  /** Orchestrator-side check of the review; `invalid` means the review itself cannot be trusted. */
+  readonly verification: { readonly decision: "accept" | "revise" | "block" | "invalid"; readonly problems: readonly string[] };
+}
+
+export interface ReviewHandle {
+  readonly attemptId: AttemptId;
+  readonly result: Promise<ReviewOutcome>;
+  cancel(reason: string): void;
+}
+
 /** Runs worker attempts from packets with role policy, limits and isolation. Owned by orchestration. */
 export interface WorkerManager {
-  dispatch(packet: TaskContextPacket, signal: AbortSignal): Promise<AttemptHandle>;
+  dispatch(packet: TaskContextPacket, signal: AbortSignal, options?: DispatchOptions): Promise<AttemptHandle>;
+  /**
+   * Starts an independent review of `target` (ADR-09): a fresh session, a read-only workspace on the
+   * target's pinned artifact, the completion packet and changed files but never the target's transcript.
+   */
+  dispatchReview(packet: TaskContextPacket, target: AttemptId, signal: AbortSignal, options?: DispatchOptions): Promise<ReviewHandle>;
   running(): readonly AttemptHandle[];
 }
 

@@ -52,6 +52,9 @@ tool/result_recorded    → model'e tool_result
 | `task_spawn`, `task_status` | control | orchestrator | Packet şeması + DAG + ownership; bkz. [task-packets.md](./task-packets.md) |
 | `ask_user` | control | orchestrator | Headless'ta `approval_unavailable` |
 | `memory_propose` | control | orchestrator, worker | Yalnız öneri; kalıcı yazım memory modülünde ([memory.md](./memory.md)) |
+| `task_report` | control | explorer, implementer, debugger | Attempt raporu (`taskReportInputSchema`); callback gerekmez, orchestration kaydı günlükten okur ([runtime-seams.md](./runtime-seams.md#5-yapılandırılmış-rapor-araçları)) |
+| `review_report` | control | reviewer | Review hükmü (`reviewReportInputSchema`) |
+| `plan_propose` | control | orchestrator | Plan önerisi (`planProposalSchema`); kimlik alanlarını harness ekler, `planSchema` doğrular |
 
 ## 3. Sonuç
 
@@ -66,6 +69,8 @@ tool/result_recorded    → model'e tool_result
 ## 5. Sandbox
 
 `SandboxRunner.probe()` → `SandboxReport {backend, platform, enforcement, filesystem, network, process, notes}`; her boyut `full | partial | unavailable`. v1 backend'leri: Linux `bubblewrap` (varsa), macOS `sandbox-exec` (varsa), Windows `policy-only` (partial). Probe hatası `unavailable` sayılır (fail-closed). `partial` durum UI başlığında, `tool/execution_started.sandbox_enforcement`'ta ve `doctor --runtime`'da görünür. Sandbox izin kararı vermez; yalnız uygular ve raporlar. Child process'ler stdio pipe ile başlatılır (console codepage mirası yok), env `ProcessSpec.env` ile açıkça verilir.
+
+`SandboxRunner.run(spec, signal)` → `ProcessResult {termination, exitCode, signal, stdout, stderr, truncated, spawnError, durationMs}`. `termination` (`PROCESS_TERMINATIONS`) sonucu açıkça söyler: `exited` (süreç çalıştı ve kendi kodu/sinyaliyle bitti), `timeout` ve `cancelled` (runner ağacın tamamını sonlandırdı), `spawn-failed` (hiçbir şey çalışmadı; `spawnError` nedeni taşır, örn. `ENOENT`). Araçlar sonucu `exitCode === null` gibi dolaylı işaretlerden çıkarmaz; `cancelled` → `cancelled`, `timeout` → `timeout`, `spawn-failed` → `execution_failed`.
 
 ## 6. Örnekler
 

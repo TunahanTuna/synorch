@@ -78,6 +78,13 @@ export type EventReadItem =
   | EventParseResult
   | { readonly status: "torn-tail"; readonly segment: number; readonly bytes: number };
 
+/** A torn final line the writer moved aside (`<segment>.torn-<n>`) when it opened the session. */
+export interface QuarantinedTail {
+  readonly segment: number;
+  readonly bytes: number;
+  readonly file: string | undefined;
+}
+
 /**
  * One session, opened by its single writer. `append` resolves only after the line is durably
  * flushed; if it rejects, callers must not start any new side-effecting tool call.
@@ -85,6 +92,8 @@ export type EventReadItem =
 export interface EventStore {
   readonly sessionId: SessionId;
   readonly lastSeq: number;
+  /** Set by a durable store when `openForWrite` quarantined a torn tail; recovery reports it in `session/resumed`. */
+  readonly quarantinedTail?: QuarantinedTail | undefined;
   append(draft: SessionEventDraft): Promise<SessionEvent>;
   read(fromSeq?: number, toSeq?: number): AsyncIterable<EventReadItem>;
   close(): Promise<void>;

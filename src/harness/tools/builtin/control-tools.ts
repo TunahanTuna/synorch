@@ -1,7 +1,22 @@
 import { z } from "zod";
-import { AGENT_ROLES, memoryIdSchema, PROPOSAL_KINDS, taskIdSchema, type Tool, type ToolExecutionContext, type ToolResult } from "../../contracts/index.ts";
+import {
+  AGENT_ROLES,
+  memoryIdSchema,
+  planProposalSchema,
+  PROPOSAL_KINDS,
+  REPORT_TOOL_NAMES,
+  reviewReportInputSchema,
+  taskIdSchema,
+  taskReportInputSchema,
+  type PlanProposal,
+  type ReviewReportInput,
+  type TaskReportInput,
+  type Tool,
+  type ToolExecutionContext,
+  type ToolResult,
+} from "../../contracts/index.ts";
 import { messageOf } from "./read-tools.ts";
-import { actionOf, builtinMetadata, defineTool, errorResult } from "./shared.ts";
+import { actionOf, builtinMetadata, defineTool, errorResult, okResult } from "./shared.ts";
 
 const askUserInput = z.strictObject({
   question: z.string().trim().min(1).max(2000),
@@ -40,10 +55,43 @@ export interface ControlCallbacks {
   readonly taskSpawn?: ControlCallback<TaskSpawnInput>;
   readonly taskStatus?: ControlCallback<TaskStatusInput>;
   readonly memoryPropose?: ControlCallback<MemoryProposeInput>;
+  /**
+   * Report tools need no callback: the recorded, validated call in the attempt log is the report
+   * orchestration reads. A callback may still observe it (e.g. live UI).
+   */
+  readonly taskReport?: ControlCallback<TaskReportInput>;
+  readonly reviewReport?: ControlCallback<ReviewReportInput>;
+  readonly planPropose?: ControlCallback<PlanProposal>;
 }
+
+const REPORT_RECORDED = "report recorded; end your turn now";
 
 export function createControlTools(callbacks: ControlCallbacks): Tool[] {
   return [
+    controlTool(
+      REPORT_TOOL_NAMES.task,
+      "Finish the attempt: report status, summary and evidence per acceptance criterion (tool call ids from this attempt). Call it once, last.",
+      ["explorer", "implementer", "debugger"],
+      taskReportInputSchema,
+      callbacks.taskReport,
+      "acknowledge",
+    ),
+    controlTool(
+      REPORT_TOOL_NAMES.review,
+      "Finish the review: a verdict per acceptance criterion with your own evidence, findings and accept|revise|block. Call it once, last.",
+      ["reviewer"],
+      reviewReportInputSchema,
+      callbacks.reviewReport,
+      "acknowledge",
+    ),
+    controlTool(
+      REPORT_TOOL_NAMES.plan,
+      "Propose the run plan as a task DAG; the harness validates ownership, dependencies and scope and tells you what to fix.",
+      ["orchestrator"],
+      planProposalSchema,
+      callbacks.planPropose,
+      "acknowledge",
+    ),
     controlTool(
       "ask_user",
       "Ask the user a question and wait for the answer. Unavailable in headless runs.",
@@ -64,7 +112,7 @@ function controlTool<Input>(
   roles: readonly (typeof AGENT_ROLES)[number][],
   input: z.ZodType<Input>,
   callback: ControlCallback<Input> | undefined,
-  missingCode: "approval_unavailable" | "execution_failed" = "execution_failed",
+  missing: "approval_unavailable" | "execution_failed" | "acknowledge" = "execution_failed",
 ): Tool<Input> {
   const metadata = builtinMetadata({
     name,
@@ -83,7 +131,9 @@ function controlTool<Input>(
       return actionOf(metadata, value, context);
     },
     async execute(value, context) {
-      if (callback === undefined) return errorResult(missingCode, `${name} is not available in this runtime`);
+      if (callback === undefined) {
+        return missing === "acknowledge" ? okResult(REPORT_RECORDED) : errorResult(missing, `${name} is not available in this runtime`);
+      }
       try {
         return await callback(value, context);
       } catch (error: unknown) {

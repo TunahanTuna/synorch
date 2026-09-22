@@ -61,16 +61,8 @@ export function createSandboxRunner(report: SandboxReport): SandboxRunner {
         { cwd: spec.cwd, env: spec.env, stdin: spec.stdin, timeoutMs: spec.timeoutMs, outputLimitBytes: spec.outputLimitBytes },
         signal,
       );
-      const stderr = result.spawnError !== undefined && result.stderr.length === 0 ? `failed to start ${spec.argv[0]}: ${result.spawnError}` : result.stderr;
-      return {
-        exitCode: result.exitCode,
-        signal: result.signal,
-        stdout: result.stdout,
-        stderr,
-        truncated: result.truncated,
-        timedOut: result.timedOut,
-        durationMs: result.durationMs,
-      };
+      const stderr = result.termination === "spawn-failed" && result.stderr.length === 0 ? `failed to start ${spec.argv[0]}: ${result.spawnError ?? "unknown error"}` : result.stderr;
+      return { ...result, stderr };
     },
   };
 }

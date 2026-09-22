@@ -5,6 +5,7 @@
 ## 1. Konum ve sınır
 
 - Kişisel hafıza varsayılanı `~/.synorch/memory/<project-id>/` (`DEFAULT_MEMORY_ROOT_SEGMENTS`); config `memory.root` ile değişir. Ekip vault'u repo içinde **opt-in**'dir (`memory.team_root`); orada decision/preference notları her zaman inceleme gerektirir.
+- Yapılandırma bölümü `MemoryConfig` = `memoryConfigSchema` (`root?`, `team_root?`; strict). `root` bu projenin kişisel vault kökünü olduğu gibi değiştirir (`~` ev dizinine açılır, göreli yol ev dizinine göre çözülür). `team_root` v1'de kabul edilir ama okunmaz/yazılmaz (ayrılmış).
 - Obsidian isteğe bağlı görüntüleyicidir; hiçbir runtime yolu Obsidian'ın açık/kurulu olmasına bağlı değildir. Synorch Obsidian'ın metadata cache'ine veya eklenti API'sine dayanmaz. Semantik katman ve Obsidian eklentisi v1 dışıdır.
 - Event log kanıtın aslıdır; not, log'a/repo'ya işaret eden incelenebilir projection'dır. Ham tool çıktısı ve sohbet vault'a toplu kopyalanmaz; token, parola, anahtar ve ham env hiçbir zaman yazılmaz (yazmadan önce redaksiyon).
 
@@ -45,6 +46,8 @@ Kural: Synorch'un yazdığı yetkili not (`decision: accepted`, `preference: act
 | contradiction, relation, status-change önerileri | Kuyruğa öneri |
 
 Kuyruk kararı (`memory/proposal_decided`): kullanıcı veya — `autonomous` modda — orchestrator verir; orchestrator kararı `run_id` ile denetlenir ve kullanıcı geri alabilir. `MemoryProposal` = `proposal_id`, `kind (note|relation|contradiction|status-change)`, `note?`/`body?`/`target?`/`relation?`/`new_status?` (türe göre zorunlu), `rationale`, `evidence[]` (en az bir `EvidenceRef`), `created_by{run_id, task_id?}`, `created_at`, `state (pending|accepted|rejected|deferred)`, `decision?` (yalnız pending değilken).
+
+`MemoryStore.decide(proposalId, decision, state) → MemoryDecisionOutcome`: store notu kalıcılaştırır ama olay yazmaz; dönen `decided` (`memory/proposal_decided` yükü), `persisted?` (kabul edilen öneri bir not oluşturduysa/değiştirdiyse `memory/persisted` yükü) ve `runId` (orchestrator kararında zorunlu; olayın `run_id`'si) çağıran (orchestration/CLI) tarafından session log'una eklenir.
 
 ## 4. Eşzamanlılık
 
@@ -142,4 +145,15 @@ Reddedilenler: incelemeden geçmemiş yetkili karar; önek/tür uyumsuzluğu; ka
   created_at: "2026-09-22T12:00:00Z"
   state: accepted
   decision: { by: orchestrator, at: "2026-09-22T12:01:00Z", reason: silent }
+```
+
+```yaml example=memory-config
+- { root: "~/vaults/synorch" }
+- { root: /srv/memory/synorch, team_root: .ai/memory }
+- {}
+```
+
+```yaml example=memory-config invalid
+- { root: "" }
+- { vault: "~/notes" }
 ```

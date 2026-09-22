@@ -216,7 +216,7 @@ test("AC-3 accepting a queued decision writes it with reviewed_at; the queue rec
     assert.equal((await store.pending()).length, 1);
     assert.equal(await store.get(memoryIdSchema.parse("dec-0042")), undefined, "a proposal is not yet memory");
 
-    const outcome = await store.decideWithAudit(queued.proposal_id, { by: "user", at: "2026-09-23T08:00:00Z", reason: "matches ADR-16" }, "accepted");
+    const outcome = await store.decide(queued.proposal_id, { by: "user", at: "2026-09-23T08:00:00Z", reason: "matches ADR-16" }, "accepted");
     const note = await store.get(memoryIdSchema.parse("dec-0042"));
     assert.equal(note?.frontmatter.status, "accepted");
     assert.equal(note?.frontmatter.reviewed_at, "2026-09-23");
@@ -249,7 +249,7 @@ test("AC-3 an orchestrator decision must carry run_id and is recorded with it", 
     const untouched = await store.get(memoryIdSchema.parse("asm-memory-in-repo"));
     assert.equal(untouched?.frontmatter.status, "open", "a rejected decision attempt changes nothing");
 
-    const outcome = await store.decideWithAudit(
+    const outcome = await store.decide(
       change.proposal_id,
       { by: "orchestrator", at: "2026-09-22T12:01:00Z", reason: "autonomous mode; evidence is an accepted ADR", run_id: RUN },
       "accepted",
@@ -274,7 +274,7 @@ test("AC-3 rejecting a false contradiction leaves both notes unchanged", async (
     const right = await store.persist(concept("cpt-beta", "Beta", "b"), undefined);
     const contradiction = proposal({ kind: "contradiction", target: "cpt-alpha", relation: { type: "contradicts", target: "cpt-beta" } });
     await store.propose(contradiction);
-    const outcome = await store.decideWithAudit(contradiction.proposal_id, { by: "user", at: "2026-09-22T12:05:00Z", reason: "not a conflict" }, "rejected");
+    const outcome = await store.decide(contradiction.proposal_id, { by: "user", at: "2026-09-22T12:05:00Z", reason: "not a conflict" }, "rejected");
     assert.equal(outcome.persisted, undefined);
     assert.equal((await store.get(memoryIdSchema.parse("cpt-alpha")))?.digest, left.digest);
     assert.equal((await store.get(memoryIdSchema.parse("cpt-beta")))?.digest, right.digest);

@@ -58,6 +58,7 @@ async function setup(role: ContextBuildInput["role"] = "implementer") {
     sessionId,
     runId,
     taskId: packet?.task_id,
+    attemptId: undefined,
     role,
     route: testRoute("openai", "gpt-test"),
     policy,
@@ -137,7 +138,9 @@ function memoryStore(recalled: readonly RecalledMemory[]): MemoryStore & { queri
     },
     propose: async () => undefined,
     pending: async () => [],
-    decide: async () => undefined,
+    decide: async () => {
+      throw new Error("the context builder never decides proposals");
+    },
     reindex: async () => ({ notes: 0, broken_links: 0 }),
   };
 }

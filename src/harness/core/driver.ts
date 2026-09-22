@@ -43,11 +43,7 @@ import { consumeStream, describe, providerError, type StreamOutcome } from "./st
 /** Prefix under which a backend-owned loop sees Synorch's tools (MCP server `synorch`). */
 export const BRIDGE_TOOL_PREFIX = "mcp__synorch__";
 
-/** Resolves the credential for a Synorch-owned model route; wired by the composition root from I2. */
-export type CredentialResolver = (route: ModelRoute, signal: AbortSignal) => Promise<ResolvedCredential>;
-
 export interface AgentDriverOptions {
-  readonly credentials?: CredentialResolver;
   /** Environment handed to agent-backend children (the adapter strips `BRIDGE_STRIPPED_ENV`). */
   readonly backendEnv?: Readonly<Record<string, string>>;
 }
@@ -57,7 +53,7 @@ export function createAgentDriver(deps: AgentDriverDependencies & AgentDriverOpt
   return new FixedAgentDriver(deps);
 }
 
-type StepResult = "continue" | "completed" | "cancelled" | "failed";
+type StepResult = "continue" | "completed" | "cancelled" | "failed" | "budget_exceeded";
 
 interface ToolCallRef {
   readonly toolCallId: ToolCallId;
@@ -74,7 +70,12 @@ interface StepContext {
   readonly requestId: RequestId;
 }
 
-type Prepared = { readonly kind: "ok"; readonly request: ModelRequest } | { readonly kind: "cancelled" | "failed" };
+type Prepared = { readonly kind: "ok"; readonly request: ModelRequest } | { readonly kind: "cancelled" | "failed" | "budget_exceeded" };
+
+/** A refused preparation ends the step without a model request: aborted when nothing was attempted, errored otherwise. */
+function refusedStepState(kind: Exclude<Prepared["kind"], "ok">): "aborted" | "errored" {
+  return kind === "failed" ? "errored" : "aborted";
+}
 
 class FixedAgentDriver implements AgentDriver {
   readonly #deps: AgentDriverDependencies & AgentDriverOptions;
@@ -136,7 +137,7 @@ class FixedAgentDriver implements AgentDriver {
 
   async #modelStep(adapter: ModelAdapter, step: StepContext, signal: AbortSignal): Promise<StepResult> {
     const prepared = await this.#prepare(step, signal);
-    if (prepared.kind !== "ok") return this.#endStep(step, prepared.kind === "cancelled" ? "aborted" : "errored", prepared.kind);
+    if (prepared.kind !== "ok") return this.#endStep(step, refusedStepState(prepared.kind), prepared.kind);
     const outcome = await consumeStream(await this.#openModelStream(adapter, prepared.request, step.input.route, signal), signal);
     if (outcome.kind === "failed") return this.#recordFailure(step, outcome);
 
@@ -166,7 +167,7 @@ class FixedAgentDriver implements AgentDriver {
 
   async #backendStep(adapter: AgentBackendAdapter, step: StepContext, signal: AbortSignal): Promise<StepResult> {
     const prepared = await this.#prepare(step, signal);
-    if (prepared.kind !== "ok") return this.#endStep(step, prepared.kind === "cancelled" ? "aborted" : "errored", prepared.kind);
+    if (prepared.kind !== "ok") return this.#endStep(step, refusedStepState(prepared.kind), prepared.kind);
     const { input } = step;
     const stepController = new AbortController();
     const stepSignal = AbortSignal.any([signal, stepController.signal]);
@@ -254,6 +255,7 @@ class FixedAgentDriver implements AgentDriver {
           sessionId: input.sessionId,
           runId: input.runId,
           taskId: input.taskId,
+          attemptId: input.attemptId,
           role: input.role,
           route: input.route,
           policy: input.policy,
@@ -267,7 +269,7 @@ class FixedAgentDriver implements AgentDriver {
       return { kind: signal.aborted ? "cancelled" : "failed" };
     }
     if (signal.aborted) return { kind: "cancelled" };
-    if (!built.ok) return { kind: "failed" };
+    if (!built.ok) return { kind: built.reason === "budget-exceeded" ? "budget_exceeded" : "failed" };
     const request = modelRequestSchema.safeParse(built.request);
     if (
       !request.success ||
@@ -287,7 +289,7 @@ class FixedAgentDriver implements AgentDriver {
       tool_set_digest: digestOf(request.data.tools),
       context: built.blocks.map((block) => ({
         block_id: block.blockId,
-        source: block.source as SessionEventOf<"model/request_prepared">["data"]["context"][number]["source"],
+        source: block.source,
         trust: block.trust,
         tokens_estimate: block.tokensEstimate,
         truncated: block.truncated,
@@ -298,19 +300,23 @@ class FixedAgentDriver implements AgentDriver {
 
   async #openModelStream(adapter: ModelAdapter, request: ModelRequest, route: ModelRoute, signal: AbortSignal): Promise<AsyncIterable<ModelStreamEvent>> {
     const failWith = (error: ReturnType<typeof providerError>): AsyncIterable<ModelStreamEvent> => singleEvent({ type: "error", error });
-    if (this.#deps.credentials === undefined) return failWith(providerError("unauthenticated", "no credential resolver is configured for model routes"));
-    let credential: ResolvedCredential;
-    try {
-      credential = await this.#deps.credentials(route, signal);
-    } catch (error: unknown) {
-      if (signal.aborted) return failWith(providerError("cancelled", "request cancelled"));
-      return failWith(error instanceof ProviderFailure ? error.error : providerError("unauthenticated", describe(error)));
-    }
-    try {
-      return adapter.stream(request, credential, signal);
-    } catch (error: unknown) {
-      return failWith(error instanceof ProviderFailure ? error.error : providerError("provider_internal", describe(error)));
-    }
+    const open = async (forceRefresh: boolean): Promise<AsyncIterable<ModelStreamEvent>> => {
+      let credential: ResolvedCredential;
+      try {
+        credential = await this.#deps.credentials(route, signal, forceRefresh ? { forceRefresh: true } : undefined);
+      } catch (error: unknown) {
+        if (signal.aborted) return failWith(providerError("cancelled", "request cancelled"));
+        return failWith(error instanceof ProviderFailure ? error.error : providerError("unauthenticated", describe(error)));
+      }
+      try {
+        return adapter.stream(request, credential, signal);
+      } catch (error: unknown) {
+        return failWith(error instanceof ProviderFailure ? error.error : providerError("provider_internal", describe(error)));
+      }
+    };
+    const first = await open(false);
+    if (route.auth_method !== "oauth-subscription") return first;
+    return retryOnceAfterRejection(first, () => open(true));
   }
 
   /** Every call goes through the gateway, which must leave a durable record before anything else runs. */
@@ -440,6 +446,30 @@ function failedOutcome(error: ReturnType<typeof providerError>): StreamOutcome {
 
 async function* singleEvent(event: ModelStreamEvent): AsyncGenerator<ModelStreamEvent> {
   yield event;
+}
+
+/**
+ * A refreshable credential the provider rejects (HTTP 401) before any output gets exactly one
+ * forced refresh and one resend of the same request; a second rejection is final.
+ */
+async function* retryOnceAfterRejection(
+  first: AsyncIterable<ModelStreamEvent>,
+  reopen: () => Promise<AsyncIterable<ModelStreamEvent>>,
+): AsyncGenerator<ModelStreamEvent> {
+  const iterator = first[Symbol.asyncIterator]();
+  const head = await iterator.next();
+  if (head.done) return;
+  if (head.value.type === "error" && head.value.error.http_status === 401) {
+    await iterator.return?.();
+    yield* await reopen();
+    return;
+  }
+  yield head.value;
+  while (true) {
+    const next = await iterator.next();
+    if (next.done) return;
+    yield next.value;
+  }
 }
 
 function currentEnvironment(): Record<string, string> {

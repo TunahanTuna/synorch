@@ -89,6 +89,9 @@ async function assertRefused(harness: GatewayHarness, args: Record<string, unkno
   assert.equal(outcome.state, "denied", JSON.stringify(outcome.result));
   assert.equal(outcome.result.error?.code, "path_outside_scope", JSON.stringify(outcome.result));
   assert.equal(outcome.decision?.rail, "write-outside-scope");
+  const audited = harness.ofType("tool/policy_decided").at(-1);
+  assert.equal(audited?.data.tool_call_id, outcome.toolCallId, "every refusal is recorded in tool/policy_decided");
+  assert.deepEqual(audited?.data.decision, outcome.decision);
   assert.equal(await readFile(layoutInfo.secret, "utf8"), "outside-original");
   assert.equal(await readFile(path.join(layoutInfo.root, "src", "billing", "invoice.ts"), "utf8"), "billing-original");
   assert.equal(harness.ofType("tool/execution_started").length, 0);
@@ -106,6 +109,27 @@ test("AC-1: '..' traversal out of the workspace is write-outside-scope", async (
   const paths = await layout(t);
   await assertRefused(harnessFor(paths.root), { path: "../outside/secret.txt", content: "pwned" }, paths);
   await assertRefused(harnessFor(paths.root), { path: "src/auth/../../../outside/secret.txt", content: "pwned" }, paths);
+});
+
+test("AC-1 audit: an escaping path is still normalized, evaluated and recorded as tool/policy_decided v2 with escapes", async (t) => {
+  const paths = await layout(t);
+  const harness = harnessFor(paths.root);
+  await harness.call("write_file", { path: "../outside/secret.txt", content: "pwned" });
+  const write = harness.ofType("tool/policy_decided").at(-1);
+  assert.equal(write?.event_version, 2);
+  assert.deepEqual(write?.data.action.paths, []);
+  assert.deepEqual(write?.data.action.escapes, [{ requested: "../outside/secret.txt", access: "write", reason: "outside-workspace" }]);
+  assert.equal(write?.data.decision.rail, "write-outside-scope");
+  assert.equal(write?.data.decision.reasons[0]?.code, "path-escape");
+
+  const read = await harness.call("read_file", { path: paths.secret });
+  assert.equal(read.state, "denied");
+  assert.equal(read.result.error?.code, "path_outside_scope");
+  const audited = harness.ofType("tool/policy_decided").at(-1);
+  assert.equal(audited?.data.action.escapes?.[0]?.access, "read");
+  assert.equal(audited?.data.decision.rail, undefined);
+  assert.equal(audited?.data.decision.reasons[0]?.code, "read-outside-workspace");
+  assert.equal(harness.ofType("tool/execution_started").length, 0);
 });
 
 test("AC-1: '..' that stays inside the workspace but leaves the owned paths is write-outside-scope", async (t) => {

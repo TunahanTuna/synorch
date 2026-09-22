@@ -3,6 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 import {
   AGENT_ROLES,
+  matchesAnyPathPattern as matchesAny,
   READ_ONLY_ROLES,
   staticPrefix,
   type AgentRole,
@@ -12,7 +13,6 @@ import {
   type ToolResult,
 } from "../../contracts/index.ts";
 import { childEnvironment, isBlockedEnvName } from "../environment.ts";
-import { matchesAny } from "../scope-match.ts";
 import { resolveWorkspacePath } from "../workspace-path.ts";
 import { messageOf } from "./read-tools.ts";
 import { actionOf, builtinMetadata, defineTool, errorResult, NormalizedMemo, okResult, readableByPolicy, scopeViolationResult } from "./shared.ts";
@@ -233,8 +233,9 @@ async function runGit(argv: [string, ...string[]], context: ToolExecutionContext
     },
     context.signal,
   );
-  if (context.signal.aborted) return errorResult("cancelled", "git was cancelled");
-  if (result.timedOut) return errorResult("timeout", "git timed out");
+  if (result.termination === "cancelled" || context.signal.aborted) return errorResult("cancelled", "git was cancelled");
+  if (result.termination === "timeout") return errorResult("timeout", "git timed out");
+  if (result.termination === "spawn-failed") return errorResult("execution_failed", result.stderr || `failed to start git: ${result.spawnError ?? "unknown error"}`);
   if (result.exitCode !== 0) return errorResult("execution_failed", `git exited with ${result.exitCode ?? result.signal ?? "no status"}: ${result.stderr.trim()}`);
   return okResult(result.stdout, { truncated: result.truncated });
 }
@@ -242,15 +243,15 @@ async function runGit(argv: [string, ...string[]], context: ToolExecutionContext
 function processOutcome(argv: readonly string[], result: ProcessResult, signal: AbortSignal): ToolResult {
   const text = formatProcess(argv, result);
   const exit = result.exitCode === null ? {} : { exit_code: result.exitCode };
-  if (signal.aborted) return errorResult("cancelled", "the command was cancelled and its process tree terminated", { text, truncated: result.truncated, ...exit });
-  if (result.timedOut) return errorResult("timeout", "the command timed out and its process tree was terminated", { text, truncated: result.truncated, ...exit });
-  if (result.exitCode === null && result.signal === null) return errorResult("execution_failed", result.stderr || `failed to start ${argv[0] ?? ""}`, { text });
+  if (result.termination === "cancelled" || signal.aborted) return errorResult("cancelled", "the command was cancelled and its process tree terminated", { text, truncated: result.truncated, ...exit });
+  if (result.termination === "timeout") return errorResult("timeout", "the command timed out and its process tree was terminated", { text, truncated: result.truncated, ...exit });
+  if (result.termination === "spawn-failed") return errorResult("execution_failed", result.stderr || `failed to start ${argv[0] ?? ""}`, { text });
   return okResult(text, { truncated: result.truncated, ...exit });
 }
 
 function formatProcess(argv: readonly string[], result: ProcessResult): string {
   const status = result.exitCode !== null ? `exit code ${result.exitCode}` : `terminated${result.signal === null ? "" : ` by ${result.signal}`}`;
-  const parts = [`$ ${argv.join(" ")}`, `${status}${result.timedOut ? " (timed out)" : ""}${result.truncated ? " (output truncated)" : ""}`];
+  const parts = [`$ ${argv.join(" ")}`, `${status}${result.termination === "timeout" ? " (timed out)" : ""}${result.truncated ? " (output truncated)" : ""}`];
   if (result.stdout.length > 0) parts.push(`--- stdout ---\n${result.stdout}`);
   if (result.stderr.length > 0) parts.push(`--- stderr ---\n${result.stderr}`);
   return parts.join("\n");

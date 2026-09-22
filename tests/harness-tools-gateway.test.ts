@@ -354,9 +354,9 @@ test("the registry shows each role only the tools its policy can use", async (t)
       grants: [],
     });
   const names = (role: AgentRole) => registry.visibleTo(role, policyFor(role)).map((descriptor) => descriptor.name).sort();
-  assert.deepEqual(names("explorer"), ["git_diff", "git_status", "list_dir", "memory_propose", "read_file", "search"]);
-  assert.deepEqual(names("implementer"), ["apply_patch", "exec", "git_diff", "git_status", "list_dir", "memory_propose", "read_file", "search", "write_file"]);
-  assert.deepEqual(names("orchestrator"), ["apply_patch", "ask_user", "git_diff", "git_status", "list_dir", "memory_propose", "read_file", "search", "task_spawn", "task_status"]);
+  assert.deepEqual(names("explorer"), ["git_diff", "git_status", "list_dir", "memory_propose", "read_file", "search", "task_report"]);
+  assert.deepEqual(names("implementer"), ["apply_patch", "exec", "git_diff", "git_status", "list_dir", "memory_propose", "read_file", "search", "task_report", "write_file"]);
+  assert.deepEqual(names("orchestrator"), ["apply_patch", "ask_user", "git_diff", "git_status", "list_dir", "memory_propose", "plan_propose", "read_file", "search", "task_spawn", "task_status"]);
   const descriptor = registry.get("exec")?.descriptor();
   assert.equal(descriptor?.input_schema.type, "object");
   assert.throws(() => registry.register(registry.get("exec")!), /already registered/);

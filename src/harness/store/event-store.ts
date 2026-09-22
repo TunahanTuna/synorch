@@ -6,6 +6,7 @@ import {
   StoreFailure,
   type EventReadItem,
   type EventStore,
+  type QuarantinedTail,
   type ReadOnlyEventStore,
   type SegmentHeader,
   type SessionEvent,
@@ -17,13 +18,6 @@ import { errnoCode, PRIVATE_FILE_MODE, syncDirectory, writeAll } from "./durable
 import { segmentPath, segmentsDirectory } from "./layout.ts";
 import type { SessionLeaseHandle } from "./lease.ts";
 import { encodeLine, MAX_EVENT_LINE_BYTES, scanSegments, type ScanItem } from "./segments.ts";
-
-/** What a writer found and moved aside when it opened a session whose last line was torn. */
-export interface QuarantinedTail {
-  readonly segment: number;
-  readonly bytes: number;
-  readonly file: string | undefined;
-}
 
 /** The JSONL implementation of `EventStore`, plus what `openForWrite` quarantined. */
 export interface SegmentedEventStore extends EventStore {

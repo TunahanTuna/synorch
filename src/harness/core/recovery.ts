@@ -8,33 +8,13 @@ import {
   type SessionEventDraft,
   type SessionEventOf,
   type SessionEventType,
-  type SessionId,
   type ToolCallId,
+  type ProjectedEntity,
+  type RecoveredEntity,
+  type RecoveryReport,
+  type SessionProjection,
 } from "../contracts/index.ts";
-import { SessionProjector, type ProjectedEntity, type SessionProjection } from "./projection.ts";
-
-type RecoveredMachine = SessionEventOf<"session/resumed">["data"]["recovered"][number]["machine"];
-
-export interface RecoveredEntity {
-  readonly machine: RecoveredMachine;
-  readonly id: string;
-  readonly from: string;
-  readonly to: string;
-}
-
-export interface RecoveryReport {
-  readonly sessionId: SessionId;
-  readonly previousLastSeq: number;
-  /** Seq of the `session/resumed` event this recovery wrote. */
-  readonly resumedSeq: number;
-  readonly recovered: readonly RecoveredEntity[];
-  /** Calls that may have run: recorded as `tool/interrupted {outcome: unknown}` and never re-executed. */
-  readonly interruptedToolCalls: readonly ToolCallId[];
-  /** Calls that never started executing: closed as `cancelled`. */
-  readonly cancelledToolCalls: readonly ToolCallId[];
-  /** Torn final line the writer moved aside when it opened the session, if any. */
-  readonly tornTail: { readonly segment: number; readonly bytes: number; readonly file: string | undefined } | undefined;
-}
+import { SessionProjector } from "./projection.ts";
 
 export interface RecoveryOptions {
   /** Tool metadata lookup for the `idempotent` flag of `tool/interrupted`; unknown tools count as not idempotent. */
@@ -65,7 +45,14 @@ export async function recoverSession(store: EventStore, options: RecoveryOptions
   }
 
   const plan = planRecovery(projection, options);
-  const resumed = await store.append(draft("session/resumed", { previous_last_seq: projection.lastSeq, recovered: plan.recovered.map((entry) => ({ ...entry })) }));
+  const tornTail = store.quarantinedTail;
+  const resumed = await store.append(
+    draft("session/resumed", {
+      previous_last_seq: projection.lastSeq,
+      recovered: plan.recovered.map((entry) => ({ ...entry })),
+      ...(tornTail === undefined ? {} : { torn_tail: { segment: tornTail.segment, bytes: tornTail.bytes } }),
+    }),
+  );
   for (const closing of plan.closings) {
     await store.append({ ...closing, causation_seq: resumed.seq } as SessionEventDraft);
   }
@@ -76,7 +63,7 @@ export async function recoverSession(store: EventStore, options: RecoveryOptions
     recovered: plan.recovered,
     interruptedToolCalls: plan.interrupted,
     cancelledToolCalls: plan.cancelled,
-    tornTail: quarantinedTailOf(store),
+    tornTail: tornTail === undefined ? undefined : { segment: tornTail.segment, bytes: tornTail.bytes, file: tornTail.file },
   };
 }
 
@@ -191,12 +178,4 @@ function correlate(entity: Pick<ProjectedEntity<string>, "runId" | "taskId" | "a
 
 function draft<T extends SessionEventType>(type: T, data: SessionEventOf<T>["data"], correlation: Correlation = {}): SessionEventDraft {
   return { type, event_version: EVENT_VERSIONS[type], actor: SYSTEM, ...correlation, data } as SessionEventDraft;
-}
-
-function quarantinedTailOf(store: EventStore): RecoveryReport["tornTail"] {
-  const candidate = (store as { readonly quarantinedTail?: unknown }).quarantinedTail;
-  if (typeof candidate !== "object" || candidate === null) return undefined;
-  const { segment, bytes, file } = candidate as { segment?: unknown; bytes?: unknown; file?: unknown };
-  if (typeof segment !== "number" || typeof bytes !== "number") return undefined;
-  return { segment, bytes, file: typeof file === "string" ? file : undefined };
 }

@@ -9,12 +9,12 @@ Bu belge Synorch orkestrasyon modelini zorlayan runtime katmanını anlatır: or
 | Fabrika | Modül | Görev |
 | --- | --- | --- |
 | `createCoordinator(deps)` | orchestration | Bir run'ı uçtan uca yürütür (`Coordinator`). |
-| `createWorkerManager(deps)` | orchestration | Packet'ten attempt başlatır, completion ve review packet'lerini kurar (`OrchestrationWorkerManager extends WorkerManager`). |
+| `createWorkerManager(deps)` | orchestration | Packet'ten attempt başlatır, completion ve review packet'lerini kurar. Sözleşmedeki `WorkerManager` (`dispatch` + `DispatchOptions`, `dispatchReview`) artı coordinator'ın kendi `attempt/verify/integrate/revert/dispose` adımları (`OrchestrationWorkerManager`). |
 | `createIsolationProvider(deps)` | orchestration | ADR-07 izolasyonu ve `integrate` (`OrchestrationIsolationProvider extends IsolationProvider`). |
 | `createWorkerFactory(shared)` | orchestration | Her run için WorkerManager + IsolationProvider bağlar; composition root için kısayol. |
 | `createControlPlaneWriter(deps)` | orchestration | Orchestrator'ın tek yazma yolu (`.ai/tasks/**`). |
 | `createBudgetTracker`, `createBudgetGateSlot`, `requestBudgetIncrease` | orchestration | ADR-14 bütçesi. |
-| `createModelPlanner(deps)` | orchestration | Orchestrator turunu çalıştırıp planı son mesajdan okur. |
+| `createModelPlanner(deps)` | orchestration | Orchestrator turunu çalıştırıp planı son başarılı `plan_propose` çağrısından (geri dönüş: son mesajın JSON bloğu) okur. |
 | `createContextBuilder(deps)` | context | `ContextBuilder` (I1 driver'ı her adımda çağırır). |
 | `createCompactor(deps)` | context | `summary-v1` compaction. |
 
@@ -27,7 +27,7 @@ const budgetGate = createBudgetGateSlot();
 const context = createContextBuilder({ readSession: (id) => sessions.openForRead(id), blobs, tools: registry,
   sources: createSourceReader(root), memory: { store, projectId, branch }, budget: budgetGate,
   compactor: createCompactor({ blobs, writerFor }) });
-const createDriver = (events) => createAgentDriver({ events, blobs, router, context, tools: registry, gateway });
+const createDriver = (events) => createAgentDriver({ events, blobs, router, context, tools: registry, gateway, credentials });
 const coordinator = createCoordinator({ sessions, blobs, router, policy, approvals, sandbox, budgetGate,
   planner: createModelPlanner({ createDriver, blobs }),
   createWorkers: createWorkerFactory({ sessions, blobs, router, policy, createDriver, sandbox }) });
@@ -51,7 +51,7 @@ const coordinator = createCoordinator({ sessions, blobs, router, policy, approva
 | completion `completed` | `running → verifying`, orchestrator doğrulaması (§4). |
 | doğrulama geçti, `trivial` | Değişiklik varsa `integrate`, `verifying → completed`. |
 | doğrulama geçti, `standard`/`high-risk` | `verifying → reviewing`, bağımsız review (§5). |
-| review `accept` | `integrate(pinned artifact)`, `reviewing → completed`. |
+| review `accept` | `integrate(pinned artifact)` + `task/integrated`, `reviewing → completed`. |
 | review `revise` | `reviewing → changes_requested → ready`; delta packet (bulgular + `review:F-n` kanıt işaretçileri), yeni attempt önceki artifact'tan devam eder (`maxRevisions`). |
 | review `block` / geçerli review yok | `reviewing → failed`. |
 
@@ -64,7 +64,7 @@ const coordinator = createCoordinator({ sessions, blobs, router, policy, approva
 
 Her attempt:
 
-- yeni bir `AttemptId` ve **kendi session'ını** alır (`SessionStore.create`). Böylece worker'ın model bağlamı yalnız kendi packet'ini ve turlarını içerir; başka bir attempt'in transkripti fiziksel olarak aynı günlükte değildir. Run günlüğüne `route/decided`, `policy/snapshot`, `task/packet_issued`, `attempt/started` (attempt'i `running` sayar; ayrı bir `queued → running` olayı yazılmaz) ve sonunda `attempt/state_changed running → succeeded|failed|cancelled` ile `attempt/completion_recorded` yazılır.
+- yeni bir `AttemptId` ve **kendi session'ını** alır (`SessionStore.create`). Böylece worker'ın model bağlamı yalnız kendi packet'ini ve turlarını içerir; başka bir attempt'in transkripti fiziksel olarak aynı günlükte değildir. Run günlüğüne `route/decided`, `policy/snapshot`, `task/packet_issued`, `attempt/started` (v2; `session_id` attempt session'ına bağlar; attempt'i `running` sayar, ayrı bir `queued → running` olayı yazılmaz) ve sonunda `attempt/state_changed running → succeeded|failed|cancelled` ile `attempt/completion_recorded` yazılır.
 - rolü ve kapsamı için hesaplanan `EffectivePolicy` ile çalışır; `rca-only` debugger ve read-only roller için `taskScope.owned` boştur (ADR-10).
 - packet `max_wall_time_seconds` sonunda ve bütçenin `cancel-active` kararıyla iptal edilir.
 
@@ -86,12 +86,13 @@ Her attempt:
 2. `changed ⊆ owned` ve forbidden/rezerve yol yok; değilse `policy_denied`.
 3. Worktree modunda ana çalışma alanındaki her hedefin mevcut digest'i `before` ile eşleşmeli; kullanıcının bu arada yaptığı düzenleme veya aynı yoldaki untracked dosyası çakışma olarak raporlanır ve hiçbir dosya ezilmez. Sonra dosyalar atomik (temp + rename) yazılır veya silinir.
 4. Scoped-dir'de değişiklik zaten yerindedir; yalnız doğrulama yapılır.
+5. Başarılı integrate sonrası WorkerManager run günlüğüne `task/integrated { task_id, attempt_id, artifact_digest, paths }` yazar; `completed` geçişi bundan sonra gelir.
 
 `seed()` bir revise attempt'ini önceki artifact'tan başlatır; yeni artifact kümülatiftir.
 
 ## 4. Completion packet ve orchestrator doğrulaması
 
-Worker son mesajında tek bir ` ```json ` bloğu döndürür (status, summary, acceptance_evidence, commands_run, decisions_made, skipped_checks, unresolved_risks, recommended_context_updates, root_cause). Bu bir **iddiadır**. Completion packet'i harness kurar: `task_id`, `attempt_id`, `packet_digest`, `changed_paths` ve `artifact_digest` gerçek diff'ten, `tool_call_ids` attempt günlüğünden gelir; worker'ın değişen dosya listesi hiç kullanılmaz. Reviewer'a atfedilen kanıt çıkarılır, kanıtsız `completed` `partial`'a düşer, iddia yoksa veya tur başarısızsa `failed`, onay bekleyen tur `blocked`, çalışma sırasında kaynak değiştiyse iddiadan bağımsız olarak `needs_context` olur. Sonuç `completionPacketSchema` ile doğrulanır.
+Worker attempt'i `task_report` aracıyla bitirir (status, summary, acceptance_evidence, commands_run, decisions_made, skipped_checks, unresolved_risks, recommended_context_updates, root_cause; şema `taskReportInputSchema`). Gateway girdiyi doğrular ve kaydeder; `readClaim` attempt günlüğündeki **son başarılı** `task_report` çağrısının argümanlarını okur. Başarılı rapor çağrısı yoksa son asistan mesajının ` ```json ` bloğu aynı şemayla geri dönüş olarak ayrıştırılır. Bu bir **iddiadır**. Completion packet'i harness kurar: `task_id`, `attempt_id`, `packet_digest`, `changed_paths` ve `artifact_digest` gerçek diff'ten, `tool_call_ids` attempt günlüğünden gelir; worker'ın değişen dosya listesi hiç kullanılmaz. Reviewer'a atfedilen kanıt çıkarılır, kanıtsız `completed` `partial`'a düşer, iddia yoksa veya tur başarısızsa `failed`, onay bekleyen tur `blocked`, çalışma sırasında kaynak değiştiyse iddiadan bağımsız olarak `needs_context` olur. Sonuç `completionPacketSchema` ile doğrulanır.
 
 `verifyCompletion` (orchestrator doğrulaması):
 
@@ -105,7 +106,7 @@ Kanıt çözümü (`resolveEvidence`): `tool-call`/`test-run` bu attempt'in `suc
 - `standard` ve `high-risk` görevler (`reviewer` rolündeki plan görevleri hariç) review'suz tamamlanamaz; tek kapı `mayComplete(packet, review)`'dur.
 - Reviewer taze bir packet alır (`compileReviewerPacket`): read-only, `shared-read-only`, kabul ölçütleri, doğrulama komutları ve `context.project_snapshot = artifact digest`. Plan'da bu göreve bağımlı bir reviewer görevi varsa onun model tier'ı kullanılır. Route `role: reviewer` ile ayrıca çözülür (router farklı model tercih eder).
 - Reviewer **ayrı bir session'da** çalışır ve implementer'ın çalışma kökünü salt okur. İlk mesajı completion packet'i, artifact digest'i ve değişen dosyaların içeriğidir; implementer transkripti asla verilmez. ContextBuilder da aynı session'da olsa bile başka rolün asistan/tool mesajlarını düşürür.
-- Review packet'i harness kurar: kimlikler, `completion_digest`, `reviewed_artifact_digest`, `reviewer_route`, `independence { separate_context: true, same_provider, same_model }`. Şemaya uymayan review (ör. yalnız worker kanıtlı `met`) kaydedilmez ve geçersizdir.
+- Reviewer hükmünü `review_report` aracıyla verir (geri dönüş: JSON bloğu). Review packet'i harness kurar: kimlikler, `completion_digest`, `reviewed_artifact_digest`, `reviewer_route`, `independence { separate_context: true, same_provider, same_model }`. Şemaya uymayan review (ör. yalnız worker kanıtlı `met`) kaydedilmez ve geçersizdir.
 - `verifyReview`: reviewer'ın `produced_by: reviewer` kanıtı yalnız **reviewer'ın kendi** tool çağrılarına çözülür; implementer'ın çağrısını kendi kanıtı gibi göstermek review'u `invalid` yapar. Değerlendirilmemiş, `not_met` veya `unverifiable` ölçüt `revise` demektir. Review sırasında artifact değişirse review geçersizdir. Geçersiz review'da yeni reviewer attempt'i açılır (`maxReviewAttempts`), sonra görev `failed` olur.
 
 ## 6. Freshness kapısı
@@ -118,8 +119,8 @@ Kanıt çözümü (`resolveEvidence`): `tool-call`/`test-run` bu attempt'in `suc
 Her adımda model girdisi yalnız kalıcı durumdan yeniden kurulur:
 
 1. Packet varsa freshness kapısı (§6).
-2. Bütçe kapısı (`RequestBudgetGate.admit`): session'daki `provider/usage` olayları izleyiciye verilir; reddedilirse `HarnessError(budget_exceeded)` fırlatılır ve istek hazırlanmaz.
-3. History: son `context/compacted` olayının `first_kept_seq`'inden sonraki `message/recorded` olayları ve `steer/queued` (kullanıcı mesajı olarak). Yalnız bu rolün asistan/tool mesajları alınır; kullanıcı rollü girdi kullanıcıdan veya orchestrator'dan gelebilir. Cevapsız tool çağrısına "sonuç bilinmiyor, tekrarlanmadı" hata sonucu eklenir, eşsiz sonuç düşürülür.
+2. Bütçe kapısı (`RequestBudgetGate.admit`): session'daki `provider/usage` olayları izleyiciye verilir; reddedilirse `{ ok: false, reason: "budget-exceeded", detail }` döner ve istek hazırlanmaz (driver turu `budget_exceeded` bitirir).
+3. History: son `context/compacted` olayının `first_kept_seq`'inden sonraki `message/recorded` olayları ve `steer/queued` (kullanıcı mesajı olarak). Yalnız bu rolün ve (verildiyse) bu `attemptId`'nin asistan/tool mesajları alınır; kullanıcı rollü girdi kullanıcıdan veya orchestrator'dan gelebilir. Cevapsız tool çağrısına "sonuç bilinmiyor, tekrarlanmadı" hata sonucu eklenir, eşsiz sonuç düşürülür.
 4. Sistem blokları güven sırasıyla: `harness` (Synorch'un rol kuralları) → `project` (anayasa, protokoller, repo rol metni, skill kataloğu, tetiklenen skill'ler, packet) → `untrusted` (compaction özeti, hafıza). Blok digest'i `digestText(text)`'tir.
 5. Skill kataloğu her adımda tek satırlık listedir; tam `SKILL.md` yalnız adı veya tetik ifadesi packet hedefinde/kararlarında ya da son kullanıcı mesajında geçen skill için yüklenir.
 6. Hafıza (`MemoryStore.search`, proje/branch filtresiyle): her not `source: memory`, `trust: untrusted` bloktur; neden seçildiği yazılır, `stale` not açıkça işaretlenir, `superseded`/`rejected` kararlar atlanır.
@@ -165,7 +166,7 @@ Her adımda model girdisi yalnız kalıcı durumdan yeniden kurulur:
 
 ## 12. Sapmalar ve bilinen sınırlar
 
-- **Rapor kanalı.** Worker/reviewer/planner çıktısı son asistan mesajındaki JSON bloğundan okunur; sözleşmede yapılandırılmış bir rapor aracı yok (bkz. §13).
+- **Rapor kanalı.** Worker/reviewer/planner çıktısı `task_report`/`review_report`/`plan_propose` araç çağrılarından okunur. JSON bloğu yalnız başarılı rapor çağrısı yoksa geri dönüştür; güvenlidir çünkü aynı sözleşme şemasıyla ayrıştırılır ve iddia hiçbir kimlik, diff veya yetki taşımaz, her kanıt işaretçisi günlüğe karşı doğrulanır. Model tarafında araç her zaman görünür olduğu için geri dönüş zamanla kaldırılabilir.
 - **Delta packet.** Driver ve ContextBuilder yalnız tam packet alır; delta, yetki alanlarına dokunmadan `applyDelta` ile etkin tam packet'e uygulanır (notlar ve kanıt işaretçileri `decisions`'a). Delta ayrıca `task/packet_issued kind: delta` olarak kaydedilir.
 - **Plan reviewer görevleri** read-only worker olarak çalışır ve kendileri review gerektirmez; zorunlu review her `standard`/`high-risk` görev için otomatik açılır.
 - **Resume.** `resumeSessionId` verilince yeni run aynı session'a eklenir; günlükten görev durumunu geri yükleyen resume yok.
@@ -173,15 +174,19 @@ Her adımda model girdisi yalnız kalıcı durumdan yeniden kurulur:
 - **Maliyet.** Git dışı scoped-dir ağacın tamamını (`.git`, `.synorch`, `node_modules` hariç) iki kez okur; büyük depolarda pahalıdır. Worktree oluşturma + kaldırma, bu Windows makinesinde küçük test depolarında yaklaşık 0,3–0,6 s sürdü; büyük depolar ve `node_modules` kurulumu ölçülmedi.
 - **Token tahmini** sağlayıcıdan bağımsız kaba bir tahmindir; gerçek kullanım `provider/usage`'dan gelir.
 
-## 13. Sözleşme değişiklik istekleri
+## 13. Sözleşme değişiklik istekleri (Dalga 2a sonucu)
 
-| # | Alan | Gerekçe | Etkilenen |
-| --- | --- | --- | --- |
-| 1 | `ContextBuildInput.attemptId` | History filtrelemesi şu an attempt başına session + rol filtresine dayanıyor; aynı rolün iki attempt'i aynı session'da olursa ayrılamaz. | I1, I4 |
-| 2 | `ContextBuildResult.reason` içine `"budget-exceeded"` | Bütçe reddi şimdi `HarnessError` fırlatarak iletiliyor; I1 driver bunu tur `failed` sayıyor, `TurnOutcome.budget_exceeded` hiç üretilmiyor. | I1, I4 |
-| 3 | `WorkerManager.dispatch(packet, signal, options?)` (`route`, `seedArtifact`) ve `dispatchReview` | I4 bunları `OrchestrationWorkerManager`'da genişletti; I5 sözleşme tipini kullanırsa review yolunu göremez. | I4, I5 |
-| 4 | `IsolationProvider.create(..., options?: { readRoot })` | Reviewer'ın incelediği artifact'ın kökünü okuması için. | I4 |
-| 5 | Worker/reviewer için yapılandırılmış rapor aracı (ör. `task_report`) ve orchestrator için `plan_propose` | JSON bloğu ayrıştırması kırılgan; araç, şemayı model tarafına taşır ve gateway üzerinden kaydedilir. | I3, I4 |
-| 6 | `task/integrated { task_id, attempt_id, artifact_digest, paths }` olayı | Integrate "açık ve kayıtlı" bir adım; şu an yalnız `task/state_changed` gerekçesinde görünüyor. | I1 (projection), I4, I5 |
-| 7 | `attempt/started` içinde attempt `session_id` | Run günlüğünden attempt session'ına olay üzerinden bağlantı yok. | I1, I4, I5 |
-| 8 | `ContextBlockReport.source` için enum tipi | `model/request_prepared.context[].source` enum iken rapor `string`; I1 cast ediyor. | I1, I4 |
+Hepsi kabul edildi ve uygulandı ([runtime-seams.md](../contracts/runtime-seams.md)).
+
+| # | Alan | Karar |
+| --- | --- | --- |
+| 1 | `ContextBuildInput.attemptId` | **Çözüldü:** zorunlu alan (`AttemptId \| undefined`); history `attempt_id`'si farklı olayları yabancı sayar; `requestId` artık `RequestId`. |
+| 2 | `ContextBuildResult.reason: "budget-exceeded"` | **Çözüldü:** ContextBuilder `HarnessError` fırlatmak yerine `{ok: false, reason: "budget-exceeded", detail}` döner; driver turu `budget_exceeded` bitirir. |
+| 3 | `WorkerManager.dispatch(…, options?)` ve `dispatchReview` | **Çözüldü:** `DispatchOptions`, `ReviewHandle`, `ReviewOutcome` sözleşmede; yerel `DispatchOptions`/`ReviewResult`/`ReviewHandle` silindi. |
+| 4 | `IsolationProvider.create(…, options?: { readRoot })` | **Çözüldü:** `IsolationCreateOptions`; yerel `CreateOptions` silindi. |
+| 5 | `task_report` / `plan_propose` araçları | **Çözüldü (uyarlandı):** üç araç — reviewer için ayrı `review_report` (rol başına ayrı şema, JSON Schema `oneOf` gerektirmez). Şemalar `packets.ts`'te, araçlar I3 kaydında (callback opsiyonel), I4 `readClaim`/`latestReport` ile attempt günlüğünden okur. JSON bloğu geri dönüş olarak kaldı (§12). |
+| 6 | `task/integrated` olayı | **Çözüldü:** yeni tip (v1); `WorkerManager.integrate` başarıdan sonra yazar. |
+| 7 | `attempt/started.session_id` | **Çözüldü:** `attempt/started` v2. |
+| 8 | `ContextBlockReport.source` enum | **Çözüldü:** `ContextBlockSource` (`CONTEXT_BLOCK_SOURCES`); I1 cast'i kaldırıldı. |
+
+Ek: I4'ün üçüncü glob eşleştiricisi (`paths.ts` içindeki regex dönüştürücü) sözleşmedeki `matchesPathPattern`'e bağlandı; `src/**` artık `src`'nin kendisini de kapsar ve `[...]`/`{a,b}` desteklenir.

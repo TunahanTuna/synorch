@@ -1,8 +1,7 @@
 import { open, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { AGENT_ROLES, type Tool, type ToolExecutionContext } from "../../contracts/index.ts";
-import { matchesPattern } from "../scope-match.ts";
+import { AGENT_ROLES, matchesPathPattern as matchesPattern, type Tool, type ToolExecutionContext } from "../../contracts/index.ts";
 import { resolveWorkspacePath } from "../workspace-path.ts";
 import { actionOf, builtinMetadata, defineTool, errorResult, okResult, readableByPolicy, scopeViolationResult } from "./shared.ts";
 

@@ -6,6 +6,7 @@ import {
   type ModelMessage,
   type SessionEvent,
   type SessionEventOf,
+  type AttemptId,
   type TaskId,
 } from "../contracts/index.ts";
 
@@ -18,6 +19,8 @@ import {
 export interface HistoryFilter {
   readonly role: AgentRole;
   readonly taskId: TaskId | undefined;
+  /** When set, events correlated to a different attempt are foreign even for the same role and task. */
+  readonly attemptId?: AttemptId | undefined;
 }
 
 export interface HistoryMessage {
@@ -44,6 +47,7 @@ export function lastCompaction(events: readonly SessionEvent[]): SessionEventOf<
  */
 export function belongsTo(event: SessionEvent, filter: HistoryFilter, messageRole: ModelMessage["role"]): boolean {
   if (event.task_id !== undefined && filter.taskId !== undefined && event.task_id !== filter.taskId) return false;
+  if (event.attempt_id !== undefined && filter.attemptId !== undefined && event.attempt_id !== filter.attemptId) return false;
   if (messageRole === "user") return event.actor.kind !== "worker" || event.actor.role === filter.role;
   if (event.actor.role !== undefined && event.actor.role !== filter.role) return false;
   if (filter.role === "orchestrator" && event.actor.kind === "worker") return false;

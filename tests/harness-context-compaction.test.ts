@@ -60,6 +60,7 @@ async function setup() {
     sessionId,
     runId,
     taskId: undefined,
+    attemptId: undefined,
     role: "implementer",
     route: testRoute("openai", "gpt-test"),
     policy,

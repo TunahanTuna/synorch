@@ -227,3 +227,21 @@ test("control tools route to injected callbacks and fail clearly when unwired or
   assert.equal(forbiddenSpawn.state, "denied");
   assert.ok(forbiddenSpawn.decision?.reasons.some((reason) => reason.code === "tool-not-visible"));
 });
+
+test("report tools validate against the contract schemas and are acknowledged without a callback", async (t) => {
+  const root = await workspace(t);
+  const worker = harnessFor(root, "implementer", {});
+  const invalid = await worker.call("task_report", { status: "done" });
+  assert.equal(invalid.state, "denied");
+  assert.equal(invalid.result.error?.code, "invalid_arguments");
+  const report = await worker.call("task_report", { status: "partial", summary: "half of it" });
+  assert.equal(report.state, "succeeded", JSON.stringify(report.result));
+  assert.match(report.result.text, /report recorded/);
+  const notMine = await worker.call("review_report", { criteria: [{ criterion_id: "AC-1", verdict: "met", evidence: [] }], decision: "accept" });
+  assert.equal(notMine.state, "denied");
+  assert.ok(notMine.decision?.reasons.some((reason) => reason.code === "tool-not-visible"));
+
+  const orchestrator = harnessFor(root, "orchestrator", {});
+  const plan = await orchestrator.call("plan_propose", { goal: "g" });
+  assert.equal(plan.result.error?.code, "invalid_arguments");
+});

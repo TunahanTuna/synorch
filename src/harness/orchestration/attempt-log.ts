@@ -1,5 +1,7 @@
 import {
   modelMessageSchema,
+  REPORT_TOOL_NAMES,
+  type ReportToolName,
   type BlobStore,
   type EventReadItem,
   type ModelMessage,
@@ -19,6 +21,13 @@ export interface RecordedToolCall {
   readonly exitCode: number | undefined;
 }
 
+/** A report tool call as the model made it; its arguments come from the recorded assistant message. */
+export interface RecordedReportCall {
+  readonly toolCallId: string;
+  readonly name: ReportToolName;
+  readonly arguments: Readonly<Record<string, unknown>>;
+}
+
 export interface AttemptLog {
   readonly sessionId: SessionId;
   readonly toolCalls: ReadonlyMap<string, RecordedToolCall>;
@@ -26,6 +35,19 @@ export interface AttemptLog {
   readonly compactionBlobs: ReadonlySet<string>;
   readonly finalAssistantText: string | undefined;
   readonly assistantTexts: readonly string[];
+  /** Report tool calls in log order (`task_report`, `review_report`, `plan_propose`). */
+  readonly reports: readonly RecordedReportCall[];
+}
+
+const REPORT_TOOLS: ReadonlySet<string> = new Set(Object.values(REPORT_TOOL_NAMES));
+
+/** Arguments of the last report call of `name` that the gateway validated and recorded as succeeded. */
+export function latestReport(log: AttemptLog, name: ReportToolName): Readonly<Record<string, unknown>> | undefined {
+  for (let index = log.reports.length - 1; index >= 0; index -= 1) {
+    const report = log.reports[index];
+    if (report?.name === name && log.toolCalls.get(report.toolCallId)?.state === "succeeded") return report.arguments;
+  }
+  return undefined;
 }
 
 export interface EventSource {
@@ -62,6 +84,7 @@ export async function buildAttemptLog(sessionId: SessionId, events: readonly Ses
   const eventTypes = new Map<number, string>();
   const compactionBlobs = new Set<string>();
   const assistantTexts: string[] = [];
+  const reports: RecordedReportCall[] = [];
   for (const event of events) {
     eventTypes.set(event.seq, event.type);
     switch (event.type) {
@@ -88,7 +111,13 @@ export async function buildAttemptLog(sessionId: SessionId, events: readonly Ses
       case "message/recorded": {
         if (event.data.role !== "assistant") break;
         const message = await messageOf(event, blobs);
-        if (message !== undefined) assistantTexts.push(textOf(message));
+        if (message === undefined) break;
+        assistantTexts.push(textOf(message));
+        for (const part of message.content) {
+          if (part.type === "tool_call" && part.tool_call_id !== undefined && REPORT_TOOLS.has(part.name)) {
+            reports.push({ toolCallId: part.tool_call_id, name: part.name as ReportToolName, arguments: part.arguments });
+          }
+        }
         break;
       }
       default:
@@ -102,5 +131,6 @@ export async function buildAttemptLog(sessionId: SessionId, events: readonly Ses
     compactionBlobs,
     finalAssistantText: assistantTexts.at(-1),
     assistantTexts,
+    reports,
   };
 }

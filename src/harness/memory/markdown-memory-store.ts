@@ -14,6 +14,7 @@ import {
   memoryProposalSchema,
   proposalIdSchema,
   type Digest,
+  type MemoryDecisionOutcome,
   type MemoryId,
   type MemoryKind,
   type MemoryNote,
@@ -46,6 +47,8 @@ import {
 
 /** Longest note body accepted: notes carry distilled claims and pointers, never raw output. */
 export const MAX_NOTE_BODY_CHARS = 16_000;
+
+type PersistedAudit = NonNullable<MemoryDecisionOutcome["persisted"]>;
 
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u009b]/;
 
@@ -94,31 +97,6 @@ function usage(message: string, nextCommand?: string): HarnessError {
     retry_safe: false,
     ...(nextCommand === undefined ? {} : { next_command: nextCommand }),
   });
-}
-
-/** Payload of the `memory/proposal_decided` event the caller appends for audit. */
-export interface ProposalDecidedAudit {
-  readonly proposal_id: ProposalId;
-  readonly state: "accepted" | "rejected" | "deferred";
-  readonly decided_by: "user" | "orchestrator";
-  readonly reason: string;
-}
-
-/** Payload of the `memory/persisted` event. */
-export interface PersistedAudit {
-  readonly memory_id: MemoryId;
-  readonly kind: MemoryKind;
-  readonly path: string;
-  readonly digest: Digest;
-}
-
-export interface MemoryDecisionOutcome {
-  readonly proposal: MemoryProposal;
-  readonly decided: ProposalDecidedAudit;
-  /** The note the accepted proposal created or changed. */
-  readonly persisted: PersistedAudit | undefined;
-  /** Present when the orchestrator decided: the run that is accountable for it. */
-  readonly runId: string | undefined;
 }
 
 export interface RelatedView {
@@ -240,16 +218,8 @@ export class MarkdownMemoryStore implements MemoryStore {
     return parsed.success ? parsed.data : undefined;
   }
 
+  /** Applies a decision; returns the `memory/proposal_decided` and `memory/persisted` payloads for the event log. */
   public async decide(
-    proposalId: ProposalId,
-    decision: NonNullable<MemoryProposal["decision"]>,
-    state: "accepted" | "rejected" | "deferred",
-  ): Promise<void> {
-    await this.decideWithAudit(proposalId, decision, state);
-  }
-
-  /** `decide`, returning the `memory/proposal_decided` and `memory/persisted` payloads for the event log. */
-  public async decideWithAudit(
     proposalId: ProposalId,
     decision: NonNullable<MemoryProposal["decision"]>,
     state: "accepted" | "rejected" | "deferred",

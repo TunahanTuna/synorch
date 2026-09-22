@@ -151,6 +151,11 @@ export function testRouter(adapter: AnyModelAdapter): ModelRouter {
       throw new Error("not used by the driver");
     },
     adapterFor: () => adapter,
+    reportFailure: () => undefined,
+    proposeProviderChange: () => {
+      throw new Error("not used by the driver");
+    },
+    applyProviderChange: () => undefined,
   };
 }
 

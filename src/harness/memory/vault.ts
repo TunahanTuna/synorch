@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_MEMORY_ROOT_SEGMENTS, type MemoryKind } from "../contracts/index.ts";
+import { DEFAULT_MEMORY_ROOT_SEGMENTS, type MemoryConfig, type MemoryKind } from "../contracts/index.ts";
 
 /**
  * Vault layout (contracts/memory.md §1) and the file primitives the store builds on. The vault is
@@ -25,12 +25,6 @@ export const VIEWS_DIRECTORY = "views";
 
 /** Folders a note scan never enters: derived data, the queue, views and editor state. */
 const SKIPPED_DIRECTORIES = new Set([QUEUE_DIRECTORY, VIEWS_DIRECTORY, "node_modules"]);
-
-/** Memory settings as read from the harness config (`memory.root`, `memory.team_root`). */
-export interface MemoryConfig {
-  readonly root?: string | undefined;
-  readonly team_root?: string | undefined;
-}
 
 /**
  * ADR-16: `memory.root` wins (relative values resolve against `home`, `~` expands to it);

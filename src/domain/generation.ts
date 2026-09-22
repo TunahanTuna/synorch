@@ -4,6 +4,7 @@ export type PlannedFileKind =
   | "protocol"
   | "agent"
   | "skill"
+  | "reference"
   | "schema"
   | "provider";
 

@@ -40,7 +40,7 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | `session/closed` | `reason` | Hayır | cli |
 | `run/created` | `goal`, `policy_mode`, `headless`, `budget` | Hedef metni evet | orchestration |
 | `run/state_changed` | `from`, `to`, `reason` | Hayır | orchestration |
-| `policy/snapshot` | `policy` (EffectivePolicy), `digest` | Hayır | policy |
+| `policy/snapshot` (v2) | `policy` (EffectivePolicy; v2: `policy.exec_confinement?`, `policy.verification_commands?`), `digest` | Hayır | policy |
 | `route/decided` | `decision` (RouteDecision) | Hayır | providers |
 | `plan/proposed` | `plan`, `digest` | Seçilmiş projection | orchestration |
 | `plan/state_changed` | `plan_id`, `digest`, `from`, `to`, `reason`, `approval_id?` | Hayır | orchestration |
@@ -81,7 +81,7 @@ Eşleşme invariant'ları: her `tool/call_proposed` bir `tool/result_recorded` v
 
 `parseSessionEvent(raw)` üç sonuç verir: `ok`, `unsupported` (bilinmeyen `type` veya bilinen tipte daha yüksek `event_version`), `invalid` (bilinen tip şemaya uymuyor = bozulma). `unsupported` sessizce atlanmaz; projection "bu session daha yeni bir sürümle yazılmış" hatası verir ve yazma için açmaz. Payload değişikliği: alan eklemek bile `event_version` artırır; okuyucu eski sürümleri desteklemeye devam eder; eski log hiçbir zaman yeniden yazılmaz.
 
-Sürümlü alanlar `EVENT_FIELD_VERSIONS` tablosundadır (tip → alan → alanı getiren sürüm); `EVENT_VERSIONS[type]` bu tablodaki en yüksek sürümdür ve yazıcılar her zaman onu damgalar. Yeni alanlar şemada opsiyoneldir, böylece eski sürüm olaylar aynı şemayla okunur; daha eski sürümle damgalanmış ama yeni alanı taşıyan olay `invalid`'dir (o sürüm yazamazdı). Dalga 2a: `session/resumed` v2 (`torn_tail`), `attempt/started` v2 (`session_id`), `tool/policy_decided` v2 (`action.escapes`); `task/integrated` yeni tip (v1) — onu tanımayan eski okuyucu `unsupported` raporlar.
+Sürümlü alanlar `EVENT_FIELD_VERSIONS` tablosundadır (tip → alan → alanı getiren sürüm); `EVENT_VERSIONS[type]` bu tablodaki en yüksek sürümdür ve yazıcılar her zaman onu damgalar. Yeni alanlar şemada opsiyoneldir, böylece eski sürüm olaylar aynı şemayla okunur; daha eski sürümle damgalanmış ama yeni alanı taşıyan olay `invalid`'dir (o sürüm yazamazdı). Dalga 2a: `session/resumed` v2 (`torn_tail`), `attempt/started` v2 (`session_id`), `tool/policy_decided` v2 (`action.escapes`); `task/integrated` yeni tip (v1) — onu tanımayan eski okuyucu `unsupported` raporlar. Exec kısıtı: `policy/snapshot` v2 (`policy.exec_confinement`, `policy.verification_commands`).
 
 ## 5. Disk yerleşimi
 

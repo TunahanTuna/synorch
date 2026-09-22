@@ -34,7 +34,7 @@ Prompt değil, retten ibarettir; hiçbir mod, grant, config veya onay gevşeteme
 | Rail | Tetik |
 | --- | --- |
 | `write-outside-scope` | Çözülmüş (realpath/junction) hedef write_scope dışında veya forbidden ile kesişiyor |
-| `reserved-path-write` | `.git/**`, `.synorch/**` yazımı (worktree yönetimi yalnız IsolationProvider üzerinden) |
+| `reserved-path-write` | `.git/**` (özellikle `.git/hooks/**`, `.git/config`), `.synorch/**` yazımı; kanonik yolu (realpath + Windows'ta harf duyarsız) Synorch home altında kalan yazma (işçinin kendi workspace kökü hariç); `git config` yazma biçimleri ve `core.hooksPath` ayarlayan komutlar (worktree yönetimi yalnız IsolationProvider üzerinden) |
 | `destructive-command` | Aşağıdaki sınıflandırma |
 | `credential-access` | Synorch credential dosyası/keychain girdisine tool ile erişim |
 | `foreign-credential-store` | `FORBIDDEN_CREDENTIAL_SOURCES` okuma/yazma |
@@ -45,9 +45,11 @@ Yıkıcı komut sınıflandırması (I3 veri olarak tutar, liste genişletilebil
 
 ## 4. EffectivePolicy alanları
 
-`schema_version`, `policy_version`, `mode`, `role`, `run_id`, `task_id?`, `workspace_root` (attempt'in izole kökü olabilir), `write_scope`, `read_scope`, `forbidden`, `effects{read, workspace-write, exec, external-write, control}`, `external_write_allowlist`, `network{mode: deny|allowlist|allow, hosts}`, `sandbox{backend, enforcement}`, `require_full_sandbox`, `layers[]{layer, source, digest}`.
+`schema_version`, `policy_version`, `mode`, `role`, `run_id`, `task_id?`, `workspace_root` (attempt'in izole kökü olabilir), `write_scope`, `read_scope`, `forbidden`, `effects{read, workspace-write, exec, external-write, control}`, `external_write_allowlist`, `network{mode: deny|allowlist|allow, hosts}`, `sandbox{backend, enforcement}`, `require_full_sandbox`, `exec_confinement?` (`full-sandbox|allowlist|ask`), `verification_commands?` (varsayılan `[]`), `layers[]{layer, source, digest}`.
 
-Şema tarafından reddedilenler: read-only rolde (explorer, reviewer) yazma kapsamı veya `workspace-write ≠ deny`; orchestrator için `.ai/tasks/` dışı yazma; tüm workspace (`**`, `.`) veya rezerve path yazma kapsamı; `require_full_sandbox` iken `full` olmayan sandbox ile `workspace-write`/`exec` izni; allowlist modu dışında host listesi.
+**Exec kısıtı (`exec_confinement`, `policy/snapshot` v2).** Varsayılan-ret: yalnız olumlu tanınan komut çalışır. `full-sandbox`: sandbox `full`, OS backend her child'ı sınırlar; yazan roller için yalnız yıkıcı komut sınıflandırması geçerlidir. `allowlist` (sandbox `full` değil, `autonomous`): yalnız birebir `verification_commands`, salt-okunur komut listesi ve incelenmiş build/test listesi çalışır, geri kalanı `sandbox` katmanında `exec-not-allowlisted` ile reddedilir (gateway `sandbox_insufficient`). `ask` (sandbox `full` değil, `ask` modu): listede olmayan komut `exec-unconfined` ile sorulur. Read-only işçiler (explorer, reviewer, owned path'i olmayan rca-only debugger) sandbox'tan bağımsız olarak yalnız salt-okunur listeyi ve birebir doğrulama komutlarını çalıştırır (`role` katmanı). Alan `compute` tarafından her zaman yazılır ve `execConfinementFor(sandbox.enforcement, mode)` ile tutarlı olmak zorundadır; eski (v1) snapshot'larda bulunmaz. `verification_commands` = `PolicyInputs.taskScope.verification_commands` (packet `verification.commands`); eşleşme kelime kelime tam argv'dir.
+
+Şema tarafından reddedilenler: read-only rolde (explorer, reviewer) yazma kapsamı veya `workspace-write ≠ deny`; orchestrator için `.ai/tasks/` dışı yazma; tüm workspace (`**`, `.`) veya rezerve path yazma kapsamı; `require_full_sandbox` iken `full` olmayan sandbox ile `workspace-write`/`exec` izni; sandbox ve modla çelişen `exec_confinement`; allowlist modu dışında host listesi.
 
 ## 5. Normalize eylem, karar ve digest
 
@@ -83,6 +85,8 @@ Yıkıcı komut sınıflandırması (I3 veri olarak tutar, liste genişletilebil
   network: { mode: deny, hosts: [] }
   sandbox: { backend: bubblewrap, enforcement: full }
   require_full_sandbox: false
+  exec_confinement: full-sandbox
+  verification_commands: ["pnpm test"]
   layers:
     - { layer: platform, source: builtin-rails, digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
     - { layer: role, source: implementer, digest: "sha256:2222222222222222222222222222222222222222222222222222222222222222" }
@@ -101,6 +105,8 @@ Yıkıcı komut sınıflandırması (I3 veri olarak tutar, liste genişletilebil
   network: { mode: allowlist, hosts: [registry.npmjs.org] }
   sandbox: { backend: policy-only, enforcement: partial }
   require_full_sandbox: false
+  exec_confinement: ask
+  verification_commands: []
   layers: [{ layer: role, source: explorer, digest: "sha256:4444444444444444444444444444444444444444444444444444444444444444" }]
 - schema_version: 1
   policy_version: 1
@@ -116,10 +122,12 @@ Yıkıcı komut sınıflandırması (I3 veri olarak tutar, liste genişletilebil
   network: { mode: deny, hosts: [] }
   sandbox: { backend: sandbox-exec, enforcement: full }
   require_full_sandbox: false
+  exec_confinement: full-sandbox
+  verification_commands: []
   layers: [{ layer: user, source: ~/.synorch/config.yaml, digest: "sha256:5555555555555555555555555555555555555555555555555555555555555555" }]
 ```
 
-Yetki genişletme denemeleri (hepsi reddedilir): yazan explorer; `autonomous` modda prompt; allowlist'siz otomatik dış yazma; ürün dosyası yazan orchestrator; tam sandbox şartı varken kısmi sandbox'ta exec; tüm workspace'i yazma.
+Yetki genişletme denemeleri (hepsi reddedilir): yazan explorer; `autonomous` modda prompt; allowlist'siz otomatik dış yazma; ürün dosyası yazan orchestrator; tam sandbox şartı varken kısmi sandbox'ta exec; tüm workspace'i yazma; kısmi sandbox'ta kendini `full-sandbox` ilan eden exec kısıtı.
 
 ```yaml example=effective-policy invalid
 - schema_version: 1
@@ -211,6 +219,23 @@ Yetki genişletme denemeleri (hepsi reddedilir): yazan explorer; `autonomous` mo
   network: { mode: deny, hosts: [] }
   sandbox: { backend: bubblewrap, enforcement: full }
   require_full_sandbox: false
+  layers: [{ layer: role, source: implementer, digest: "sha256:2222222222222222222222222222222222222222222222222222222222222222" }]
+- schema_version: 1
+  policy_version: 1
+  mode: autonomous
+  role: implementer
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  workspace_root: /w
+  write_scope: [src/auth/**]
+  read_scope: ["**"]
+  forbidden: []
+  effects: { read: allow, workspace-write: allow, exec: allow, external-write: deny, control: deny }
+  external_write_allowlist: []
+  network: { mode: deny, hosts: [] }
+  sandbox: { backend: policy-only, enforcement: partial }
+  require_full_sandbox: false
+  exec_confinement: full-sandbox
+  verification_commands: []
   layers: [{ layer: role, source: implementer, digest: "sha256:2222222222222222222222222222222222222222222222222222222222222222" }]
 ```
 

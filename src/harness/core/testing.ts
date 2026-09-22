@@ -65,6 +65,8 @@ export function testPolicy(runId: RunId, role: AgentRole = "implementer"): Effec
     network: { mode: "deny", hosts: [] },
     sandbox: { backend: "policy-only", enforcement: "partial" },
     require_full_sandbox: false,
+    exec_confinement: "allowlist",
+    verification_commands: [],
     layers: [{ layer: "role", source: role, digest: digestText(role) }],
   });
 }

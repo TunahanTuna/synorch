@@ -220,7 +220,10 @@ function analyzeArgv(argv: readonly string[], scope: CommandScope, depth: number
     const script = inlineScriptOf(program, args);
     if (script !== undefined) {
       analysis.mutating = true;
-      if (script !== null) analyzeScript(script, shellDialect(program), scope, depth + 1, analysis);
+      if (script.kind === "script") analyzeScript(script.text, shellDialect(program), scope, depth + 1, analysis);
+      else if (script.kind === "opaque") {
+        analysis.findings.push({ rail: "destructive-command", code: "opaque-script", message: `${program} runs a script that cannot be read: ${script.reason}` });
+      }
       return;
     }
     if (isMutatingLeaf(program, args)) analysis.mutating = true;
@@ -322,6 +325,32 @@ function applyRules(program: string, args: readonly string[], scope: CommandScop
   if (invocation !== undefined && ["push", "clone", "fetch", "pull", "remote"].includes(invocation.sub) && invocation.rest.some(carriesSecret)) {
     analysis.findings.push({ rail: "secret-egress", code: "secret-egress", message: "git would send embedded credentials to a remote" });
   }
+  if (program === "git" && args.some((argument) => argument.toLowerCase().includes("core.hookspath"))) {
+    analysis.findings.push({ rail: "reserved-path-write", code: "git-hooks-path", message: "core.hooksPath points git at hooks outside the reserved .git directory" });
+  } else if (invocation?.sub === "config" && isGitConfigWrite(invocation.rest)) {
+    analysis.findings.push({ rail: "reserved-path-write", code: "git-config-write", message: "git config writes .git/config (or a global config), which is reserved" });
+  }
+}
+
+const GIT_CONFIG_READ_FLAGS = new Set(["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "-l", "--list"]);
+const GIT_CONFIG_WRITE_FLAGS = new Set(["--add", "--unset", "--unset-all", "--replace-all", "--rename-section", "--remove-section", "-e", "--edit"]);
+const GIT_CONFIG_VALUE_FLAGS = new Set(["-f", "--file", "--blob", "--type", "--default", "--comment", "--value"]);
+
+/** Default-deny: a `git config` form counts as a write unless it is positively a read (`--get*`, `--list`, `get`, one key). */
+function isGitConfigWrite(rest: readonly string[]): boolean {
+  const positional: string[] = [];
+  let read = false;
+  for (let index = 0; index < rest.length; index += 1) {
+    const argument = (rest[index] ?? "").toLowerCase();
+    if (GIT_CONFIG_WRITE_FLAGS.has(argument)) return true;
+    if (GIT_CONFIG_READ_FLAGS.has(argument)) read = true;
+    else if (GIT_CONFIG_VALUE_FLAGS.has(argument)) index += 1;
+    else if (!argument.startsWith("-")) positional.push(argument);
+  }
+  const verb = positional[0];
+  if (verb === "get" || verb === "list") return false;
+  if (verb === "set" || verb === "unset" || verb === "edit" || verb === "rename-section" || verb === "remove-section") return true;
+  return !(read || positional.length === 1);
 }
 
 function inspectCredentials(program: string, argv: readonly string[], analysis: Analysis): void {

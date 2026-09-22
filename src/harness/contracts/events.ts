@@ -359,6 +359,7 @@ export const EVENT_FIELD_VERSIONS = {
   "session/resumed": { torn_tail: 2 },
   "attempt/started": { session_id: 2 },
   "tool/policy_decided": { "action.escapes": 2 },
+  "policy/snapshot": { "policy.exec_confinement": 2, "policy.verification_commands": 2 },
 } as const satisfies { readonly [T in SessionEventType]?: Readonly<Record<string, number>> };
 
 /** Current payload version per type. A reader meeting a higher version reports `unsupported`. */

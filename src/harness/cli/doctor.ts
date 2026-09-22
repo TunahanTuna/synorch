@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   createId,
   deriveProjectId,
+  execConfinementFor,
   EXIT_CODES,
   selectRendererKind,
   type AuthStatus,
@@ -79,9 +80,16 @@ function sandboxCheck(report: SandboxReport): DoctorCheck {
   return {
     id: "sandbox",
     status: report.enforcement === "full" ? "ok" : report.enforcement === "partial" ? "warn" : "fail",
-    summary: `${report.backend}: enforcement ${report.enforcement} (filesystem ${report.filesystem}, network ${report.network}, process ${report.process})`,
+    summary: `${report.backend}: enforcement ${report.enforcement} (filesystem ${report.filesystem}, network ${report.network}, process ${report.process}); ${execConfinementLine(report)}`,
     details: [report],
   };
+}
+
+/** How `exec` is confined on this machine, per mode (ADR-06): a full sandbox, or a default-deny allowlist. */
+function execConfinementLine(report: SandboxReport): string {
+  const autonomous = execConfinementFor(report.enforcement, "autonomous");
+  if (autonomous === "full-sandbox") return "exec confinement: full-sandbox";
+  return `exec confinement: ${autonomous} in autonomous mode (verification commands and vetted build/test commands only), ${execConfinementFor(report.enforcement, "ask")} for anything else in ask mode`;
 }
 
 async function storeCheck(home: string, projectId: string): Promise<DoctorCheck> {

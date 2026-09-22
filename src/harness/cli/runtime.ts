@@ -376,7 +376,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     return credential;
   };
 
-  const policy = createPolicyEngine();
+  const policy = createPolicyEngine({ synorchHome: home });
   const sandbox = overrides.sandbox ?? (await probeSandbox({ platform }));
   const runner = createSandboxRunner(sandbox);
   const userConfig = config.userPolicy === undefined ? undefined : { policy: config.userPolicy };

@@ -251,6 +251,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         owned: valid.write_mode === "owned-paths" ? valid.scope.owned_paths : [],
         read: valid.scope.read_paths,
         forbidden: valid.scope.forbidden_paths,
+        verification_commands: valid.verification.commands,
       },
       userConfig: deps.userConfig,
       workspaceConfig: deps.workspaceConfig,

@@ -115,6 +115,10 @@ test("AC-1 two dependent writers on the same path run strictly one after the oth
   const workspace = await createTempWorkspace({ "docs/a.md": "start\n" }, { git: true });
   try {
     const timeline: { key: string; phase: "start" | "end" }[] = [];
+    let markOtherStarted: () => void = () => undefined;
+    const otherStarted = new Promise<void>((resolve) => {
+      markOtherStarted = resolve;
+    });
     const planner = createScriptedPlanner((input) =>
       testPlan(input, [task("first", ["docs/**"]), task("second", ["docs/**"], { depends_on: ["first"] }), task("other", ["src/**"])]),
     );
@@ -125,7 +129,12 @@ test("AC-1 two dependent writers on the same path run strictly one after the oth
       script: async (context) => {
         const key = context.input.packet?.objective.replace("Do ", "") ?? "?";
         timeline.push({ key, phase: "start" });
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        if (key === "other") markOtherStarted();
+        if (key === "first") {
+          let timer: NodeJS.Timeout | undefined;
+          await Promise.race([otherStarted, new Promise<void>((resolve) => (timer = setTimeout(resolve, 10_000)))]);
+          clearTimeout(timer);
+        }
         const target = key === "other" ? "src/other.ts" : "docs/a.md";
         const previous = await readFile(path.join(context.root, ...target.split("/")), "utf8").catch(() => "");
         await context.write(target, `${previous}${key}\n`);

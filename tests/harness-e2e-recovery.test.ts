@@ -50,7 +50,7 @@ test("crash after tool/execution_started: resume records tool/interrupted and ne
     await writeFile(
       plannerScript,
       JSON.stringify([
-        { tool_calls: [{ name: "plan_propose", arguments: planArguments("Run the hanging tool", [{ key: "hang", risk: "trivial", owned: ["marker.txt"], read: ["hang.mjs"] }]) }] },
+        { tool_calls: [{ name: "plan_propose", arguments: planArguments("Run the hanging tool", [{ key: "hang", risk: "trivial", owned: ["marker.txt"], read: ["hang.mjs"], verification: ["node hang.mjs"] }]) }] },
         { text: "planned" },
       ]),
     );

@@ -4,6 +4,7 @@ import {
   riskClassificationReference,
   severityRubricReference,
 } from "./skill-references.ts";
+import { skillCreatorReferences, skillCreatorSkill } from "./skill-creator-skill.ts";
 import { taskConductorSkill } from "./task-conductor-skill.ts";
 
 /**
@@ -504,4 +505,9 @@ export const BASE_SKILL_DOCUMENTS: readonly BaseSkillDocument[] = [
     references: [{ fileName: "severity-rubric.md", content: severityRubricReference }],
   },
   { id: "task-conductor", skill: taskConductorSkill, references: [] },
+  {
+    id: "skill-creator",
+    skill: skillCreatorSkill,
+    references: skillCreatorReferences,
+  },
 ];

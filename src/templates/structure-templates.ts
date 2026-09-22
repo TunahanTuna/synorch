@@ -4,6 +4,7 @@ import { SYNORCH_GENERATOR_NAME, SYNORCH_VERSION } from "../domain/product.ts";
 import { stringifyYaml } from "../infrastructure/serialization.ts";
 import { AGENT_DOCUMENTS } from "./agent-manifests.ts";
 import { BASE_SKILL_DOCUMENTS } from "./base-skills.ts";
+import { skillCreatorLedgerFiles } from "./skill-creator-skill.ts";
 
 export function createStructureFiles(scope: StructureScope): readonly FileDefinition[] {
   return [
@@ -62,6 +63,7 @@ export function createStructureFiles(scope: StructureScope): readonly FileDefini
     file(".ai/providers/codex.md", codexAdapter, "provider"),
     file(".ai/providers/claude-code.md", claudeAdapter, "provider"),
     file(".ai/tasks/.gitkeep", "", "canonical"),
+    ...skillCreatorLedgerFiles,
   ];
 }
 

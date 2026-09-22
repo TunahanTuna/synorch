@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
@@ -12,7 +12,6 @@ import {
   workspaceSchema,
 } from "../src/domain/config.ts";
 import { NodeFileSystem } from "../src/infrastructure/file-system.ts";
-import { skillCreatorStructureFiles } from "../src/templates/skill-creator-skill.ts";
 import { parseYaml, stringifyYaml } from "../src/infrastructure/serialization.ts";
 
 const temporaryDirectories: string[] = [];
@@ -463,7 +462,6 @@ async function createSyncedStructure(): Promise<{
   const fileSystem = new NodeFileSystem();
   const structure = new StructureService(fileSystem);
   await structure.initialize(await structure.createPlan(directory, "repository"));
-  await materializeSkillCreatorFiles(directory);
   await writeFile(
     path.join(directory, "package.json"),
     JSON.stringify({
@@ -490,17 +488,6 @@ async function createSyncedStructure(): Promise<{
   };
 }
 
-/**
- * The skill-creator base skill is canonical, but `createStructureFiles` does not emit it yet.
- * Integration removes this helper once `skillCreatorStructureFiles` is spread into the plan.
- */
-async function materializeSkillCreatorFiles(directory: string): Promise<void> {
-  for (const file of skillCreatorStructureFiles) {
-    const absolutePath = path.join(directory, file.relativePath);
-    await mkdir(path.dirname(absolutePath), { recursive: true });
-    await writeFile(absolutePath, file.content, "utf8");
-  }
-}
 
 async function createTempDirectory(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synorch-doctor-"));

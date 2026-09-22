@@ -16,7 +16,7 @@ name: orchestrator
 role: control-plane
 writes_product_files: false
 model_tier: orchestrator
-allowed_skills: [task-conductor, planning, project-discovery]
+allowed_skills: [task-conductor, planning, project-discovery, skill-creator]
 forbidden_skills: [implementation, debugging, code-review]
 reports: final-report
 control_plane_write_scope: .ai/tasks/**
@@ -140,7 +140,7 @@ name: implementer
 role: product-change
 writes_product_files: true
 model_tier: any
-allowed_skills: [implementation, verification, "technology:*"]
+allowed_skills: [implementation, verification, skill-creator, "technology:*"]
 forbidden_skills: [planning, task-conductor, code-review, project-discovery]
 reports: completion-packet
 ---
@@ -266,7 +266,7 @@ name: reviewer
 role: independent-review
 writes_product_files: false
 model_tier: complex_worker
-allowed_skills: [code-review, codebase-exploration, verification]
+allowed_skills: [code-review, codebase-exploration, verification, skill-creator]
 forbidden_skills: [implementation, debugging, planning, task-conductor]
 reports: review-report
 ---

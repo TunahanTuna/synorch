@@ -1,6 +1,7 @@
 import type { FileDefinition } from "../domain/generation.ts";
 import { createEmptyLedger } from "../domain/observation-ledger.ts";
 import { stringifyYaml } from "../infrastructure/serialization.ts";
+import type { SkillReferenceDocument } from "./base-skills.ts";
 
 export const skillCreatorSkill = `---
 name: skill-creator
@@ -202,22 +203,22 @@ const taskDirectoryIgnore = `# Per-task orchestrator working directories are loc
 `;
 
 /**
- * Files the canonical \`skill-creator\` base skill needs. Integration spreads this into
- * \`createStructureFiles\`; keeping it here keeps the template self-contained.
+ * The reference documents of the `skill-creator` base skill. `BASE_SKILL_DOCUMENTS` in
+ * `base-skills.ts` is the single place that turns these into files, exactly as it does for
+ * every other base skill, so the skill and its references can never be emitted twice.
  */
-export const skillCreatorStructureFiles: readonly FileDefinition[] = [
-  file(".ai/skills/skill-creator/SKILL.md", skillCreatorSkill, "skill"),
-  file(
-    ".ai/skills/skill-creator/references/observation-ledger.md",
-    observationLedgerReference,
-    "skill",
-  ),
-  file(
-    ".ai/skills/skill-creator/references/generated-skill-contract.md",
-    generatedSkillContractReference,
-    "skill",
-  ),
-  file(".ai/skills/skill-creator/references/retirement.md", retirementReference, "skill"),
+export const skillCreatorReferences: readonly SkillReferenceDocument[] = [
+  { fileName: "observation-ledger.md", content: observationLedgerReference },
+  { fileName: "generated-skill-contract.md", content: generatedSkillContractReference },
+  { fileName: "retirement.md", content: retirementReference },
+];
+
+/**
+ * The control-plane files the distillation loop needs beside the skill itself: the Git-tracked
+ * observation ledger and the ignore rule that keeps per-task working directories out of history.
+ * They are canonical structure rather than skill content, so `createStructureFiles` emits them.
+ */
+export const skillCreatorLedgerFiles: readonly FileDefinition[] = [
   file(".ai/tasks/observations.yaml", stringifyYaml(createEmptyLedger()), "canonical"),
   file(".ai/tasks/.gitignore", taskDirectoryIgnore, "canonical"),
 ];

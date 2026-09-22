@@ -94,6 +94,9 @@ async function main(): Promise<void> {
         for (const project of result.projects) {
           console.log(`  ${project.id}: ${project.path}`);
         }
+        if (result.prunedObservations > 0) {
+          console.log(`Pruned ${result.prunedObservations} expired observation(s).`);
+        }
       }
       return;
     }

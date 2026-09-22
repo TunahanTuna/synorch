@@ -11,7 +11,7 @@ import { manifestSchema, skillRegistrySchema } from "../src/domain/config.ts";
 import { CliError } from "../src/domain/errors.ts";
 import { BASE_SKILLS } from "../src/domain/skill-packs.ts";
 import { NodeFileSystem } from "../src/infrastructure/file-system.ts";
-import { skillCreatorStructureFiles } from "../src/templates/skill-creator-skill.ts";
+import { createStructureFiles } from "../src/templates/structure-templates.ts";
 import { parseYaml } from "../src/infrastructure/serialization.ts";
 
 const temporaryDirectories: string[] = [];
@@ -24,6 +24,28 @@ afterEach(async () => {
       await rm(resolved, { recursive: true, force: true });
     }),
   );
+});
+
+test("the generated structure declares every path exactly once", () => {
+  for (const scope of ["workspace", "repository"] as const) {
+    const files = createStructureFiles(scope);
+    const seen = new Map<string, number>();
+    for (const file of files) {
+      seen.set(file.relativePath, (seen.get(file.relativePath) ?? 0) + 1);
+    }
+    const duplicates = [...seen].filter(([, count]) => count > 1).map(([relativePath]) => relativePath);
+
+    assert.deepEqual(duplicates, [], `${scope} scope emits a path twice`);
+  }
+
+  const repository = createStructureFiles("repository");
+  for (const skill of BASE_SKILLS) {
+    assert.equal(
+      repository.filter((file) => file.relativePath === skill.relativePath).length,
+      1,
+      skill.id,
+    );
+  }
 });
 
 test("empty directory defaults to workspace scope and includes both model profiles", async () => {
@@ -124,7 +146,6 @@ test("repository sync recursively discovers deterministic frontend and backend m
   const fileSystem = new NodeFileSystem();
   const structure = new StructureService(fileSystem);
   await structure.initialize(await structure.createPlan(directory, "repository"));
-  await materializeSkillCreatorFiles(directory);
   await mkdir(path.join(directory, "frontend"), { recursive: true });
   await mkdir(path.join(directory, "backend"), { recursive: true });
   await mkdir(path.join(directory, "node_modules", "ignored"), { recursive: true });
@@ -731,17 +752,6 @@ function isLinkCapabilityError(error: unknown): boolean {
   return ["EACCES", "EPERM", "UNKNOWN"].includes(String(error.code));
 }
 
-/**
- * The skill-creator base skill is canonical, but `createStructureFiles` does not emit it yet.
- * Integration removes this helper once `skillCreatorStructureFiles` is spread into the plan.
- */
-async function materializeSkillCreatorFiles(directory: string): Promise<void> {
-  for (const file of skillCreatorStructureFiles) {
-    const absolutePath = path.join(directory, file.relativePath);
-    await mkdir(path.dirname(absolutePath), { recursive: true });
-    await writeFile(absolutePath, file.content, "utf8");
-  }
-}
 
 async function createTempDirectory(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synorch-test-"));

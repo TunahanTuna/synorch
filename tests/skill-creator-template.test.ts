@@ -1,20 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  GENERATED_SKILL_MAX_BYTES,
-  REQUIRED_SKILL_SECTIONS,
-  splitFrontmatter,
-} from "../src/domain/generated-skill.ts";
+import { REQUIRED_SKILL_SECTIONS } from "../src/domain/canonical-contracts.ts";
+import { GENERATED_SKILL_MAX_BYTES } from "../src/domain/generated-skill.ts";
 import {
   OBSERVATION_LEDGER_PATH,
   createEmptyLedger,
   observationLedgerSchema,
 } from "../src/domain/observation-ledger.ts";
 import { BASE_SKILLS } from "../src/domain/skill-packs.ts";
+import { parseFrontmatter } from "../src/infrastructure/frontmatter.ts";
 import { parseYaml } from "../src/infrastructure/serialization.ts";
 import {
+  skillCreatorLedgerFiles,
+  skillCreatorReferences,
   skillCreatorSkill,
-  skillCreatorStructureFiles,
 } from "../src/templates/skill-creator-skill.ts";
 
 const SKILL_MAX_BYTES = 6_000;
@@ -32,19 +31,18 @@ test("the skill file stays under 6KB and every reference under 15KB", () => {
     Buffer.byteLength(skillCreatorSkill, "utf8") <= SKILL_MAX_BYTES,
     `SKILL.md is ${Buffer.byteLength(skillCreatorSkill, "utf8")} bytes`,
   );
-  for (const file of skillCreatorStructureFiles) {
-    if (!file.relativePath.includes("/references/")) continue;
+  for (const reference of skillCreatorReferences) {
     assert.ok(
-      Buffer.byteLength(file.content, "utf8") <= GENERATED_SKILL_MAX_BYTES,
-      `${file.relativePath} is ${Buffer.byteLength(file.content, "utf8")} bytes`,
+      Buffer.byteLength(reference.content, "utf8") <= GENERATED_SKILL_MAX_BYTES,
+      `${reference.fileName} is ${Buffer.byteLength(reference.content, "utf8")} bytes`,
     );
   }
 });
 
 test("the skill satisfies the Canonical Skill Contract shape", () => {
-  const document = splitFrontmatter(skillCreatorSkill);
-  assert.ok(document);
-  const frontmatter = parseYaml(document.frontmatter) as Record<string, unknown>;
+  const document = parseFrontmatter(skillCreatorSkill);
+  assert.equal(document.kind, "parsed");
+  const frontmatter = document.data;
 
   assert.equal(frontmatter["name"], "skill-creator");
   assert.equal(frontmatter["version"], "1.0.0");
@@ -58,15 +56,17 @@ test("the skill satisfies the Canonical Skill Contract shape", () => {
 });
 
 test("every declared reference is materialized beside the skill", () => {
-  const document = splitFrontmatter(skillCreatorSkill);
-  assert.ok(document);
-  const frontmatter = parseYaml(document.frontmatter) as { readonly references: readonly string[] };
-  const paths = new Set(skillCreatorStructureFiles.map((file) => file.relativePath));
+  const document = parseFrontmatter(skillCreatorSkill);
+  assert.equal(document.kind, "parsed");
+  const declared = document.data["references"] as readonly string[];
+  const fileNames = new Set(skillCreatorReferences.map((reference) => reference.fileName));
 
-  assert.ok(frontmatter.references.length > 0);
-  for (const reference of frontmatter.references) {
+  assert.ok(declared.length > 0);
+  assert.equal(declared.length, skillCreatorReferences.length);
+  for (const reference of declared) {
     assert.ok(!reference.includes(".."), reference);
-    assert.ok(paths.has(`.ai/skills/skill-creator/${reference}`), reference);
+    assert.ok(reference.startsWith("references/"), reference);
+    assert.ok(fileNames.has(reference.slice("references/".length)), reference);
   }
 });
 
@@ -87,9 +87,9 @@ test("the skill encodes the load-bearing rules of the design", () => {
 });
 
 test("the reference files explain the two counters and the ledger example", () => {
-  const ledgerReference = contentOf(
-    ".ai/skills/skill-creator/references/observation-ledger.md",
-  );
+  const ledgerReference =
+    skillCreatorReferences.find((reference) => reference.fileName === "observation-ledger.md")
+      ?.content ?? "";
 
   assert.match(ledgerReference, /tasks_seen/);
   assert.match(ledgerReference, /last_seen_task_index/);
@@ -114,19 +114,19 @@ test("the tasks gitignore keeps the ledger and ignores working directories", () 
   assert.match(ignore, /^!\.gitignore$/m);
 });
 
-test("every structure file uses a known kind and ends with a newline", () => {
-  for (const file of skillCreatorStructureFiles) {
-    assert.ok(["skill", "canonical"].includes(file.kind), file.relativePath);
+test("every ledger file is canonical and ends with a newline", () => {
+  for (const file of skillCreatorLedgerFiles) {
+    assert.equal(file.kind, "canonical", file.relativePath);
     assert.ok(file.content.endsWith("\n"), file.relativePath);
   }
   assert.equal(
-    new Set(skillCreatorStructureFiles.map((file) => file.relativePath)).size,
-    skillCreatorStructureFiles.length,
+    new Set(skillCreatorLedgerFiles.map((file) => file.relativePath)).size,
+    skillCreatorLedgerFiles.length,
   );
 });
 
 function contentOf(relativePath: string): string {
-  const file = skillCreatorStructureFiles.find((entry) => entry.relativePath === relativePath);
+  const file = skillCreatorLedgerFiles.find((entry) => entry.relativePath === relativePath);
   assert.ok(file, relativePath);
   return file.content;
 }

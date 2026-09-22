@@ -42,6 +42,8 @@ test("sync leaves a generated project skill untouched, byte for byte, even with 
 
 test("sync succeeds when there is no observation ledger", async () => {
   const directory = await createInitializedProject();
+  // A structure generated before the ledger existed, or one whose ledger a user removed.
+  await rm(path.join(directory, OBSERVATION_LEDGER_PATH));
 
   const result = await new ProjectDiscoveryService(new NodeFileSystem()).sync(directory);
 

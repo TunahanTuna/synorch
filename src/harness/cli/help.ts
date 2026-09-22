@@ -41,13 +41,18 @@ ${EXIT_CODES}
   run: `syn run — run one goal to completion
 
 Usage:
-  syn run "<goal>" [--mode jsonl | --json] [--stream-deltas] [options]
+  syn run "<goal>" [--mode jsonl | --json] [--stream-deltas] [--trust-workspace] [options]
   syn run - [options]            Read the goal from stdin.
 
 Output:
   A terminal gets the interactive view; pipes, CI and --plain get append-only lines.
   --mode jsonl (alias --json) writes only JSONL frames to stdout (hello first, exactly one
   result or error last) and everything human to stderr. --stream-deltas adds delta frames.
+
+Workspace trust:
+  Without a full OS sandbox, verification and build/test commands run repository code with
+  your user permissions. They need a trusted workspace (syn trust). --trust-workspace trusts
+  it for this run only; a headless run that needs trust and lacks it exits 3.
 
 ${SESSION}
 
@@ -97,6 +102,19 @@ ${COMMON}
 
 Usage:
   syn auth status [--json]
+
+${COMMON}
+`,
+  trust: `syn trust — let this workspace's tests and build scripts run without a full sandbox
+
+Usage:
+  syn trust [--target <path>]          Trust the workspace (stored in <synorch home>/trust.json).
+  syn trust --revoke [--target <path>] Remove the trust record.
+
+  Without a full OS sandbox (Windows today), Synorch cannot confine code that verification and
+  build/test commands run: it runs with your user permissions. Such commands run only in a
+  trusted workspace. Trust is keyed by the workspace path and repository identity, lives only
+  in your user scope and is never read from the repository. Grants and revocations are audited.
 
 ${COMMON}
 `,

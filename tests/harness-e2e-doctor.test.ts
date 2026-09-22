@@ -64,8 +64,10 @@ test("doctor --runtime --json reports each area separately and makes no network 
     const report = JSON.parse(doctor.stdout()) as Report;
     assert.deepEqual(network.urls, [], "doctor --runtime must not send any request");
     assert.equal(report.network_requests, "none");
-    assert.deepEqual(report.checks.map((check) => check.id), ["node", "terminal", "config", "canonical", "sandbox", "store", "auth", "capabilities"]);
+    assert.deepEqual(report.checks.map((check) => check.id), ["node", "terminal", "config", "canonical", "sandbox", "trust", "store", "auth", "capabilities"]);
     const byId = new Map(report.checks.map((check) => [check.id, check]));
+    assert.equal(byId.get("trust")?.status, "warn", "an untrusted workspace on a partial sandbox is reported (SEC-N1)");
+    assert.match(byId.get("trust")?.summary ?? "", /not trusted.*syn trust/);
     const canonical = byId.get("canonical");
     assert.equal(canonical?.status, "warn", "a repository without .ai/ runs on the built-in defaults, and doctor says so");
     assert.match(canonical?.summary ?? "", /canonical \.ai: none in .*; using the built-in Synorch defaults \(constitution loaded, 8 core protocol\(s\), 5 role manifest\(s\), 9 skill\(s\)/);

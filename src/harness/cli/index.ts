@@ -26,13 +26,14 @@ import { failureInfo } from "./outcome.ts";
 import type { RuntimeOverrides } from "./runtime.ts";
 import { agentCommand, runCommand, type SessionIO } from "./session.ts";
 import { resolveTerminalSettings, streamHasColors, type TerminalSettings } from "./terminal.ts";
+import { trustCommand } from "./trust.ts";
 
 /**
  * I5 — entry of the runtime commands. `src/cli.ts` reaches this module only through a literal
  * dynamic `import("./harness/cli/index.ts")`, so `inspect/init/sync/doctor` never load it. The
  * composition root itself is `createRuntime()` in `runtime.ts`.
  */
-export const HARNESS_COMMANDS = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory"] as const;
+export const HARNESS_COMMANDS = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust"] as const;
 export type HarnessCommand = (typeof HARNESS_COMMANDS)[number];
 
 export { parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";
@@ -44,6 +45,7 @@ export { describeCanonical, loadCanonicalStructure, type CanonicalStructure, typ
 export { narrowPolicy, withRoleDefinitions } from "./role-policy.ts";
 export { loadRuntimeConfig, resolveHome, type RuntimeConfig } from "./config.ts";
 export { loadScript, scriptStep } from "./scripted-script.ts";
+export { promptWorkspaceTrust, recordTrustDecision, TRUST_AUDIT_TITLE, trustCommand } from "./trust.ts";
 
 /** Title of the per-project session that records `syn memory accept|reject` decisions. */
 export const MEMORY_AUDIT_TITLE = "syn memory decisions";
@@ -233,6 +235,12 @@ async function dispatch(parsed: Exclude<ParsedCommand, { kind: "help" }>, io: Ha
         await command.close();
       }
     }
+    case "trust":
+      return trustCommand(
+        { cwd: io.cwd, home, platform, stdout: (text) => void io.stdout.write(text), stderr: (text) => void io.stderr.write(text) },
+        parsed.common.target,
+        parsed.revoke,
+      );
     case "memory": {
       const config = await loadRuntimeConfig(home, io.cwd).catch(() => undefined);
       const handler = createMemoryCommand({

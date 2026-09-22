@@ -17,6 +17,7 @@ import {
   taskReport,
   text,
   toolResultIds,
+  trustWorkspace,
   writeConfig,
 } from "./fixtures/cli/runtime/support.ts";
 
@@ -34,6 +35,7 @@ const ROUTES = [
 
 test("headless: ask_user is unavailable and a run that cannot plan without the answer exits 3", async () => {
   const sandbox = await createSandbox({ "README.md": "# ask\n" });
+  await trustWorkspace(sandbox);
   try {
     await writeConfig(sandbox.home, ROUTES);
     const orchestrator = createScriptedAdapter([call("ask_user", () => ({ question: "Which folder holds the docs?" })), text("I cannot plan without knowing the folder.")], { adapterId: "plan-script" });
@@ -58,6 +60,7 @@ test("headless: ask_user is unavailable and a run that cannot plan without the a
 
 test("interactive: the orchestrator's question is shown and the typed answer is its tool result", async () => {
   const sandbox = await createSandbox({ "docs/api.md": "api\n", "README.md": "# ask\n" });
+  await trustWorkspace(sandbox);
   try {
     await writeConfig(sandbox.home, ROUTES);
     const answers: string[] = [];

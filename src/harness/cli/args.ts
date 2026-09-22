@@ -57,7 +57,8 @@ export interface SessionFlags {
 export type ParsedCommand =
   | { readonly kind: "help"; readonly command: string }
   | { readonly kind: "agent"; readonly common: CommonFlags; readonly session: SessionFlags; readonly resume: SessionId | undefined; readonly fork: { readonly sessionId: SessionId; readonly upToSeq: number | undefined } | undefined }
-  | { readonly kind: "run"; readonly common: CommonFlags; readonly session: SessionFlags; readonly goal: string; readonly goalFromStdin: boolean; readonly jsonl: boolean; readonly streamDeltas: boolean }
+  | { readonly kind: "run"; readonly common: CommonFlags; readonly session: SessionFlags; readonly goal: string; readonly goalFromStdin: boolean; readonly jsonl: boolean; readonly streamDeltas: boolean; readonly trustWorkspace: boolean }
+  | { readonly kind: "trust"; readonly common: CommonFlags; readonly revoke: boolean }
   | { readonly kind: "runs"; readonly common: CommonFlags; readonly json: boolean }
   | { readonly kind: "show"; readonly common: CommonFlags; readonly id: RunId | SessionId; readonly json: boolean }
   | { readonly kind: "doctor-runtime"; readonly common: CommonFlags; readonly probeModel: boolean; readonly json: boolean }
@@ -174,6 +175,7 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
         mode: { type: "string" },
         json: { type: "boolean", default: false },
         "stream-deltas": { type: "boolean", default: false },
+        "trust-workspace": { type: "boolean", default: false },
       });
       if (values.help) return { kind: "help", command };
       if (values.mode !== undefined && values.mode !== "jsonl") throw new UsageError(`Invalid --mode: ${values.mode}. The only machine mode is jsonl.`, command);
@@ -192,7 +194,14 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
         goalFromStdin: goal === "-",
         jsonl,
         streamDeltas: values["stream-deltas"],
+        trustWorkspace: values["trust-workspace"],
       };
+    }
+    case "trust": {
+      const { values, positionals } = parse(command, args, { ...COMMON_OPTIONS, revoke: { type: "boolean", default: false } });
+      if (values.help) return { kind: "help", command };
+      noPositionals(command, positionals);
+      return { kind: "trust", common: common(command, values), revoke: values.revoke };
     }
     case "runs": {
       const { values, positionals } = parse(command, args, { ...COMMON_OPTIONS, json: { type: "boolean", default: false } });

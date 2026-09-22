@@ -18,6 +18,7 @@ import {
   readSession,
   ScriptedInput,
   text,
+  trustWorkspace,
   writeConfig,
   type Sandbox,
 } from "./fixtures/cli/runtime/support.ts";
@@ -112,6 +113,7 @@ async function assertHighRiskRun(sandbox: Sandbox, sessionId: string, reviewerSa
 
 test("high-risk change (autonomous): mandatory worktree, independent reviewer with its own evidence", async () => {
   const sandbox = await createSandbox(FILES, { git: true });
+  await trustWorkspace(sandbox);
   try {
     await writeConfig(sandbox.home, ROUTES);
     const { orchestrator, implementer, reviewer, reviewerSaw } = adapters();
@@ -132,6 +134,7 @@ test("high-risk change (autonomous): mandatory worktree, independent reviewer wi
 
 test("high-risk change (ask): the human approves the plan and every effectful action", async () => {
   const sandbox = await createSandbox(FILES, { git: true });
+  await trustWorkspace(sandbox);
   try {
     await writeConfig(sandbox.home, ROUTES);
     const { orchestrator, implementer, reviewer, reviewerSaw } = adapters();
@@ -161,6 +164,7 @@ test("high-risk change (ask): the human approves the plan and every effectful ac
 
 test("high-risk change without git is refused instead of running in a weaker workspace (exit 6)", async () => {
   const sandbox = await createSandbox(FILES);
+  await trustWorkspace(sandbox);
   try {
     await writeConfig(sandbox.home, ROUTES);
     const { orchestrator, implementer, reviewer } = adapters();

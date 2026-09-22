@@ -34,13 +34,14 @@ Runtime commands (syn <command> --help for details):
   login, logout     Connect or remove a provider identity.
   auth status       Provider identities, without secrets.
   memory <command>  Project memory: status, search, show, review, accept, reject.
+  trust [--revoke]  Trust this workspace's tests and build scripts to run unconfined.
 
 Safety:
   Existing differing files are never overwritten unless --force is explicit.
   Model fallback is never silent.
 `;
 
-const HARNESS_COMMAND_NAMES: readonly string[] = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory"];
+const HARNESS_COMMAND_NAMES: readonly string[] = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust"];
 
 function isHarnessInvocation(argv: readonly string[]): boolean {
   const [command] = argv;

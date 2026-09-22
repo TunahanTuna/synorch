@@ -1,21 +1,32 @@
-import type { ExecConfinement, PolicyMode } from "../contracts/index.ts";
+import { WORKSPACE_UNTRUSTED_CODE, type ExecConfinement, type PolicyMode } from "../contracts/index.ts";
+import { gitInvocation } from "./command-rules.ts";
 import { parseShellScript, programName } from "./shell-parser.ts";
 
 /**
  * Exec confinement by allowlist (default-deny). A command runs only when it is positively
  * recognised: an exact verification command, or a fully parsed argv on a vetted list. Nothing here
- * enumerates bad commands; whatever is not recognised is refused (or asked for in `ask` mode).
+ * enumerates bad commands as the way in; whatever is not recognised is refused (or asked for in
+ * `ask` mode).
+ *
+ * Order matters (SEC-N5): an argv that cannot be recognised (non-literal program, inline code) or
+ * that carries a hard-refused form (a module-loading flag for node, a git form that writes the
+ * repository or reads outside the workspace) is refused before any exact-match allow, so a plan
+ * can never smuggle such a command in as a "verification command".
  *
  * - Read-only workers (explorer, reviewer, an rca-only debugger) may run only non-mutating git
  *   subcommands, directory listing and file viewing, `rg`/`grep`/`findstr` and exact verification
  *   commands, whatever the sandbox.
  * - Without a full OS sandbox every other worker may run only exact verification commands, the
- *   read-only list and a vetted build/test list. Allowlisted build/test commands still run
- *   repository code; only a full OS sandbox truly confines exec.
+ *   read-only list and a vetted build/test list.
+ * - Verification and build/test commands run repository code the policy-only sandbox cannot
+ *   confine (SEC-N1). Without a full sandbox they need the user to have trusted the workspace; an
+ *   untrusted workspace denies them (`workspace-untrusted`) in autonomous mode and asks in `ask`.
  * - With a full sandbox writers are not narrowed here (the OS backend confines them).
+ * - Only the harness integrates: no worker list contains a git form that writes the repository
+ *   (SEC-N3).
  */
 
-export const EXEC_ALLOWLIST_CODES = ["exec-allowlisted", "exec-not-allowlisted", "exec-unconfined"] as const;
+export const EXEC_ALLOWLIST_CODES = ["exec-allowlisted", "exec-not-allowlisted", "exec-unconfined", WORKSPACE_UNTRUSTED_CODE] as const;
 export type ExecAllowlistCode = (typeof EXEC_ALLOWLIST_CODES)[number];
 
 export interface ExecAllowlistInput {
@@ -27,13 +38,18 @@ export interface ExecAllowlistInput {
   readonly verificationCommands: readonly string[];
   /** Exact (non-wildcard) user allowlist entries for external writes; each is an exact argv the user granted. */
   readonly exactGrants?: readonly string[];
+  /** The user trusted this workspace (user-scope trust store or `--trust-workspace`). */
+  readonly workspaceTrusted?: boolean;
 }
 
 export interface ExecAllowlistDecision {
   readonly decision: "allow" | "ask" | "deny";
   readonly code: ExecAllowlistCode;
-  /** `role` for the read-only list, `sandbox` for the partial-sandbox list (maps to `sandbox_insufficient`). */
-  readonly layer: "role" | "sandbox";
+  /**
+   * `role` for the read-only list, `sandbox` for the partial-sandbox list (maps to
+   * `sandbox_insufficient`), `user` for workspace trust (a user-scope decision).
+   */
+  readonly layer: "role" | "sandbox" | "user";
   readonly message: string;
 }
 
@@ -41,18 +57,28 @@ export interface ExecAllowlistDecision {
 export function evaluateExecAllowlist(input: ExecAllowlistInput): ExecAllowlistDecision | undefined {
   const { argv } = input;
   const layer = input.readOnly ? "role" : "sandbox";
-  if (!input.readOnly && input.confinement === "full-sandbox") return undefined;
   const shown = argv.join(" ").slice(0, 200);
-  if (matchesExactCommand(argv, input.verificationCommands)) {
-    return { decision: "allow", code: "exec-allowlisted", layer, message: `${shown} is an exact verification command` };
-  }
-  if (!input.readOnly && matchesExactCommand(argv, input.exactGrants ?? [])) {
-    return { decision: "allow", code: "exec-allowlisted", layer, message: `${shown} is an exact entry of the user allowlist` };
-  }
+  const integration = gitIntegration(argv);
+  if (integration !== undefined) return { decision: "deny", code: "exec-not-allowlisted", layer: "role", message: `${shown} is refused: ${integration}` };
+  if (!input.readOnly && input.confinement === "full-sandbox") return undefined;
+  const hard = hardRefusal(argv);
+  if (hard !== undefined) return { decision: "deny", code: "exec-not-allowlisted", layer: "role", message: `${shown} is refused: ${hard}` };
   const refusal = unrecognised(argv);
   if (refusal === undefined) {
+    if (!input.readOnly && matchesExactCommand(argv, input.exactGrants ?? [])) {
+      return { decision: "allow", code: "exec-allowlisted", layer, message: `${shown} is an exact entry of the user allowlist` };
+    }
     if (isReadOnlyCommand(argv)) return { decision: "allow", code: "exec-allowlisted", layer, message: `${shown} is on the read-only command list` };
-    if (!input.readOnly && isBuildCommand(argv)) return { decision: "allow", code: "exec-allowlisted", layer, message: `${shown} is on the build/test allowlist` };
+    const isGit = programName(argv[0] ?? "") === "git";
+    const kind = !isGit && matchesExactCommand(argv, input.verificationCommands) ? "an exact verification command" : !input.readOnly && isBuildCommand(argv) ? "on the build/test allowlist" : undefined;
+    if (kind !== undefined) {
+      if (input.confinement === "full-sandbox") return { decision: "allow", code: "exec-allowlisted", layer, message: `${shown} is ${kind}` };
+      if (input.workspaceTrusted === true) {
+        return { decision: "allow", code: "exec-allowlisted", layer, message: `${shown} is ${kind}; the user trusted this workspace, so it runs unconfined with the user's permissions` };
+      }
+      const message = `${shown} is ${kind}, but it runs repository code this sandbox cannot confine and the workspace is not trusted (run syn trust, or pass --trust-workspace for one run)`;
+      return { decision: input.mode === "ask" ? "ask" : "deny", code: WORKSPACE_UNTRUSTED_CODE, layer: "user", message };
+    }
   }
   const why = refusal ?? (input.readOnly ? "it is not on the read-only command list" : "it is not a verification command or on the build/test allowlist");
   if (input.readOnly) {
@@ -73,14 +99,30 @@ function unrecognised(argv: readonly string[]): string | undefined {
   return undefined;
 }
 
+/**
+ * Forms refused in every mode and for every non-full-sandbox worker, whatever list or exact
+ * verification command they would otherwise match.
+ */
+function hardRefusal(argv: readonly string[]): string | undefined {
+  const program = programName(argv[0] ?? "");
+  if (program === "node") return nodeModuleInjection(argv.slice(1));
+  if (program === "git") return gitRefusal(argv.slice(1));
+  return undefined;
+}
+
 const PLAIN_WORD = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
+
+/** A leading `NAME=value` word (a `NODE_OPTIONS=...` style environment injection) in any command of the string. */
+const ASSIGNMENT_PREFIX = /(^|[;&|(\n])\s*[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
  * Every simple command of each verification string, when the string is fully readable: no
- * substitution, no redirection and no pipes. The argv must equal one of them word for word.
+ * substitution, no redirection, no pipes and no environment assignment. The argv must equal one
+ * of them word for word.
  */
 function matchesExactCommand(argv: readonly string[], commands: readonly string[]): boolean {
   return commands.some((command) => {
+    if (ASSIGNMENT_PREFIX.test(command)) return false;
     const parsed = parseShellScript(command, "posix");
     if (parsed.substitution || parsed.redirection) return false;
     return parsed.pipelines.some((pipeline) => {
@@ -112,7 +154,134 @@ export function hasInlineCode(program: string, args: readonly string[]): boolean
   return false;
 }
 
+/**
+ * Node options that load a module, a config or an environment file, open a debugger, or change
+ * what runs before the tests (SEC-N1). They are refused for every node invocation, trusted or not.
+ */
+const NODE_LOADING_OPTIONS = new Set([
+  "--import",
+  "--require",
+  "-r",
+  "--loader",
+  "--experimental-loader",
+  "--env-file",
+  "--env-file-if-exists",
+  "--experimental-config-file",
+  "--experimental-default-config-file",
+  "--test-global-setup",
+  "--inspect",
+  "--inspect-brk",
+  "--inspect-port",
+  "--inspect-wait",
+  "--debug-port",
+  "--openssl-config",
+  "--snapshot-blob",
+  "--build-snapshot",
+  "--build-snapshot-config",
+  "--experimental-sea-config",
+]);
+const BUILTIN_TEST_REPORTERS = new Set(["spec", "tap", "dot", "junit", "lcov"]);
+const REPORTER_STREAMS = new Set(["stdout", "stderr"]);
+
+/** Why a node argv loads code from outside Node itself, or undefined. Only built-in reporters are allowed. */
+function nodeModuleInjection(args: readonly string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index] ?? "";
+    const separator = argument.indexOf("=");
+    const name = (separator === -1 ? argument : argument.slice(0, separator)).toLowerCase();
+    const inline = separator === -1 ? undefined : argument.slice(separator + 1);
+    if (NODE_LOADING_OPTIONS.has(name) || /^-r./.test(argument)) return `node ${name} loads code or configuration from a file`;
+    if (name === "--test-reporter") {
+      const value = inline ?? args[index + 1];
+      if (inline === undefined) index += 1;
+      if (value === undefined || !BUILTIN_TEST_REPORTERS.has(value)) return `node --test-reporter ${value ?? ""} is not a built-in reporter (${[...BUILTIN_TEST_REPORTERS].join(", ")})`.trim();
+      continue;
+    }
+    if (name === "--test-reporter-destination") {
+      const value = inline ?? args[index + 1];
+      if (inline === undefined) index += 1;
+      if (value === undefined || value.startsWith("-") || (!REPORTER_STREAMS.has(value) && !staysInside(value))) return `node --test-reporter-destination ${value ?? ""} points outside the workspace`.trim();
+    }
+  }
+  return undefined;
+}
+
 const READ_ONLY_GIT = new Set(["status", "diff", "log", "show", "blame", "ls-files", "rev-parse"]);
+/**
+ * Git subcommands that change the repository, the index or refs. Only the harness integrates
+ * worker changes (SEC-N3); no worker list or verification command may contain them.
+ */
+const GIT_INTEGRATION_SUBCOMMANDS = new Set([
+  "add",
+  "commit",
+  "stash",
+  "checkout",
+  "reset",
+  "switch",
+  "restore",
+  "rebase",
+  "merge",
+  "tag",
+  "branch",
+  "cherry-pick",
+  "revert",
+  "am",
+  "apply",
+  "mv",
+  "rm",
+  "pull",
+  "clean",
+  "worktree",
+  "update-ref",
+  "update-index",
+  "notes",
+  "replace",
+  "submodule",
+  "config",
+  "gc",
+  "prune",
+  "init",
+  "clone",
+]);
+/** `git branch`, `git tag`, `git stash` forms that only list; they are still not on any list. */
+const GIT_LISTING_FLAGS = new Set(["--list", "-l", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--show-current", "--no-color", "--color"]);
+
+/**
+ * Why a git argv may not run for a worker (SEC-N2, SEC-N3): a writing subcommand, or an argument
+ * that makes git read or write a file outside the workspace (`--no-index`, an order file,
+ * `--contents`, `--output*`, external diff/textconv drivers, or any path resolving outside).
+ */
+function gitRefusal(args: readonly string[]): string | undefined {
+  const integration = gitIntegration(["git", ...args]);
+  if (integration !== undefined) return integration;
+  for (const argument of args) {
+    const lowered = argument.toLowerCase();
+    if (/^--(no-index|orderfile|contents|ext-diff|textconv)(=|$)/.test(lowered) || lowered.startsWith("--output") || /^-O/.test(argument)) {
+      return `git ${argument.split("=")[0] ?? argument} reads or writes files outside the tracked tree`;
+    }
+    const attached = /^-[A-Za-z]./.test(argument) && !argument.startsWith("--") ? argument.slice(2) : undefined;
+    const revisionPath = !argument.startsWith("-") && argument.includes(":") ? argument.slice(argument.indexOf(":") + 1) : undefined;
+    if (!staysInside(argument) || (attached !== undefined && !staysInside(attached)) || (revisionPath !== undefined && !staysInside(revisionPath))) {
+      return `git argument ${argument.slice(0, 200)} names a path outside the workspace`;
+    }
+  }
+  return undefined;
+}
+
+/** A git argv whose subcommand writes the repository, the index or refs (any sandbox, any worker). */
+function gitIntegration(argv: readonly string[]): string | undefined {
+  if (programName(argv[0] ?? "") !== "git") return undefined;
+  const invocation = gitInvocation(argv.slice(1));
+  if (invocation === undefined || !GIT_INTEGRATION_SUBCOMMANDS.has(invocation.sub) || isGitListing(invocation.sub, invocation.rest)) return undefined;
+  return `git ${invocation.sub} changes the repository; only the harness integrates worker changes`;
+}
+
+function isGitListing(sub: string, rest: readonly string[]): boolean {
+  if (sub === "stash") return rest.length === 1 && rest[0] === "list";
+  if (sub === "branch" || sub === "tag") return rest.every((argument) => GIT_LISTING_FLAGS.has(argument));
+  return false;
+}
+
 const VIEWERS = new Set(["ls", "dir", "tree", "cat", "type", "head", "tail", "wc", "stat", "file", "pwd"]);
 const SEARCHERS = new Set(["rg", "grep", "egrep", "fgrep", "findstr"]);
 
@@ -153,11 +322,12 @@ function viewerArgumentInside(program: string, argument: string): boolean {
   return staysInside(argument);
 }
 
-/** `git <read-only sub> ...` with the subcommand first (no `-c`/`-C`/`--git-dir`) and no flag that writes a file. */
+/**
+ * `git <read-only sub> ...` with the subcommand first (no `-c`/`-C`/`--git-dir`). Every argument
+ * already passed `gitRefusal` (no writing subcommand, no out-of-tree file, no outside path).
+ */
 function isReadOnlyGit(args: readonly string[]): boolean {
-  const sub = args[0] ?? "";
-  if (!READ_ONLY_GIT.has(sub)) return false;
-  return !args.slice(1).some((argument) => /^--(output|ext-diff)(=|$)/i.test(argument));
+  return READ_ONLY_GIT.has(args[0] ?? "") && gitRefusal(args) === undefined;
 }
 
 const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
@@ -166,9 +336,7 @@ const FROZEN_INSTALL_FLAGS = new Set(["--frozen-lockfile", "--immutable", "--ign
 const CONFIG_FLAG = /^(-C|--(script-shell|shell-emulator|node-options|userconfig|globalconfig|prefix|dir|config|workspace-root|global)\b)/;
 const SCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9:._-]*$/;
 const TSC_FLAGS = new Set(["--noemit", "-b", "--build", "--pretty", "--incremental", "--verbose"]);
-const GIT_ADD_FLAGS = new Set(["-a", "--all", "-u", "--update", "--"]);
-const GIT_COMMIT_FLAGS = new Set(["-a", "--all", "-q", "--quiet", "--allow-empty", "-s", "--signoff"]);
-const GIT_COMMIT_MESSAGE_FLAGS = new Set(["-m", "--message", "-am"]);
+const NODE_TEST_FLAGS = new Set(["--experimental-strip-types", "--no-warnings", "--experimental-test-coverage"]);
 
 function isBuildCommand(argv: readonly string[]): boolean {
   const program = programName(argv[0] ?? "");
@@ -177,11 +345,9 @@ function isBuildCommand(argv: readonly string[]): boolean {
   if (PACKAGE_MANAGERS.has(program)) return isPackageCommand(program, sub, rest);
   switch (program) {
     case "node":
-      return sub === "--test" && rest.every((argument) => (argument.startsWith("--test-") || argument === "--experimental-strip-types" || argument === "--no-warnings" || argument === "--experimental-test-coverage" || !argument.startsWith("-")) && staysInside(argument));
+      return sub === "--test" && isNodeTestArguments(rest);
     case "tsc":
       return isTscCommand(argv.slice(1));
-    case "git":
-      return isReadOnlyGit(argv.slice(1)) || isGitAdd(sub, rest) || isGitCommit(sub, rest);
     case "dotnet":
       return (sub === "build" || sub === "test") && rest.every(staysInside);
     case "mvn":
@@ -199,6 +365,20 @@ function isBuildCommand(argv: readonly string[]): boolean {
     default:
       return false;
   }
+}
+
+/** `node --test` options: `--test-*` (reporters already restricted by `nodeModuleInjection`), a few flags, test paths. */
+function isNodeTestArguments(args: readonly string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index] ?? "";
+    if ((argument === "--test-reporter" || argument === "--test-reporter-destination") && args[index + 1] !== undefined) {
+      index += 1;
+      continue;
+    }
+    const known = argument.startsWith("--test-") || NODE_TEST_FLAGS.has(argument) || !argument.startsWith("-");
+    if (!known || !staysInside(argument)) return false;
+  }
+  return true;
 }
 
 function isPackageCommand(program: string, sub: string, rest: readonly string[]): boolean {
@@ -235,28 +415,8 @@ function isTscCommand(args: readonly string[]): boolean {
   return true;
 }
 
-function isGitAdd(sub: string, rest: readonly string[]): boolean {
-  if (sub !== "add") return false;
-  return rest.every((argument) => (argument.startsWith("-") ? GIT_ADD_FLAGS.has(argument.toLowerCase()) : staysInside(argument)));
-}
-
-function isGitCommit(sub: string, rest: readonly string[]): boolean {
-  if (sub !== "commit") return false;
-  for (let index = 0; index < rest.length; index += 1) {
-    const argument = rest[index] ?? "";
-    if (GIT_COMMIT_MESSAGE_FLAGS.has(argument)) {
-      if (rest[index + 1] === undefined) return false;
-      index += 1;
-      continue;
-    }
-    if (argument.startsWith("--message=")) continue;
-    if (!GIT_COMMIT_FLAGS.has(argument)) return false;
-  }
-  return true;
-}
-
 /**
- * An argument (or the value of `--flag=value`) that names a place outside the workspace: an
+ * False when an argument (or the value of `--flag=value`) names a place outside the workspace: an
  * absolute, drive, UNC or home-relative path, or one with a `..` segment.
  */
 function staysInside(argument: string): boolean {

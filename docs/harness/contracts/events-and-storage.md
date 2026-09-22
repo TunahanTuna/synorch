@@ -40,7 +40,7 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | `session/closed` | `reason` | Hayır | cli |
 | `run/created` | `goal`, `policy_mode`, `headless`, `budget` | Hedef metni evet | orchestration |
 | `run/state_changed` | `from`, `to`, `reason` | Hayır | orchestration |
-| `policy/snapshot` (v2) | `policy` (EffectivePolicy; v2: `policy.exec_confinement?`, `policy.verification_commands?`), `digest` | Hayır | policy |
+| `policy/snapshot` (v3) | `policy` (EffectivePolicy; v2: `policy.exec_confinement?`, `policy.verification_commands?`; v3: `policy.workspace_trusted?`), `digest` | Hayır | policy |
 | `route/decided` | `decision` (RouteDecision) | Hayır | providers |
 | `plan/proposed` | `plan`, `digest` | Seçilmiş projection | orchestration |
 | `plan/state_changed` | `plan_id`, `digest`, `from`, `to`, `reason`, `approval_id?` | Hayır | orchestration |
@@ -74,6 +74,9 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | `memory/proposal_decided` | `proposal_id`, `state`, `decided_by`, `reason` | Hayır | memory |
 | `budget/exceeded` | `scope`, `metric`, `limit`, `used`, `action` | Hayır | orchestration |
 | `steer/queued` | `text` | Sonraki step'te | core |
+| `trust/granted` | `workspace_root` (kanonik kök), `repo_identity` (`git:`/`dir:` + 64 hex), `source` (`prompt`\|`command`) | Hayır | cli (`syn trust decisions` oturumu) |
+| `trust/revoked` | `workspace_root`, `repo_identity` | Hayır | cli (`syn trust decisions` oturumu) |
+| `trust/used` | `workspace_root`, `repo_identity`, `source` (`store`\|`flag`), `sandbox_enforcement` | Hayır | orchestration (run günlüğü) |
 
 Eşleşme invariant'ları: her `tool/call_proposed` bir `tool/result_recorded` veya `tool/interrupted` ile; her `approval/requested` bir `approval/decided` ile; her `step/started` bir `step/ended` ile kapanır. Kapanmamış olanlar recovery'de [identity-and-state.md](./identity-and-state.md#3-crash-recovery-eşlemesi) tablosuyla kapatılır. Kayıtlı assistant mesajındaki her `tool_call` parçası runtime `tool_call_id` taşır.
 
@@ -81,7 +84,7 @@ Eşleşme invariant'ları: her `tool/call_proposed` bir `tool/result_recorded` v
 
 `parseSessionEvent(raw)` üç sonuç verir: `ok`, `unsupported` (bilinmeyen `type` veya bilinen tipte daha yüksek `event_version`), `invalid` (bilinen tip şemaya uymuyor = bozulma). `unsupported` sessizce atlanmaz; projection "bu session daha yeni bir sürümle yazılmış" hatası verir ve yazma için açmaz. Payload değişikliği: alan eklemek bile `event_version` artırır; okuyucu eski sürümleri desteklemeye devam eder; eski log hiçbir zaman yeniden yazılmaz.
 
-Sürümlü alanlar `EVENT_FIELD_VERSIONS` tablosundadır (tip → alan → alanı getiren sürüm); `EVENT_VERSIONS[type]` bu tablodaki en yüksek sürümdür ve yazıcılar her zaman onu damgalar. Yeni alanlar şemada opsiyoneldir, böylece eski sürüm olaylar aynı şemayla okunur; daha eski sürümle damgalanmış ama yeni alanı taşıyan olay `invalid`'dir (o sürüm yazamazdı). Dalga 2a: `session/resumed` v2 (`torn_tail`), `attempt/started` v2 (`session_id`), `tool/policy_decided` v2 (`action.escapes`); `task/integrated` yeni tip (v1) — onu tanımayan eski okuyucu `unsupported` raporlar. Güvenlik düzeltmesi: `session/opened` v2 (`config_ignored`). Exec kısıtı: `policy/snapshot` v2 (`policy.exec_confinement`, `policy.verification_commands`).
+Sürümlü alanlar `EVENT_FIELD_VERSIONS` tablosundadır (tip → alan → alanı getiren sürüm); `EVENT_VERSIONS[type]` bu tablodaki en yüksek sürümdür ve yazıcılar her zaman onu damgalar. Yeni alanlar şemada opsiyoneldir, böylece eski sürüm olaylar aynı şemayla okunur; daha eski sürümle damgalanmış ama yeni alanı taşıyan olay `invalid`'dir (o sürüm yazamazdı). Dalga 2a: `session/resumed` v2 (`torn_tail`), `attempt/started` v2 (`session_id`), `tool/policy_decided` v2 (`action.escapes`); `task/integrated` yeni tip (v1) — onu tanımayan eski okuyucu `unsupported` raporlar. Güvenlik düzeltmesi: `session/opened` v2 (`config_ignored`). Exec kısıtı: `policy/snapshot` v2 (`policy.exec_confinement`, `policy.verification_commands`). Çalışma alanı güveni (SEC-N1): `policy/snapshot` v3 (`policy.workspace_trusted`); `trust/granted`, `trust/revoked`, `trust/used` yeni tipler (v1). Güven kararları (`syn trust`, etkileşimli tek seferlik soru) projenin `syn trust decisions` oturumuna, güvene dayanan run'ın `trust/used` olayı run günlüğüne yazılır.
 
 ## 5. Disk yerleşimi
 
@@ -343,6 +346,43 @@ Dalga 2a sürümlü olaylar (v2 alanları ve yeni `task/integrated`):
       policy_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       reasons: [{ code: path-escape, layer: platform, message: "../outside/secret.txt cannot be expressed inside the workspace (outside-workspace)" }]
       rail: write-outside-scope
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V5
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T7
+  seq: 2
+  event_version: 1
+  timestamp: "2026-09-23T09:00:00.000Z"
+  actor: { kind: user }
+  type: trust/granted
+  data:
+    workspace_root: /home/dev/synorch
+    repo_identity: "git:5f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275"
+    source: command
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V6
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 4
+  event_version: 1
+  timestamp: "2026-09-23T09:05:00.000Z"
+  actor: { kind: system }
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  type: trust/used
+  data:
+    workspace_root: /home/dev/synorch
+    repo_identity: "git:5f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275"
+    source: store
+    sandbox_enforcement: partial
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V7
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T7
+  seq: 3
+  event_version: 1
+  timestamp: "2026-09-24T09:00:00.000Z"
+  actor: { kind: user }
+  type: trust/revoked
+  data:
+    workspace_root: /home/dev/synorch
+    repo_identity: "git:5f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275"
 ```
 
 Reddedilmesi gerekenler: `seq: 0`, runtime kimliği olmayan kayıtlı tool call, strict payload'a fazladan alan (yetki alanı sızdırma denemesi), v2 alanı taşıyan v1 olay:
@@ -397,7 +437,21 @@ Reddedilmesi gerekenler: `seq: 0`, runtime kimliği olmayan kayıtlı tool call,
     previous_last_seq: 4
     recovered: []
     torn_tail: { segment: 1, bytes: 12 }
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V8
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T7
+  seq: 4
+  event_version: 1
+  timestamp: "2026-09-23T09:00:00.000Z"
+  actor: { kind: user }
+  type: trust/granted
+  data:
+    workspace_root: /home/dev/synorch
+    repo_identity: "git:5f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275"
+    source: repository
 ```
+
+Son örnek: güveni yalnız kullanıcı verir (`prompt` veya `command`); depo içeriği bir güven kaynağı değildir (SEC-N1).
 
 Okuyucunun `unsupported` raporlaması gerekenler (bilinmeyen tip, daha yeni payload sürümü):
 

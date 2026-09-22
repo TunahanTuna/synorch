@@ -19,6 +19,7 @@ import {
   readSession,
   taskReport,
   text,
+  trustWorkspace,
   writeConfig,
 } from "./fixtures/cli/runtime/support.ts";
 
@@ -60,6 +61,7 @@ async function waitFor(read: () => string, pattern: RegExp, timeoutMs = 15_000):
 
 test("steering typed during a run is applied at a safe boundary through a re-versioned plan", async () => {
   const sandbox = await createSandbox({ "docs/a.md": "a\n", "docs/b.md": "b\n", "README.md": "# steer\n" });
+  await trustWorkspace(sandbox);
   try {
     await writeConfig(sandbox.home, [
       { tier: "orchestrator", adapter: "plan-script", model: "planner" },

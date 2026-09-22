@@ -86,6 +86,12 @@ export const effectivePolicySchema = z
     exec_confinement: z.enum(EXEC_CONFINEMENTS).optional(),
     /** Exact commands of the task's verification section; absent means `[]` (v2). */
     verification_commands: z.array(z.string().min(1).max(2000)).max(64).optional(),
+    /**
+     * Whether the user trusted this workspace (user-scope `trust.json` or `--trust-workspace`);
+     * absent means untrusted (v3). Without a full sandbox, commands that run repository code
+     * (verification and build/test commands) need it.
+     */
+    workspace_trusted: z.boolean().optional(),
     layers: z
       .array(z.strictObject({ layer: z.enum(POLICY_LAYERS), source: z.string().min(1), digest: digestSchema }))
       .min(1),
@@ -209,9 +215,12 @@ export const policyDecisionSchema = z
   });
 export type PolicyDecision = z.infer<typeof policyDecisionSchema>;
 
-export const APPROVAL_SUBJECTS = ["plan", "action", "scope-expansion", "provider-change", "budget", "memory"] as const;
-/** Subjects only a human may approve: a paid provider switch or a budget increase is never orchestrator-granted. */
-export const HUMAN_ONLY_APPROVAL_SUBJECTS = ["provider-change", "budget"] as const;
+export const APPROVAL_SUBJECTS = ["plan", "action", "scope-expansion", "provider-change", "budget", "memory", "workspace-trust"] as const;
+/**
+ * Subjects only a human may approve: a paid provider switch, a budget increase and trusting a
+ * workspace's code are never orchestrator-granted.
+ */
+export const HUMAN_ONLY_APPROVAL_SUBJECTS = ["provider-change", "budget", "workspace-trust"] as const;
 
 export const approvalRequestSchema = z.strictObject({
   approval_id: approvalIdSchema,
@@ -286,6 +295,36 @@ export interface PolicyInputs {
   readonly sandbox: SandboxReport;
   readonly grants: readonly ApprovalDecision[];
 }
+
+/**
+ * Workspace trust (SEC-N1). Without a full OS sandbox the harness cannot confine code a build or
+ * test command runs, so such commands need the user to trust the workspace once. Trust lives only
+ * in the user scope (`<synorch home>/trust.json`), keyed by the canonical workspace root and a
+ * repository identity; nothing in the repository can grant it. `flag` is `--trust-workspace`,
+ * valid for one run and never persisted.
+ */
+export const TRUST_GRANT_SOURCES = ["prompt", "command"] as const;
+export type TrustGrantSource = (typeof TRUST_GRANT_SOURCES)[number];
+export const TRUST_USE_SOURCES = ["store", "flag"] as const;
+export type TrustUseSource = (typeof TRUST_USE_SOURCES)[number];
+
+export interface WorkspaceTrustState {
+  readonly trusted: boolean;
+  /** Where the trust came from, when trusted. */
+  readonly source: TrustUseSource | undefined;
+  /** Canonical workspace root the record is keyed by. */
+  readonly root: string;
+  /** Repository identity (`git:<hex>` or `dir:<hex>`). */
+  readonly identity: string;
+  /** Why the workspace is not trusted, when it is not. */
+  readonly reason: string | undefined;
+}
+
+/** The policy reason code for a code-executing command in an untrusted workspace. */
+export const WORKSPACE_UNTRUSTED_CODE = "workspace-untrusted";
+
+export const WORKSPACE_TRUST_NOTICE =
+  "This workspace's tests and build scripts will run with your user permissions; Synorch cannot confine them on this platform.";
 
 export interface PolicyEngine {
   compute(inputs: PolicyInputs): EffectivePolicy;

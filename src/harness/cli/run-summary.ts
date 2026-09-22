@@ -112,6 +112,8 @@ export function outcomeError(outcome: RunOutcome): HarnessErrorInfo {
     ids: { run_id: outcome.runId, session_id: outcome.sessionId },
     workspace_effect: code === "approval_rejected" || code === "approval_unavailable" || code === "config_invalid" ? "none" : "unknown",
     retry_safe: code !== "internal",
-    ...(code === "approval_unavailable" ? { next_command: "syn agent --policy ask (an interactive terminal can answer approvals)" } : {}),
+    ...(code === "approval_unavailable"
+      ? { next_command: /workspace trust/.test(outcome.summary) ? "syn trust (or syn run --trust-workspace for one run)" : "syn agent --policy ask (an interactive terminal can answer approvals)" }
+      : {}),
   };
 }

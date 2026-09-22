@@ -35,6 +35,8 @@ import {
   normalizedActionSchema,
   policyDecisionSchema,
   policyModeSchema,
+  TRUST_GRANT_SOURCES,
+  TRUST_USE_SOURCES,
 } from "./policy.ts";
 import {
   ATTEMPT_STATES,
@@ -50,6 +52,10 @@ import { SANDBOX_ENFORCEMENT, toolResultSchema } from "./tools.ts";
  * the order. Payloads are discriminated by `type`; `event_version` versions each payload
  * independently so one family can evolve without a log-wide migration.
  */
+
+/** Repository identity of a trusted workspace (SEC-N1): `git:` or `dir:` and a SHA-256 hex digest. */
+const trustIdentitySchema = z.string().regex(/^(git|dir):[0-9a-f]{64}$/);
+const trustRootSchema = z.string().min(1).max(4096);
 
 const envelopeBaseSchema = z.strictObject({
   schema_version: z.literal(HARNESS_SCHEMA_VERSION),
@@ -351,6 +357,17 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
     }),
   ),
   eventOf("steer/queued", z.strictObject({ text: nonEmptyTextSchema })),
+  eventOf("trust/granted", z.strictObject({ workspace_root: trustRootSchema, repo_identity: trustIdentitySchema, source: z.enum(TRUST_GRANT_SOURCES) })),
+  eventOf("trust/revoked", z.strictObject({ workspace_root: trustRootSchema, repo_identity: trustIdentitySchema })),
+  eventOf(
+    "trust/used",
+    z.strictObject({
+      workspace_root: trustRootSchema,
+      repo_identity: trustIdentitySchema,
+      source: z.enum(TRUST_USE_SOURCES),
+      sandbox_enforcement: z.enum(SANDBOX_ENFORCEMENT),
+    }),
+  ),
 ]);
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
 export type SessionEventType = SessionEvent["type"];
@@ -366,7 +383,7 @@ export const EVENT_FIELD_VERSIONS = {
   "session/resumed": { torn_tail: 2 },
   "attempt/started": { session_id: 2 },
   "tool/policy_decided": { "action.escapes": 2 },
-  "policy/snapshot": { "policy.exec_confinement": 2, "policy.verification_commands": 2 },
+  "policy/snapshot": { "policy.exec_confinement": 2, "policy.verification_commands": 2, "policy.workspace_trusted": 3 },
 } as const satisfies { readonly [T in SessionEventType]?: Readonly<Record<string, number>> };
 
 /** Current payload version per type. A reader meeting a higher version reports `unsupported`. */

@@ -10,7 +10,8 @@ import { createToolRegistry } from "../src/harness/tools/index.ts";
 import { createGatewayHarness, type GatewayHarness } from "../src/harness/tools/testing.ts";
 import { planLaunch, quoteCmdArgument, UnsafeLaunchError } from "../src/harness/tools/windows-launch.ts";
 
-const engine = createPolicyEngine();
+// SEC-N1: without a full sandbox, verification and build/test commands run only in a trusted workspace.
+const engine = createPolicyEngine({ workspaceTrusted: () => true });
 const WINDOWS = process.platform === "win32";
 const windowsOnly = { skip: WINDOWS ? false : "Windows command shims only exist on Windows" };
 const PARTIAL: SandboxReport = {

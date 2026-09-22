@@ -10,7 +10,9 @@ import {
   type AuthStatus,
   type ModelRequest,
   type SandboxReport,
+  type WorkspaceTrustState,
 } from "../contracts/index.ts";
+import { createWorkspaceTrustStore } from "../policy/index.ts";
 import { createAuthProviders, createCredentialStore, ProfileStateStore, type SynorchCredentialStore } from "../auth/index.ts";
 import { pruneOrphanedAttempts } from "../orchestration/index.ts";
 import { createSessionStore } from "../store/index.ts";
@@ -30,7 +32,7 @@ import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts
 export type CheckStatus = "ok" | "warn" | "fail";
 
 export interface DoctorCheck {
-  readonly id: "node" | "terminal" | "config" | "canonical" | "sandbox" | "store" | "auth" | "capabilities" | "probe-model";
+  readonly id: "node" | "terminal" | "config" | "canonical" | "sandbox" | "trust" | "store" | "auth" | "capabilities" | "probe-model";
   readonly status: CheckStatus;
   readonly summary: string;
   readonly details: readonly unknown[];
@@ -120,6 +122,23 @@ function execConfinementLine(report: SandboxReport): string {
   const autonomous = execConfinementFor(report.enforcement, "autonomous");
   if (autonomous === "full-sandbox") return "exec confinement: full-sandbox";
   return `exec confinement: ${autonomous} in autonomous mode (verification commands and vetted build/test commands only), ${execConfinementFor(report.enforcement, "ask")} for anything else in ask mode`;
+}
+
+/** Workspace trust (SEC-N1): whether verification and build/test commands may run without a full sandbox. */
+function trustCheck(state: WorkspaceTrustState, file: string, report: SandboxReport): DoctorCheck {
+  const details = [{ workspace_root: state.root, repo_identity: state.identity, trusted: state.trusted, source: state.source ?? null, reason: state.reason ?? null, trust_file: file }];
+  if (report.enforcement === "full") {
+    return { id: "trust", status: "ok", summary: `not needed: the full sandbox confines build/test commands (workspace ${state.trusted ? "trusted" : "not trusted"})`, details };
+  }
+  if (state.trusted) {
+    return { id: "trust", status: "ok", summary: `workspace trusted (${state.source ?? "store"}): verification and build/test commands run unconfined with your user permissions`, details };
+  }
+  return {
+    id: "trust",
+    status: "warn",
+    summary: `workspace not trusted (${state.reason ?? "no record"}): verification and build/test commands are refused in autonomous mode and asked for in ask mode; run syn trust`,
+    details,
+  };
 }
 
 async function storeCheck(home: string, projectId: string, workspaceRoot: string): Promise<DoctorCheck> {
@@ -270,7 +289,10 @@ export async function doctorRuntime(io: DoctorIO, target: string | undefined, pr
   } catch (error) {
     checks.push({ id: "config", status: "fail", summary: failureInfo(error).message, details: [] });
   }
-  checks.push(sandboxCheck(runtime?.sandbox ?? overrides.sandbox ?? (await probeSandbox({ platform: io.platform }))));
+  const sandbox = runtime?.sandbox ?? overrides.sandbox ?? (await probeSandbox({ platform: io.platform }));
+  checks.push(sandboxCheck(sandbox));
+  const trustStore = createWorkspaceTrustStore(home, { platform: io.platform });
+  checks.push(trustCheck(runtime?.trust.state() ?? trustStore.status(workspaceRoot), trustStore.file, sandbox));
   checks.push(await storeCheck(home, runtime?.projectId ?? deriveProjectId(workspaceRoot, io.platform), workspaceRoot));
   checks.push(await authCheck(home, io, overrides, controller.signal));
   if (runtime !== undefined) checks.push(await capabilitiesCheck(runtime, controller.signal));

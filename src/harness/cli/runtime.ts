@@ -31,6 +31,8 @@ import {
   type SessionId,
   type SessionStore,
   type ToolRegistry,
+  type TrustGrantSource,
+  type WorkspaceTrustState,
 } from "../contracts/index.ts";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import {
@@ -55,7 +57,7 @@ import {
   type BudgetGateSlot,
   type CoordinatorLimits,
 } from "../orchestration/index.ts";
-import { classifyCommand, createHeadlessApprovalBroker, createPolicyEngine } from "../policy/index.ts";
+import { classifyCommand, createHeadlessApprovalBroker, createPolicyEngine, createWorkspaceTrustStore } from "../policy/index.ts";
 import {
   createAnthropicMessagesAdapter,
   createClaudeCodeAdapter,
@@ -72,6 +74,7 @@ import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts"
 import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
 import { withRoleDefinitions } from "./role-policy.ts";
 import { loadScript } from "./scripted-script.ts";
+import { recordTrustDecision } from "./trust.ts";
 
 /**
  * The composition root (ADR-01): the only place that wires the real implementations of every
@@ -102,9 +105,19 @@ export interface RuntimeOptions {
   readonly policyMode: PolicyMode;
   readonly routes?: readonly RouteOverride[];
   readonly overrides?: RuntimeOverrides;
+  /** `--trust-workspace`: trust the workspace for this runtime only; never persisted (SEC-N1). */
+  readonly trustWorkspace?: boolean;
 }
 
 export type RuntimeListener = (event: RenderEvent) => void;
+
+/** The session workspace's trust (SEC-N1): read from the user-scope store at start, or the one-run flag. */
+export interface RuntimeTrust {
+  readonly file: string;
+  state(): WorkspaceTrustState;
+  /** Persists trust for this workspace in the user scope, records `trust/granted`, and applies it to policies computed from now on. */
+  grant(source: TrustGrantSource): Promise<WorkspaceTrustState>;
+}
 
 /** Asks the human attached to the session a question (the `ask_user` tool); resolves with the answer. */
 export type UserPrompt = (question: string, options: readonly string[] | undefined, signal: AbortSignal) => Promise<string>;
@@ -125,6 +138,7 @@ export interface Runtime {
   readonly policy: PolicyEngine;
   readonly registry: ToolRegistry;
   readonly sandbox: SandboxReport;
+  readonly trust: RuntimeTrust;
   readonly memory: MemoryStore;
   readonly memoryRoot: string;
   readonly gitBranch: string | undefined;
@@ -399,7 +413,22 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   };
 
   const canonical = await loadCanonicalStructure(workspaceRoot);
-  const policy = withRoleDefinitions(createPolicyEngine({ synorchHome: home }), canonical.roles);
+  const trustStore = createWorkspaceTrustStore(home, { platform });
+  const stored = trustStore.status(workspaceRoot);
+  let trustState: WorkspaceTrustState = !stored.trusted && options.trustWorkspace === true ? { ...stored, trusted: true, source: "flag", reason: undefined } : stored;
+  const trust: RuntimeTrust = {
+    file: trustStore.file,
+    state: () => trustState,
+    async grant(source) {
+      const granted = await trustStore.grant(workspaceRoot, source);
+      if (granted.trusted) {
+        trustState = granted;
+        await recordTrustDecision(home, workspaceRoot, platform, "trust/granted", granted, source);
+      }
+      return granted;
+    },
+  };
+  const policy = withRoleDefinitions(createPolicyEngine({ synorchHome: home, workspaceTrusted: () => trustState.trusted }), canonical.roles);
   const sandbox = overrides.sandbox ?? (await probeSandbox({ platform }));
   const runner = createSandboxRunner(sandbox);
   const userConfig = config.userPolicy === undefined ? undefined : { policy: config.userPolicy };
@@ -503,6 +532,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     policy,
     registry,
     sandbox,
+    trust,
     memory,
     memoryRoot,
     gitBranch,
@@ -553,6 +583,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         userConfig,
         workspaceConfig,
         platform,
+        workspaceTrust: () => trustState,
         ...(overrides.limits === undefined ? {} : { limits: overrides.limits }),
       });
     },

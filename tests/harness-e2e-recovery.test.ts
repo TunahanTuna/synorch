@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { jsonlFrameSchema, splitJsonlLines, type JsonlFrame, type SessionEvent } from "../src/harness/contracts/index.ts";
 import { runHarnessCommand } from "../src/harness/cli/index.ts";
-import { capture, createSandbox, eventsOf, FakeInput, overridesFor, planArguments, readSession } from "./fixtures/cli/runtime/support.ts";
+import { capture, createSandbox, eventsOf, FakeInput, overridesFor, planArguments, readSession, trustWorkspace } from "./fixtures/cli/runtime/support.ts";
 
 /**
  * Verification level 3, "crash after the tool ran, before its result was recorded" (Faz 1 gate,
@@ -43,6 +43,7 @@ async function until(predicate: () => boolean, timeoutMs: number): Promise<void>
 
 test("crash after tool/execution_started: resume records tool/interrupted and never re-runs the call", { timeout: 90_000 }, async () => {
   const sandbox = await createSandbox({ "hang.mjs": HANG, "README.md": "# crash\n" });
+  await trustWorkspace(sandbox);
   let orphan: number | undefined;
   try {
     const plannerScript = path.join(sandbox.home, "planner.json");

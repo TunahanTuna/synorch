@@ -11,7 +11,7 @@
 | Komut | Davranış | Sahip |
 | --- | --- | --- |
 | `syn agent [--resume <ses>] [--fork <ses>[@seq]]` | Etkileşimli oturum | I5 |
-| `syn run "<hedef>" [--mode jsonl \| --json] [--stream-deltas]` | Tek hedef; TTY'de etkileşimli akış, aksi halde plain/JSONL | I5 |
+| `syn run "<hedef>" [--mode jsonl \| --json] [--stream-deltas] [--trust-workspace]` | Tek hedef; TTY'de etkileşimli akış, aksi halde plain/JSONL. `--trust-workspace` çalışma alanına yalnız bu run için güvenir (kalıcı değil, `trust/used source: flag`) | I5 |
 | `syn runs [--json]` | Bu proje için oturum/run listesi | I5 |
 | `syn show <run\|ses> [--json]` | Plan, task, attempt, onay, kanıt, maliyet, route | I5 |
 | `syn doctor --runtime [--probe-model] [--json]` | Node/terminal, sandbox, store, auth, capability; ücretli istek yalnız `--probe-model` ile | I5 (+ I1/I2/I3 probe'ları) |
@@ -19,6 +19,9 @@
 | `syn logout <provider> [--profile <p>]` | Credential silme | I2 |
 | `syn auth status [--json]` | `AuthStatus` listesi, secret'sız | I2 |
 | `syn memory status\|search\|show\|related\|review\|accept\|reject\|open\|reindex` | Hafıza | I6 |
+| `syn trust [--target <path>]`, `syn trust --revoke [--target <path>]` | Çalışma alanı güveni (SEC-N1): kaydı yalnız kullanıcı kapsamında `<synorch home>/trust.json`'a yazar/siler; `trust/granted`/`trust/revoked` projenin `syn trust decisions` oturumuna eklenir. Home çalışma alanının içindeyse exit 2 (`config_invalid`) | I5 |
+
+Çalışma alanı güveni: sandbox `full` değilken doğrulama ve build/test komutları depo kodunu kullanıcının izinleriyle çalıştırır ve yalnız güvenilen çalışma alanında çalışır ([policy ve onay §4](./policy-and-approval.md#4-effectivepolicy-alanları)). Etkileşimli bir oturum (`syn run`/`syn agent`, TTY) güvenilmeyen çalışma alanında ilk run'dan önce renderer'ın onay arayüzünden bir kez sorar (`subject_kind: workspace-trust`, "This workspace's tests and build scripts will run with your user permissions; Synorch cannot confine them on this platform"); `y` kalıcı güven verir, başka cevap güvensiz devam eder. Headless bir run'ın planı doğrulama komutu içeriyor ve güven yoksa hiçbir işçi başlamadan `approval_unavailable` (exit 3, `next_command: syn trust (or syn run --trust-workspace for one run)`) ile biter. `doctor --runtime` güven durumunu `trust` kontrolünde gösterir.
 
 Ortak bayraklar: `--target <path>`, `--policy autonomous|ask` (varsayılan `autonomous`), `--plain`, `--color always|never|auto`, `--profile <tier=route>` (yalnız oturum için, kalıcı yazılmaz).
 

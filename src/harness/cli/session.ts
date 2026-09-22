@@ -19,6 +19,7 @@ import { profileHintsFor } from "./canonical.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides, type UserPrompt } from "./runtime.ts";
 import { handleSlashCommand } from "./slash-commands.ts";
 import { resolveTerminalSettings, streamHasColors } from "./terminal.ts";
+import { promptWorkspaceTrust } from "./trust.ts";
 
 /**
  * `syn run` and `syn agent`: one coordinator run per goal (plan -> autonomous or asked approval ->
@@ -167,7 +168,14 @@ async function openSession(
   let runtime: Runtime | undefined;
   let failure: HarnessErrorInfo | undefined;
   try {
-    runtime = await createRuntime({ workspaceRoot, env: io.env, policyMode: parsed.session.policy, routes: parsed.session.profiles, overrides });
+    runtime = await createRuntime({
+      workspaceRoot,
+      env: io.env,
+      policyMode: parsed.session.policy,
+      routes: parsed.session.profiles,
+      overrides,
+      trustWorkspace: parsed.kind === "run" && parsed.trustWorkspace,
+    });
     requireOrchestratorRoute(runtime);
   } catch (error) {
     failure = failureInfo(error);
@@ -233,6 +241,7 @@ export async function runCommand(parsed: RunCommand, io: SessionIO, overrides: R
     await renderer.start(headerFor(runtime));
     const goal = parsed.goalFromStdin && io.stdin !== undefined ? (await readAll(io.stdin)).trim() : parsed.goal;
     if (goal === "") return await reportError(renderer, io, { code: "usage_invalid", message: "the goal read from stdin is empty", workspace_effect: "none", retry_safe: true });
+    await promptWorkspaceTrust(runtime, renderer, controller.signal);
     const outcome = await coordinator.run(
       {
         goal,
@@ -329,6 +338,7 @@ export async function agentCommand(parsed: AgentCommand, io: SessionIO, override
     for (const line of lines) renderer.render({ kind: "notice", level, message: line });
   };
   let exitCode: number = EXIT_CODES.success;
+  let trustAsked = false;
   try {
     let sessionId: SessionId | undefined;
     const notices: string[] = [];
@@ -371,6 +381,10 @@ export async function agentCommand(parsed: AgentCommand, io: SessionIO, override
         if (handled.exit) break;
         notify(handled.lines);
         continue;
+      }
+      if (!trustAsked) {
+        trustAsked = true;
+        await promptWorkspaceTrust(runtime, renderer, outer.signal);
       }
       active = linked(outer.signal);
       const running = active;

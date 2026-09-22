@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
@@ -16,8 +16,18 @@ import {
 } from "../src/harness/tools/index.ts";
 import { createGatewayHarness, replayToolCallTransitions, type GatewayHarness } from "../src/harness/tools/testing.ts";
 
-const engine = createPolicyEngine();
+// SEC-N1: without a full sandbox, verification commands run only in a trusted workspace; these
+// tests exercise exec itself, so the workspace is trusted. SEC-N5: inline code and non-literal
+// program paths are refused before the exact match, so each test runs `node <script file>`.
+const engine = createPolicyEngine({ workspaceTrusted: () => true });
 const NODE = process.execPath;
+
+/** Writes a script into the workspace and returns the plain `node <absolute script>` argv that runs it. */
+async function nodeScript(root: string, name: string, source: string): Promise<string[]> {
+  const file = path.join(root, name);
+  await writeFile(file, source);
+  return ["node", file];
+}
 const SPAWN_TREE = fileURLToPath(new URL("./fixtures/sandbox/spawn-tree.mjs", import.meta.url));
 const PARTIAL: SandboxReport = {
   backend: "policy-only",
@@ -92,9 +102,9 @@ async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs: number
 test("AC-8: cancelling exec terminates the whole child tree and yields cancelled", async (t) => {
   const root = await workspace(t);
   const pidFile = path.join(root, "src", "auth", "pids.json");
-  const harness = harnessFor(root, process.env, [[NODE, SPAWN_TREE, pidFile]]);
+  const harness = harnessFor(root, process.env, [["node", SPAWN_TREE, pidFile]]);
   const controller = new AbortController();
-  const pending = harness.call("exec", { argv: [NODE, SPAWN_TREE, pidFile] }, controller.signal);
+  const pending = harness.call("exec", { argv: ["node", SPAWN_TREE, pidFile] }, controller.signal);
   const pids = await waitFor(async () => {
     try {
       return JSON.parse(await readFile(pidFile, "utf8")) as { child: number; grandchild: number };
@@ -114,7 +124,7 @@ test("AC-8: cancelling exec terminates the whole child tree and yields cancelled
 
 test("exec timeout terminates the process tree and reports timeout", async (t) => {
   const root = await workspace(t);
-  const argv = [NODE, "-e", "setInterval(() => {}, 1000)"];
+  const argv = await nodeScript(root, "hang.mjs", "setInterval(() => {}, 1000);\n");
   const harness = harnessFor(root, process.env, [argv]);
   const outcome = await harness.call("exec", { argv, timeout_ms: 300 });
   assert.equal(outcome.state, "failed");
@@ -123,7 +133,7 @@ test("exec timeout terminates the process tree and reports timeout", async (t) =
 
 test("exec runs argv without a shell, reports the exit code and keeps shell metacharacters literal", async (t) => {
   const root = await workspace(t);
-  const argv = [NODE, "-e", "console.log(process.argv.slice(1).join('|')); process.exit(3)", "a && b", "$(whoami)", "> out.txt"];
+  const argv = [...(await nodeScript(root, "echo-args.mjs", "console.log(process.argv.slice(2).join('|')); process.exit(3);\n")), "a && b", "$(whoami)", "> out.txt"];
   const harness = harnessFor(root, process.env, [argv, ["definitely-not-a-real-program-xyz"]]);
   const outcome = await harness.call("exec", { argv });
   assert.equal(outcome.state, "succeeded", JSON.stringify(outcome.result));
@@ -137,7 +147,7 @@ test("exec runs argv without a shell, reports the exit code and keeps shell meta
 test("exec passes only allowlisted parent variables plus permitted model variables", async (t) => {
   const root = await workspace(t);
   const parent = { ...process.env, OPENAI_API_KEY: "sk-parent-secret-should-not-leak", SYNORCH_TEST_SECRET: "hidden" };
-  const argv = [NODE, "-e", "console.log(JSON.stringify({o: process.env.OPENAI_API_KEY ?? null, s: process.env.SYNORCH_TEST_SECRET ?? null, m: process.env.MY_FLAG ?? null, p: Boolean(process.env.PATH || process.env.Path)}))"];
+  const argv = await nodeScript(root, "env.mjs", "console.log(JSON.stringify({o: process.env.OPENAI_API_KEY ?? null, s: process.env.SYNORCH_TEST_SECRET ?? null, m: process.env.MY_FLAG ?? null, p: Boolean(process.env.PATH || process.env.Path)}));\n");
   const harness = harnessFor(root, parent, [argv]);
   const outcome = await harness.call("exec", {
     argv,
@@ -147,7 +157,7 @@ test("exec passes only allowlisted parent variables plus permitted model variabl
   assert.match(outcome.result.text, /\{"o":null,"s":null,"m":"on","p":true\}/);
 
   for (const env of [{ PATH: "/evil" }, { NODE_OPTIONS: "--require evil.js" }, { LD_PRELOAD: "evil.so" }, { ANTHROPIC_API_KEY: "x" }, { "BAD NAME": "x" }]) {
-    const refused = await harness.call("exec", { argv: [NODE, "-e", "0"], env });
+    const refused = await harness.call("exec", { argv, env });
     assert.equal(refused.result.error?.code, "invalid_arguments", JSON.stringify(env));
   }
   const environment = childEnvironment({ PATH: "/bin", HOME: "/home/u", GITHUB_TOKEN: "ghp_x" }, { EXTRA: "1", PATH: "/evil" });
@@ -156,23 +166,25 @@ test("exec passes only allowlisted parent variables plus permitted model variabl
 
 test("exec refuses shell scripts on stdin so policy can always inspect them", async (t) => {
   const root = await workspace(t);
-  const harness = harnessFor(root, process.env, [[NODE, "-e", "process.stdin.pipe(process.stdout)"]]);
+  const pipe = await nodeScript(root, "pipe.mjs", "process.stdin.pipe(process.stdout);\n");
+  const harness = harnessFor(root, process.env, [pipe]);
   for (const shell of ["bash", "sh", "cmd", "powershell", "pwsh"]) {
     const outcome = await harness.call("exec", { argv: [shell], stdin: "rm -rf /" });
     assert.equal(outcome.state, "denied");
     assert.equal(outcome.result.error?.code, "invalid_arguments");
   }
-  const piped = await harness.call("exec", { argv: [NODE, "-e", "process.stdin.pipe(process.stdout)"], stdin: "hello stdin" });
+  const piped = await harness.call("exec", { argv: pipe, stdin: "hello stdin" });
   assert.match(piped.result.text, /hello stdin/);
 });
 
 test("exec cwd is resolved inside the workspace and outside cwd is refused", async (t) => {
   const root = await workspace(t);
-  const harness = harnessFor(root, process.env, [[NODE, "-e", "console.log(process.cwd())"]]);
-  const inside = await harness.call("exec", { argv: [NODE, "-e", "console.log(process.cwd())"], cwd: "src/auth" });
+  const cwd = await nodeScript(root, "cwd.mjs", "console.log(process.cwd());\n");
+  const harness = harnessFor(root, process.env, [cwd]);
+  const inside = await harness.call("exec", { argv: cwd, cwd: "src/auth" });
   assert.equal(inside.state, "succeeded", JSON.stringify(inside.result));
   assert.match(inside.result.text, /auth/);
-  const outside = await harness.call("exec", { argv: [NODE, "-e", "0"], cwd: ".." });
+  const outside = await harness.call("exec", { argv: cwd, cwd: ".." });
   assert.equal(outside.state, "denied");
   assert.equal(outside.result.error?.code, "path_outside_scope");
 });

@@ -154,11 +154,13 @@ test("SEC-H1 a read-only reviewer's non-allowlisted exec is denied by the gatewa
 
 test("SEC-H3 partial sandbox: verification command and pnpm test run; inline interpreters and unknown programs are denied; ask mode asks; full sandbox unchanged", () => {
   const scope: Scope = { owned: ["src/**"], read: [], forbidden: [], verification_commands: ["pnpm run verify:ci"] };
-  const partial = engine.compute(inputs({ sandbox: PARTIAL, taskScope: scope }));
+  // SEC-N1: verification and build/test commands need a trusted workspace without a full sandbox; SEC-N3: no git commit.
+  const trustedEngine = createPolicyEngine({ workspaceTrusted: () => true });
+  const partial = trustedEngine.compute(inputs({ sandbox: PARTIAL, taskScope: scope }));
   assert.equal(partial.exec_confinement, "allowlist");
   assert.deepEqual(partial.verification_commands, ["pnpm run verify:ci"]);
-  for (const argv of [["pnpm", "run", "verify:ci"], ["pnpm", "test"], ["pnpm", "install", "--frozen-lockfile"], ["node", "--test", "tests/a.test.ts"], ["tsc", "-p", "tsconfig.json", "--noEmit"], ["git", "status"], ["git", "commit", "-m", "wip"], ["cargo", "test"], ["go", "test", "./..."]]) {
-    const decision = engine.evaluate(exec(argv), partial);
+  for (const argv of [["pnpm", "run", "verify:ci"], ["pnpm", "test"], ["pnpm", "install", "--frozen-lockfile"], ["node", "--test", "tests/a.test.ts"], ["tsc", "-p", "tsconfig.json", "--noEmit"], ["git", "status"], ["cargo", "test"], ["go", "test", "./..."]]) {
+    const decision = trustedEngine.evaluate(exec(argv), partial);
     assert.equal(decision.decision, "allow", `${argv.join(" ")}: ${JSON.stringify(decision.reasons)}`);
     assert.ok(codes(decision).includes("exec-allowlisted"), argv.join(" "));
   }

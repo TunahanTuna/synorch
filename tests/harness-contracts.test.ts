@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import type { z } from "zod";
 import {
   approvalDecisionSchema,
+  HUMAN_ONLY_APPROVAL_SUBJECTS,
   approvalRequestSchema,
   authStatusSchema,
   canonicalJson,
@@ -305,7 +306,7 @@ test("event payload versions: new fields bump the version, older versions still 
 });
 
 test("exec confinement: policy/snapshot v2 carries exec_confinement and verification_commands; a v1 snapshot stays readable", () => {
-  assert.equal(EVENT_VERSIONS["policy/snapshot"], 2);
+  assert.equal(EVENT_VERSIONS["policy/snapshot"], 3, "v3 added workspace_trusted (SEC-N1)");
   assert.equal(execConfinementFor("full", "autonomous"), "full-sandbox");
   assert.equal(execConfinementFor("partial", "autonomous"), "allowlist");
   assert.equal(execConfinementFor("unavailable", "ask"), "ask");
@@ -344,6 +345,42 @@ test("exec confinement: policy/snapshot v2 carries exec_confinement and verifica
   assert.equal(parseSessionEvent(snapshot(1, base)).status, "ok");
   assert.equal(parseSessionEvent(snapshot(2, { ...base, exec_confinement: "allowlist", verification_commands: [] })).status, "ok");
   assert.equal(parseSessionEvent(snapshot(1, { ...base, exec_confinement: "allowlist" })).status, "invalid");
+  assert.equal(parseSessionEvent(snapshot(3, { ...base, exec_confinement: "allowlist", verification_commands: [], workspace_trusted: true })).status, "ok");
+  assert.equal(parseSessionEvent(snapshot(2, { ...base, exec_confinement: "allowlist", workspace_trusted: false })).status, "invalid", "workspace_trusted needs v3");
+});
+
+test("SEC-N1 trust events: granted, revoked and used carry the canonical root and a repository identity; workspace trust is human-only", () => {
+  const envelope = (type: string, data: Record<string, unknown>, actor: Record<string, unknown> = { kind: "user" }) => ({
+    schema_version: 1,
+    event_id: createId("event"),
+    session_id: createId("session"),
+    seq: 1,
+    event_version: 1,
+    timestamp: "2026-09-23T10:00:00Z",
+    actor,
+    type,
+    data,
+  });
+  const identity = `git:${"a".repeat(64)}`;
+  assert.equal(parseSessionEvent(envelope("trust/granted", { workspace_root: "/home/dev/app", repo_identity: identity, source: "prompt" })).status, "ok");
+  assert.equal(parseSessionEvent(envelope("trust/granted", { workspace_root: "/home/dev/app", repo_identity: identity, source: "command" })).status, "ok");
+  assert.equal(parseSessionEvent(envelope("trust/revoked", { workspace_root: "/home/dev/app", repo_identity: identity })).status, "ok");
+  assert.equal(parseSessionEvent(envelope("trust/used", { workspace_root: "/home/dev/app", repo_identity: identity, source: "flag", sandbox_enforcement: "partial" }, { kind: "system" })).status, "ok");
+  assert.equal(parseSessionEvent(envelope("trust/granted", { workspace_root: "/home/dev/app", repo_identity: identity, source: "repository" })).status, "invalid", "only a prompt or the command grants");
+  assert.equal(parseSessionEvent(envelope("trust/granted", { workspace_root: "/home/dev/app", repo_identity: "sha:x", source: "command" })).status, "invalid");
+  assert.equal(parseSessionEvent(envelope("trust/used", { workspace_root: "/home/dev/app", repo_identity: identity, source: "prompt", sandbox_enforcement: "partial" })).status, "invalid");
+  assert.ok((HUMAN_ONLY_APPROVAL_SUBJECTS as readonly string[]).includes("workspace-trust"));
+  const decision = {
+    approval_id: createId("approval"),
+    subject_kind: "workspace-trust",
+    subject_digest: digestText("trust"),
+    outcome: "allowed-once",
+    decided_by: "orchestrator",
+    mode: "autonomous",
+    decided_at: "2026-09-23T10:00:00Z",
+  };
+  assert.equal(approvalDecisionSchema.safeParse(decision).success, false, "the orchestrator can never trust a workspace");
+  assert.equal(approvalDecisionSchema.safeParse({ ...decision, decided_by: "user" }).success, true);
 });
 
 test("report tool inputs: defaults for optional lists, strict keys, and a plan proposal lacks identity fields", () => {

@@ -18,7 +18,8 @@ import { classifyCommand, createHeadlessApprovalBroker, createPolicyEngine } fro
 import { createToolRegistry } from "../src/harness/tools/index.ts";
 import { createGatewayHarness, replayToolCallTransitions, type GatewayHarness } from "../src/harness/tools/testing.ts";
 
-const engine = createPolicyEngine();
+const untrustedEngine = createPolicyEngine();
+const trustedEngine = createPolicyEngine({ workspaceTrusted: () => true });
 const FULL: SandboxReport = { backend: "bubblewrap", platform: "linux", enforcement: "full", filesystem: "full", network: "full", process: "full", notes: [] };
 const PARTIAL: SandboxReport = {
   backend: "policy-only",
@@ -50,6 +51,15 @@ interface SetupOptions {
   readonly redactionValues?: readonly string[];
   /** Exact argv the task's verification section names; the only exec a partial sandbox runs beyond the vetted list. */
   readonly verification?: readonly (readonly string[])[];
+  /** SEC-N1: without a full sandbox, verification commands run only in a trusted workspace. */
+  readonly trusted?: boolean;
+}
+
+/** Writes a script into the workspace; SEC-N5 refuses inline code even as a verification command. */
+async function nodeScript(root: string, name: string, source: string): Promise<string[]> {
+  const file = path.join(root, name);
+  await writeFile(file, source);
+  return ["node", file];
 }
 
 /** POSIX single-quoting, so a verification string parses back to exactly this argv. */
@@ -59,6 +69,7 @@ function commandLine(argv: readonly string[]): string {
 
 function setup(root: string, options: SetupOptions = {}): GatewayHarness {
   const role = options.role ?? "implementer";
+  const engine = options.trusted === true ? trustedEngine : untrustedEngine;
   const policy = engine.compute({
     mode: options.mode ?? "autonomous",
     role,
@@ -280,8 +291,8 @@ test("AC-6: a non-full enforcement is recorded on tool/execution_started", async
 
 test("AC-7: output above 16 KiB goes to a blob and only a bounded preview stays inline", async (t) => {
   const root = await workspace(t);
-  const argv = [NODE, "-e", "process.stdout.write('a'.repeat(40000) + 'END')"];
-  const harness = setup(root, { verification: [argv] });
+  const argv = await nodeScript(root, "big.mjs", "process.stdout.write('a'.repeat(40000) + 'END');\n");
+  const harness = setup(root, { verification: [argv], trusted: true });
   const outcome = await harness.call("exec", { argv });
   assert.equal(outcome.state, "succeeded", JSON.stringify(outcome.result.error));
   assert.ok(outcome.result.blob !== undefined);
@@ -295,10 +306,10 @@ test("AC-7: output above 16 KiB goes to a blob and only a bounded preview stays 
 
 test("AC-7: secrets in output are redacted before the model, the log or a blob sees them", async (t) => {
   const root = await workspace(t);
-  const script = "console.log('cred=' + 'SUPER' + 'SECRET-VALUE-42'); console.log('key sk-' + 'x'.repeat(32)); console.log('API_TOKEN=' + 'abcdef' + '123456')";
-  const bigArgv = [NODE, "-e", "process.stdout.write('b'.repeat(30000) + 'SUPER' + 'SECRET-VALUE-42')"];
-  const harness = setup(root, { redactionValues: ["SUPERSECRET-VALUE-42"], verification: [[NODE, "-e", script], bigArgv] });
-  const outcome = await harness.call("exec", { argv: [NODE, "-e", script] });
+  const script = await nodeScript(root, "secrets.mjs", "console.log('cred=' + 'SUPER' + 'SECRET-VALUE-42'); console.log('key sk-' + 'x'.repeat(32)); console.log('API_TOKEN=' + 'abcdef' + '123456');\n");
+  const bigArgv = await nodeScript(root, "big-secret.mjs", "process.stdout.write('b'.repeat(30000) + 'SUPER' + 'SECRET-VALUE-42');\n");
+  const harness = setup(root, { redactionValues: ["SUPERSECRET-VALUE-42"], verification: [script, bigArgv], trusted: true });
+  const outcome = await harness.call("exec", { argv: script });
   assert.equal(outcome.state, "succeeded", JSON.stringify(outcome.result.error));
   assert.ok(outcome.result.redactions >= 3, String(outcome.result.redactions));
   assert.doesNotMatch(outcome.result.text, /SUPERSECRET-VALUE-42|sk-x{32}|abcdef123456/);
@@ -353,7 +364,7 @@ test("the registry shows each role only the tools its policy can use", async (t)
   const root = await workspace(t);
   const registry = createToolRegistry();
   const policyFor = (role: AgentRole) =>
-    engine.compute({
+    untrustedEngine.compute({
       mode: "autonomous",
       role,
       runId: createId("run"),

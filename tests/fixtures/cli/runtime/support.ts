@@ -18,6 +18,7 @@ import {
 import type { HarnessProcessIO, RuntimeOverrides } from "../../../../src/harness/cli/index.ts";
 import { createMemoryCredentialStore } from "../../../../src/harness/auth/index.ts";
 import { projectSession } from "../../../../src/harness/core/index.ts";
+import { createWorkspaceTrustStore } from "../../../../src/harness/policy/index.ts";
 import { createSessionStore } from "../../../../src/harness/store/index.ts";
 import type { ScriptStep } from "../../../../src/harness/providers/index.ts";
 
@@ -177,6 +178,16 @@ export function capture(options: { readonly cwd: string; readonly env?: Record<s
 }
 
 /** Overrides every e2e test uses: an isolated home, a fixed sandbox report and no keychain. */
+/**
+ * SEC-N1: the test sandbox is partial, so verification and build/test commands need a trusted
+ * workspace. Tests that run them trust the workspace explicitly through the test home's user-scope
+ * trust store, exactly as `syn trust` would; the policy itself is never loosened.
+ */
+export async function trustWorkspace(sandbox: Sandbox): Promise<void> {
+  const state = await createWorkspaceTrustStore(sandbox.home).grant(sandbox.workspace, "command");
+  if (!state.trusted) throw new Error(`the test workspace could not be trusted: ${state.reason ?? "unknown"}`);
+}
+
 export function overridesFor(sandbox: Sandbox, extra: RuntimeOverrides = {}): RuntimeOverrides {
   return { home: sandbox.home, sandbox: TEST_SANDBOX, credentialStore: () => createMemoryCredentialStore(), ...extra };
 }

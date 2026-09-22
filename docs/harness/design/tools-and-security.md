@@ -21,6 +21,8 @@ Tool ismi veya prompt metni policy'yi atlayamaz. Shell, MCP, extension, browser,
 
 Bir katmanın `allow` kararı diğerini genişletmez. Sandbox backend'i bu host'ta sadece `partial` koruma sağlıyorsa açıkça raporlanır; yüksek riskli iş tam enforcement gerektiriyorsa durur. DeepSeek'in [sandbox referansı](https://deepseek-harness.github.io/deepseek-harness/en/reference/subsystems/sandbox) platform enforcement düzeyini raporlama fikri için iyi örnektir. Dosya path'leri lexical normalize ve `realpath`/junction/symlink çözümüyle kontrol edilir; izin yalnızca `cwd` string'ine güvenmez. Windows shell quoting ve komut ayrıştırma için ayrı test matrisi gerekir.
 
+**Hard rail'in dürüst kapsamı (2026-09-23).** "Çalışma alanı dışına yazma yok" rail'i (`write-outside-scope`) tam olmayan sandbox'ta **harness araçları için** uygulanır. Exec edilen bir process'in yazmasını yalnız OS sandbox'ı sınırlayabilir: güvenilen bir çalışma alanında izin verilen build/test ve doğrulama komutlarının çalıştırdığı depo kodu **sınırlanmaz**, kullanıcının izinleriyle çalışır. Bu yüzden bu komutlar yalnız kullanıcının bir kez, kullanıcı kapsamında güvendiği çalışma alanında çalışır (güvenilmezse `autonomous` reddeder, `ask` sorar); güven depo içeriğinden gelemez ve denetlenir. Yol haritası: Windows OS sandbox (AppContainer/restricted token + job object). Kararlar: [ADR-06](../decisions/ADR-06-sandbox.md), [ADR-08](../decisions/ADR-08-approval-policy.md).
+
 ## Onay nesnesi
 
 `approvalId`, `runId`, `taskId`, `actionDigest`, çözülmüş args/etki özeti, scope, zaman ve sonucu taşır. Sonuçlar `allowed-once`, `rejected`, `cancelled`, `unavailable` olarak ayrılır; son üçü eylemi çalıştırmaz. Etkileşimsiz mod `unavailable` durumunda fail-closed davranır. Onay aynı digest dışındaki eyleme veya yeni kapsam/credential'a taşınmaz. Geniş izin preset'leri ancak açık kullanıcı yapılandırmasıyla uygulanır; hook ya da model çıktısı kendiliğinden izin kaynağı olamaz.
@@ -44,7 +46,8 @@ MCP, web ve LSP ilk sürüme ihtiyaçla eklenebilir. MCP'nin [resmi mimarisi](ht
 | --- | --- |
 | Repo dokümanındaki prompt injection | Untrusted kaynak etiketi; policy/system önceliğini değiştirmez |
 | Tool çıktısındaki gizli token | Env ayrımı, redaction, log/blob öncesi filtre, varsayılan dış ağ kısıtı |
-| Shell ile kapsam dışı dosya yazma | OS sandbox, gerçek path check, worktree; yalnızca regex onayı yeterli değil |
+| Shell ile kapsam dışı dosya yazma | OS sandbox, gerçek path check, worktree; yalnızca regex onayı yeterli değil. OS sandbox yoksa: varsayılan-ret exec allowlist'i ve depo kodunu çalıştıran komutlar için kullanıcı kapsamında çalışma alanı güveni |
+| Test/build betiği üzerinden depo kodu çalıştırma | Tam olmayan sandbox'ta yalnız güvenilen çalışma alanı; node modül/reporter enjeksiyonu ve git'in dışarıyı okuması güvenden bağımsız ret |
 | Symlink/junction escape | Eylem anında çözülmüş yol ve root kontrolü; TOCTOU testi |
 | Sonsuz agent/tool döngüsü | Step, süre, maliyet, child sayısı limitleri; no-progress algılama |
 | Yan etkili çağrının crash sonrası tekrarı | `ToolCallId`/idempotency key; uncertain state ve kullanıcı kararı |

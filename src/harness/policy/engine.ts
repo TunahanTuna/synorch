@@ -61,6 +61,12 @@ export interface PolicyEngineOptions {
    * the current worker's own workspace root (an attempt worktree lives there).
    */
   readonly synorchHome?: string;
+  /**
+   * Whether the user trusted the session's workspace (SEC-N1). Only the composition root supplies
+   * it, from the user-scope trust store or `--trust-workspace`; nothing in the repository, the
+   * configuration layers or a model message can. Absent means untrusted.
+   */
+  readonly workspaceTrusted?: () => boolean;
 }
 
 /**
@@ -69,19 +75,19 @@ export interface PolicyEngineOptions {
  * through the typed inputs, and no input can relax a hard rail.
  */
 export function createPolicyEngine(options: PolicyEngineOptions = {}): PolicyEngine {
-  return { compute: computePolicy, evaluate: (action, policy) => evaluateAction(action, policy, options) };
+  return { compute: (inputs) => computePolicy(inputs, options.workspaceTrusted?.() === true), evaluate: (action, policy) => evaluateAction(action, policy, options) };
 }
 
 /**
  * `--explain-permission`: the same evaluation the gateway runs, without executing anything. The
  * decision carries the exec allowlist verdict (`exec-allowlisted`, `exec-not-allowlisted`,
- * `exec-unconfined`) as one of its reasons.
+ * `exec-unconfined`, `workspace-untrusted`) as one of its reasons.
  */
 export function explainPermission(action: NormalizedAction, policy: EffectivePolicy, options: PolicyEngineOptions = {}): PolicyDecision {
   return evaluateAction(action, policy, options);
 }
 
-function computePolicy(inputs: PolicyInputs): EffectivePolicy {
+function computePolicy(inputs: PolicyInputs, workspaceTrusted: boolean): EffectivePolicy {
   const user = readPolicyConfig(inputs.userConfig, "user");
   const workspace = readPolicyConfig(inputs.workspaceConfig, "workspace");
   const mode = strictestMode([inputs.mode, user.mode, workspace.mode]);
@@ -143,6 +149,7 @@ function computePolicy(inputs: PolicyInputs): EffectivePolicy {
     require_full_sandbox: requireFullSandbox,
     exec_confinement: execConfinementFor(inputs.sandbox.enforcement, mode),
     verification_commands: unique((inputs.taskScope?.verification_commands ?? []).map((command) => command.trim()).filter((command) => command.length > 0)),
+    workspace_trusted: workspaceTrusted,
     layers,
   });
 }
@@ -264,6 +271,7 @@ function evaluateCommand(action: NormalizedAction, policy: EffectivePolicy, deny
     confinement: policy.exec_confinement ?? execConfinementFor(policy.sandbox.enforcement, policy.mode),
     mode: policy.mode,
     verificationCommands: policy.verification_commands ?? [],
+    workspaceTrusted: policy.workspace_trusted === true,
     exactGrants: policy.external_write_allowlist.filter((entry) => !entry.trim().endsWith("*")),
   });
   const effect = classification.effect === "external-write" && action.effect === "exec" ? "external-write" : action.effect;

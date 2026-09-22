@@ -17,6 +17,7 @@ import {
   planArguments,
   readSession,
   text,
+  trustWorkspace,
   writeConfig,
 } from "./fixtures/cli/runtime/support.ts";
 
@@ -34,6 +35,7 @@ const VERIFY = "node check.mjs";
 
 test("standard code change: plan, packet, diff, test, independent review and report (AC-5)", async () => {
   const sandbox = await createSandbox({ "src/add.js": BUGGY, "check.mjs": CHECK, "package.json": '{ "type": "module" }\n', "README.md": "# calc\n" }, { git: true });
+  await trustWorkspace(sandbox);
   try {
     await writeConfig(sandbox.home, [
       { tier: "orchestrator", adapter: "plan-script", model: "planner" },

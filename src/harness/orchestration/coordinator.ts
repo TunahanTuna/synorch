@@ -38,6 +38,7 @@ import {
   type TaskContextPacket,
   type TaskId,
   type TaskState,
+  type WorkspaceTrustState,
 } from "../contracts/index.ts";
 import { approvePlan, type PlanApprovalOutcome } from "./approval.ts";
 import { readEvents } from "./attempt-log.ts";
@@ -120,6 +121,16 @@ export interface CoordinatorDependencies {
   readonly now?: () => Date;
   readonly platform?: NodeJS.Platform;
   readonly budgetTickMs?: number;
+  /**
+   * The session workspace's trust state (SEC-N1), from the composition root. A run that relies on
+   * it records `trust/used`; a headless run that needs it and lacks it stops before any worker.
+   */
+  readonly workspaceTrust?: () => WorkspaceTrustState;
+}
+
+/** Plan tasks whose verification commands run repository code (every non-empty verification list). */
+function needsTrust(plan: Plan): boolean {
+  return plan.tasks.some((task) => task.verification.length > 0);
 }
 
 interface TaskEntry {
@@ -283,6 +294,15 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         grants: [],
       });
       await recorder.record("policy/snapshot", { policy: orchestratorPolicy, digest: digestOf(orchestratorPolicy) }, { actor: { kind: "policy" } });
+      const trust = deps.workspaceTrust?.();
+      const unconfined = orchestratorPolicy.exec_confinement !== "full-sandbox";
+      if (unconfined && trust?.trusted === true && trust.source !== undefined) {
+        await recorder.record(
+          "trust/used",
+          { workspace_root: trust.root, repo_identity: trust.identity, source: trust.source, sandbox_enforcement: deps.sandbox.enforcement },
+          { actor: { kind: "system" } },
+        );
+      }
       const ledger: ControlPlaneWriter | undefined = deps.ledger
         ? createControlPlaneWriter({ workspaceRoot: request.workspaceRoot, policy: orchestratorPolicy, engine: deps.policy })
         : undefined;
@@ -369,6 +389,15 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         approval_id: approval.request.approval_id,
       });
       if (request.policyMode === "ask") await moveRun("running", "plan approved");
+      if (request.headless && orchestratorPolicy.exec_confinement === "allowlist" && trust !== undefined && !trust.trusted && needsTrust(plan)) {
+        notice("error", `workspace ${trust.root} is not trusted (${trust.reason ?? "no trust record"})`);
+        return await finish(
+          "rejected",
+          exitCodeFor("approval_unavailable"),
+          "workspace trust unavailable: the plan's verification commands run repository code this sandbox cannot confine, and the workspace is not trusted; run `syn trust` once, or pass --trust-workspace for this run",
+          "cancelled",
+        );
+      }
       if (ledger !== undefined) {
         await ledger.write(`.ai/tasks/${runId}/plan.json`, `${JSON.stringify(plan, null, 2)}\n`).catch((error: unknown) => {
           notice("warning", `ledger write failed: ${error instanceof Error ? error.message : String(error)}`);

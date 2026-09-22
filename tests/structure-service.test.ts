@@ -63,12 +63,23 @@ test("empty directory defaults to workspace scope and includes both model profil
   assert.match(agents?.content ?? "", /Mandatory session bootstrap/);
   assert.match(agents?.content ?? "", /skill_registry/);
   assert.match(agents?.content ?? "", /Do not scan or load the whole catalog/);
+  assert.match(agents?.content ?? "", /\.ai\/skills\/project\/\*\/SKILL\.md/);
+  assert.match(agents?.content ?? "", /Route only `status: active`/);
+  assert.match(agents?.content ?? "", /never auto-load `proposed`, `stale` or `retired`/i);
+  assert.match(agents?.content ?? "", /body only when its active metadata matches/);
   assert.match(agents?.content ?? "", /Headed browser verification is opt-in/);
   const claude = plan.files.find((file) => file.relativePath === "CLAUDE.md");
   assert.match(claude?.content ?? "", /skill_registry/);
-  assert.ok(
-    plan.files.some((file) => file.relativePath === ".ai/skills/task-conductor/SKILL.md"),
+  assert.match(claude?.content ?? "", /\.ai\/skills\/project\/\*\/SKILL\.md/);
+  assert.match(claude?.content ?? "", /never auto-load `proposed`, `stale` or `retired`/i);
+  const taskConductor = plan.files.find(
+    (file) => file.relativePath === ".ai/skills/task-conductor/SKILL.md",
   );
+  assert.match(taskConductor?.content ?? "", /version: 1\.1\.0/);
+  assert.match(taskConductor?.content ?? "", /frontmatter metadata only/);
+  assert.match(taskConductor?.content ?? "", /consider only `status: active`/);
+  assert.match(taskConductor?.content ?? "", /body only when its metadata matches/);
+  assert.match(taskConductor?.content ?? "", /Never auto-load `proposed`, `stale` or `retired`/);
   const manifest = plan.files.find((file) => file.relativePath === ".ai/manifest.yaml");
   const parsedManifest = manifestSchema.parse(parseYaml(manifest?.content ?? ""));
   assert.equal(parsedManifest.generator.name, "synorch");

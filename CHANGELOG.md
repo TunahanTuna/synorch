@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Retirement guidance now matches the implemented first slice: `doctor` detects stale evidence, while unused-skill and supersession decisions remain review-driven until usage telemetry exists.
 - Agent manifests and base skills were rewritten to contract depth, with `not_for`, `inputs`, `tools`, `outputs`, `allowed_skills` and `reports` promoted from prose into frontmatter.
 - `sync` never creates, overwrites or deletes anything under `.ai/skills/project/**`, with or without `--force`.
 - Existing 0.2.x structures must be regenerated with `syn init --force` followed by `syn sync --force` to pick up the canonical contracts, the ninth base skill and the observation ledger.

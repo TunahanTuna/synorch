@@ -66,7 +66,7 @@ export async function diagnoseGeneratedSkills(
 
     const document = readSkillDocument(content, relativePath, diagnostics);
     if (document === undefined) continue;
-    const parsed = validateFrontmatter(document.data, relativePath, diagnostics);
+    const parsed = validateFrontmatter(document.data, skillId, relativePath, diagnostics);
 
     reportShapeHeuristics(document.body, parsed, relativePath, diagnostics);
     if (parsed === undefined) continue;
@@ -248,10 +248,23 @@ function readSkillDocument(
  */
 function validateFrontmatter(
   frontmatter: Record<string, unknown>,
+  skillId: string,
   relativePath: string,
   diagnostics: Diagnostic[],
 ): GeneratedSkillFrontmatter | undefined {
   const reportedFields: string[] = [];
+
+  const name = frontmatter["name"];
+  if (typeof name === "string" && name !== skillId) {
+    reportedFields.push("name");
+    diagnostics.push({
+      severity: "error",
+      code: "generated.name-directory-mismatch",
+      message:
+        `Generated skill name '${name}' must match its project-skill directory '${skillId}'.`,
+      path: relativePath,
+    });
+  }
 
   const priority = frontmatter["priority"];
   if (priority !== "skill") {

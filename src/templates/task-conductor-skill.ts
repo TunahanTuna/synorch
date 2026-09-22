@@ -1,15 +1,15 @@
 export const taskConductorSkill = `---
 name: task-conductor
 description: Use as the orchestrator's central routing discipline for multi-part work. Decompose by dependency, load skills just in time, scale ceremony to risk, and stop verification at the cheapest sufficient evidence.
-version: 1.0.0
+version: 1.1.0
 not_for: Do not use the conductor workflow for a one-line or single-step fix, for work already decomposed into an approved task graph, or inside a worker dispatch — a worker conducts nothing.
 inputs:
   - The complete brief, read in full before any process is chosen
-  - The registered project snapshot and skill registry for the active project
+  - The registered project snapshot, skill registry and active generated-skill metadata for the active project
   - The risk tier, or the facts needed to classify it
 tools:
   - File read, directory listing and symbol search
-  - Just-in-time skill loading from the registry, then the catalog
+  - Frontmatter-only discovery of generated project skills and just-in-time skill loading
   - Control-plane writes under .ai/tasks/**
 outputs: approved-plan
 ---
@@ -51,17 +51,17 @@ Escalate the tier when scope expands, a check fails unexpectedly, verified facts
 1. Extract deliverables, actions, constraints, acceptance criteria and affected surfaces.
 2. Trace existing code and contracts before designing. Do not invent layers the brief does not need.
 3. Split into dependency-ordered workstreams. Each has one goal, explicit ownership and one done-check.
-4. Load zero to two genuinely matching skills per workstream, just in time. Available skills are not active or loaded skills.
+4. Load zero to two genuinely matching skills per workstream, just in time. Available skills are not active or loaded skills. Discover \`.ai/skills/project/*/SKILL.md\` through frontmatter metadata only; consider only \`status: active\`, and load a generated skill's body only when its metadata matches the workstream. Never auto-load \`proposed\`, \`stale\` or \`retired\` skills.
 5. Execute one dependency layer at a time. Parallelize only independent ownership.
 6. Verify each acceptance claim with the cheapest sufficient evidence, then stop.
 
 ## Context economy
 
-Start from the registered project snapshot and reuse verified evidence. Give workers minimal task packets, never the full conversation or the complete skill library. Load project-registered technology skills only when relevant to the owned work. Search the available catalog only when the current task has an unmet specialist need.
+Start from the registered project snapshot and reuse verified evidence. Give workers minimal task packets, never the full conversation or the complete skill library. Load project-registered technology skills only when relevant to the owned work. Treat generated project skills as a separate, frontmatter-discovered namespace rather than registry entries. Search the available catalog only when the current task has an unmet specialist need.
 
 ## Tools
 
-Read, list and search across the product tree; just-in-time skill loading, registry before catalog; control-plane writes under \`.ai/tasks/**\`. The conductor never edits product files and never dispatches work the user has not approved.
+Read, list and search across the product tree; frontmatter-only generated-skill discovery; just-in-time body loading from active matches, registry and then catalog; control-plane writes under \`.ai/tasks/**\`. The conductor never edits product files and never dispatches work the user has not approved.
 
 ## Verification
 

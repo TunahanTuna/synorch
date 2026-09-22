@@ -7,7 +7,7 @@
 
 ## 1. The One-Paragraph Version
 
-Synorch does not generate project skills on first contact. It watches completed work, records each non-obvious discovery as a cheap **observation** with its evidence, and proposes a skill only after the same discovery has been independently confirmed **three times**. Proposals require user approval, are written by a delegated worker and verified by an independent reviewer, live in their own namespace, carry their evidence in frontmatter, and are subject to a hard budget: **twelve active project skills, 15KB each**. Nothing is ever auto-deleted, but the system continuously proposes retirement for what has gone stale or unused.
+Synorch does not generate project skills on first contact. It watches completed work, records each non-obvious discovery as a cheap **observation** with its evidence, and proposes a skill only after the same discovery has been independently confirmed **three times**. Proposals require user approval, are written by a delegated worker and verified by an independent reviewer, live in their own namespace, carry their evidence in frontmatter, and are subject to a hard budget: **twelve active project skills, 15KB each**. Nothing is ever auto-deleted; the first slice detects stale evidence and supports review-driven retirement without claiming usage telemetry it does not collect.
 
 Distillation is the feature. The budget is what makes it safe.
 
@@ -132,9 +132,9 @@ Blocking contract rules enforced by `doctor`:
 
 Three signals, none of which delete anything on their own.
 
-**Stale.** A worker loads the skill and reports that a claim no longer holds, or `doctor` finds a `source` whose current digest differs from the recorded one. Status flips to `stale` immediately, the skill stops being auto-loaded, and re-verification is proposed. This is the negative feedback loop Hermes has no mechanism for; Synorch can build it because completion packets are structured.
+**Stale.** `doctor` warns when a source digest differs from the recorded one. A worker re-verifies the claim; if it no longer holds, the implementer sets the status to `stale`, which prevents automatic loading.
 
-**Unused.** Not loaded in 60 days *and* 30 tasks. `doctor` emits a warning and the orchestrator offers retirement at the next natural pause.
+**Unused.** The first slice does not track skill loads, so unused-skill retirement is proposed manually rather than inferred by `doctor`.
 
 **Superseded.** A new proposal overlaps an existing skill on `kind` plus source paths. The orchestrator proposes a **merge into the existing skill**, not a second skill. `supersedes` records the lineage.
 
@@ -146,7 +146,6 @@ Adapted from the `incident-log-shape` check that Hermes's linter names. These wa
 
 - **incident-log-shape** — the body narrates a single past event (past tense, a specific task id, a specific date) instead of stating a repeatable procedure.
 - **no-trigger** — no explicit activation condition, so the skill can never be matched cheaply.
-- **restates-generic** — the content substantially overlaps a bundled Ingenium skill already active on this project.
 - **unsourced-claim** — a body claim that no `evidence` entry backs.
 
 ## 8. What Changes in the Codebase
@@ -177,4 +176,4 @@ This also resolves architecture open decision §15.4 (whether task files are Git
 
 Hermes proved the loop works and shipped the parts worth copying — `SKILL.md` as procedural memory, three-level progressive loading, an approval gate, hash-based protection of user edits. Its documented design has no promotion threshold, no deduplication, no pruning, and no negative feedback from use, so skills accumulate monotonically and the only brake is human review load.
 
-Synorch closes all four gaps, and can do so because of an asset Hermes lacks: workers already return **structured completion packets** carrying `commands_run`, `decisions_made` and `unresolved_risks` with source paths. That is a far better distillation input than a raw conversation trace, and it is what makes a confirmation counter, an evidence digest and a staleness signal cheap to implement rather than speculative.
+Synorch closes the promotion-threshold and pruning gaps and adds digest-based stale-evidence detection. Usage-based negative feedback remains follow-up work because the first slice intentionally collects no skill-load telemetry. Structured completion packets carrying `commands_run`, `decisions_made` and `unresolved_risks` with source paths still provide a stronger distillation input than a raw conversation trace.

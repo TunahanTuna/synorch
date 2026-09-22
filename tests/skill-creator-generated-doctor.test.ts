@@ -67,6 +67,20 @@ test("unparseable frontmatter is reported as generated.frontmatter-invalid", asy
   assert.ok((await codes(directory)).includes("generated.frontmatter-invalid"));
 });
 
+test("a generated skill name must match its directory", async () => {
+  const directory = await createFixture({ frontmatter: { name: "different-skill" } });
+
+  assert.deepEqual(await codes(directory), ["generated.name-directory-mismatch"]);
+});
+
+test("generated and verified dates must be real calendar dates", async () => {
+  for (const field of ["generated_at", "verified_at"] as const) {
+    const directory = await createFixture({ frontmatter: { [field]: "2026-02-31" } });
+
+    assert.deepEqual(await codes(directory), ["generated.contract-invalid"]);
+  }
+});
+
 test("a constitutional priority is reported as generated.priority-ceiling", async () => {
   const directory = await createFixture({ frontmatter: { priority: "constitutional" } });
 
@@ -154,7 +168,7 @@ test("a skill over 15KB is reported as generated.size-exceeded", async () => {
 test("more than twelve active skills exceed the budget", async () => {
   const directory = await createFixture({});
   for (let index = 0; index < 12; index += 1) {
-    await writeSkill(directory, `extra-${index}`, skillFile({}));
+    await writeSkill(directory, `extra-${index}`, skillFile({ name: `extra-${index}` }));
   }
 
   const budget = (await diagnose(directory)).filter(
@@ -168,7 +182,7 @@ test("more than twelve active skills exceed the budget", async () => {
 test("twelve active skills stay inside the budget", async () => {
   const directory = await createFixture({});
   for (let index = 0; index < 11; index += 1) {
-    await writeSkill(directory, `extra-${index}`, skillFile({}));
+    await writeSkill(directory, `extra-${index}`, skillFile({ name: `extra-${index}` }));
   }
 
   assert.deepEqual(await codes(directory), []);
@@ -177,7 +191,11 @@ test("twelve active skills stay inside the budget", async () => {
 test("a retired skill does not consume the active budget", async () => {
   const directory = await createFixture({});
   for (let index = 0; index < 12; index += 1) {
-    await writeSkill(directory, `extra-${index}`, skillFile({ status: "retired" }));
+    await writeSkill(
+      directory,
+      `extra-${index}`,
+      skillFile({ name: `extra-${index}`, status: "retired" }),
+    );
   }
 
   assert.deepEqual(await codes(directory), []);

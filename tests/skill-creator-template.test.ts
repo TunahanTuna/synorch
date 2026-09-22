@@ -98,6 +98,17 @@ test("the reference files explain the two counters and the ledger example", () =
   assert.match(ledgerReference, /confirmed_by: \[task-141, task-156, task-173\]/);
 });
 
+test("retirement guidance matches the telemetry available in the first slice", () => {
+  const retirementReference =
+    skillCreatorReferences.find((reference) => reference.fileName === "retirement.md")?.content ??
+    "";
+
+  assert.match(retirementReference, /doctor.*warns.*digest/i);
+  assert.match(retirementReference, /does not track.*loaded/i);
+  assert.doesNotMatch(retirementReference, /60 days|30 tasks/i);
+  assert.doesNotMatch(skillCreatorSkill, /stale, unused|doctor.*unused/i);
+});
+
 test("the seeded ledger is an empty, schema-valid ledger", () => {
   const seed = parseYaml(contentOf(OBSERVATION_LEDGER_PATH));
 

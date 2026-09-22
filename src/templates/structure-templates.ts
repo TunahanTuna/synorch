@@ -93,8 +93,9 @@ Before the first task:
 4. Do not begin discovery or planning until the user confirms.
 5. For the active project, read its record from \`.ai/workspace.yaml\`, then read the referenced \`skill_registry\`.
 6. Treat registry entries as active, catalog entries as merely available, and skill contents as unloaded until the current work requires them. Do not scan or load the whole catalog during bootstrap.
-7. For a non-trivial brief, load \`.ai/skills/task-conductor/SKILL.md\` as the central decomposition and routing discipline. For a one-line or single-step fix, keep the workflow trivial and do not create an orchestra.
-8. Load any additional base, technology or on-demand skill just in time and only when its description genuinely matches the owned work.
+7. Outside the registry, discover \`.ai/skills/project/*/SKILL.md\` from frontmatter only. Route only \`status: active\`; never auto-load \`proposed\`, \`stale\` or \`retired\`, and keep bodies unloaded during discovery.
+8. For a non-trivial brief, load \`.ai/skills/task-conductor/SKILL.md\` as the central decomposition and routing discipline. For a one-line or single-step fix, keep the workflow trivial and do not create an orchestra.
+9. Load other skills just in time when their description matches the work. Load a generated skill body only when its active metadata matches.
 
 ## Non-negotiable behavior
 
@@ -124,8 +125,9 @@ Before the first task:
 4. Do not begin discovery or planning until the user confirms.
 5. For the active project, read its record from \`.ai/workspace.yaml\`, then read the referenced \`skill_registry\`.
 6. Treat registry entries as active, catalog entries as merely available, and skill contents as unloaded until the current work requires them. Do not scan or load the whole catalog during bootstrap.
-7. For a non-trivial brief, load \`.ai/skills/task-conductor/SKILL.md\` as the central decomposition and routing discipline. For a one-line or single-step fix, keep the workflow trivial and do not create an orchestra.
-8. Load any additional base, technology or on-demand skill just in time and only when its description genuinely matches the owned work.
+7. Outside the registry, discover \`.ai/skills/project/*/SKILL.md\` from frontmatter only. Route only \`status: active\`; never auto-load \`proposed\`, \`stale\` or \`retired\`, and keep bodies unloaded during discovery.
+8. For a non-trivial brief, load \`.ai/skills/task-conductor/SKILL.md\` as the central decomposition and routing discipline. For a one-line or single-step fix, keep the workflow trivial and do not create an orchestra.
+9. Load other skills just in time when their description matches the work. Load a generated skill body only when its active metadata matches.
 
 ## Non-negotiable behavior
 

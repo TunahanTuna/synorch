@@ -160,15 +160,26 @@ const POWERSHELL_VALUE_FLAGS = new Set([
   "-psconsolefile",
 ]);
 
+/** What a shell program will run: an inline script, a file (or stdin), or something unreadable. */
+export type InlineScript =
+  | { readonly kind: "script"; readonly text: string }
+  | { readonly kind: "file" }
+  | { readonly kind: "opaque"; readonly reason: string };
+
 /**
- * The inline script a shell program runs: a string for `-c`/`/c`/`-Command`/`-EncodedCommand`,
- * `null` for a shell that runs a file or reads stdin, `undefined` for a program that is no shell.
+ * The inline script a shell program runs: `-c`/`/c`/`-Command`/`-EncodedCommand` (every
+ * abbreviation), `file` for a shell that runs a file or reads stdin, `opaque` when the script
+ * cannot be read (an undecodable encoded command), `undefined` for a program that is no shell.
  */
-export function inlineScriptOf(program: string, args: readonly string[]): string | null | undefined {
-  if (POSIX_SHELLS.has(program)) return posixInlineScript(args);
-  if (program === "cmd") return cmdInlineScript(args);
+export function inlineScriptOf(program: string, args: readonly string[]): InlineScript | undefined {
+  if (POSIX_SHELLS.has(program)) return orFile(posixInlineScript(args));
+  if (program === "cmd") return orFile(cmdInlineScript(args));
   if (POWERSHELLS.has(program)) return powershellInlineScript(args);
   return undefined;
+}
+
+function orFile(script: string | null): InlineScript {
+  return script === null ? { kind: "file" } : { kind: "script", text: script };
 }
 
 export function shellDialect(program: string): ShellDialect {
@@ -195,34 +206,61 @@ function posixInlineScript(args: readonly string[]): string | null {
 }
 
 function cmdInlineScript(args: readonly string[]): string | null {
-  const index = args.findIndex((argument) => /^\/[ck]/i.test(argument));
+  const index = args.findIndex((argument) => /^\/[ckr]/i.test(argument));
   if (index === -1) return null;
   const first = (args[index] ?? "").slice(2);
   const script = [first, ...args.slice(index + 1)].filter((part) => part.length > 0).join(" ").trim();
   return script.length >= 2 && script.startsWith('"') && script.endsWith('"') ? script.slice(1, -1) : script;
 }
 
-function powershellInlineScript(args: readonly string[]): string | null {
+/** PowerShell accepts en dash, em dash and horizontal bar wherever it accepts `-`. */
+export function normalizeDash(argument: string): string {
+  return DASH_CODES.has(argument.charCodeAt(0)) ? `-${argument.slice(1)}` : argument;
+}
+
+function powershellInlineScript(args: readonly string[]): InlineScript {
   for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index] ?? "";
+    const argument = normalizeDash(args[index] ?? "");
     const lower = argument.toLowerCase().replace(/^\//, "-");
-    if (POWERSHELL_VALUE_FLAGS.has(lower)) {
+    if (!lower.startsWith("-")) return { kind: "script", text: args.slice(index).join(" ") };
+    if (lower === "-") return { kind: "file" };
+    if (lower.includes(":")) return { kind: "opaque", reason: `PowerShell parameter ${argument} carries an attached value` };
+    if (POWERSHELL_VALUE_FLAGS.has(lower) || isPrefixOf(lower, "-executionpolicy", 3) || isPrefixOf(lower, "-encodedarguments", 9) || lower === "-ea") {
       index += 1;
       continue;
     }
-    if (lower.startsWith("-") && lower.length >= 2 && "-command".startsWith(lower)) {
-      return args.slice(index + 1).join(" ");
-    }
-    if (lower.startsWith("-e") && lower.length >= 2 && "-encodedcommand".startsWith(lower)) {
-      return decodeEncodedCommand(args[index + 1] ?? "");
-    }
-    if (lower.startsWith("-f") && lower.length >= 2 && "-file".startsWith(lower)) return null;
-    if (lower.startsWith("-")) continue;
-    return args.slice(index).join(" ");
+    if (lower.startsWith("-e")) return decodeEncodedCommand(args[index + 1]);
+    if (lower === "-cwa" || isPrefixOf(lower, "-commandwithargs", 9)) return { kind: "script", text: args[index + 1] ?? "" };
+    if (isPrefixOf(lower, "-command", 2)) return { kind: "script", text: args.slice(index + 1).join(" ") };
+    if (isPrefixOf(lower, "-file", 2)) return { kind: "file" };
   }
-  return null;
+  return { kind: "file" };
 }
 
-function decodeEncodedCommand(value: string): string {
-  return Buffer.from(value, "base64").toString("utf16le");
+function isPrefixOf(value: string, full: string, minimum: number): boolean {
+  return value.length >= minimum && full.startsWith(value);
+}
+
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+const DASH_CODES = new Set([0x2013, 0x2014, 0x2015]);
+const REPLACEMENT_CHARACTER = 0xfffd;
+
+function hasControlCharacters(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 9 || (code > 13 && code < 32) || code === REPLACEMENT_CHARACTER) return true;
+  }
+  return false;
+}
+
+/** `-EncodedCommand` is UTF-16LE base64; anything that does not decode cleanly is opaque. */
+function decodeEncodedCommand(value: string | undefined): InlineScript {
+  const trimmed = (value ?? "").trim();
+  if (trimmed.length === 0 || trimmed.length % 4 !== 0 || !BASE64.test(trimmed)) return { kind: "opaque", reason: "the encoded command is not valid base64" };
+  const bytes = Buffer.from(trimmed, "base64");
+  const text = bytes.toString("utf16le");
+  if (bytes.length % 2 !== 0 || hasControlCharacters(text)) {
+    return { kind: "opaque", reason: "the encoded command is not UTF-16LE text" };
+  }
+  return { kind: "script", text };
 }

@@ -1,8 +1,11 @@
+import { realpathSync } from "node:fs";
+import path from "node:path";
 import { isSafeRelativePath, normalizeRelativePath } from "../../domain/relative-path.ts";
 import {
   CONTROL_PLANE_WRITE_PREFIX,
   digestOf,
   effectivePolicySchema,
+  execConfinementFor,
   HARD_RAILS,
   HarnessError,
   hasReservedSegment,
@@ -28,6 +31,7 @@ import {
 import { classifyCommand } from "./command-classifier.ts";
 import { DESTRUCTIVE_COMMAND_RULES } from "./command-rules.ts";
 import { readPolicyConfig, type PolicyConfig } from "./config.ts";
+import { evaluateExecAllowlist, type ExecAllowlistDecision } from "./exec-allowlist.ts";
 
 type EffectMatrix = { [E in ToolEffect]: EffectDecision };
 type PolicyLayer = PolicyDecision["reasons"][number]["layer"];
@@ -51,18 +55,30 @@ const PLATFORM_DIGEST = digestOf({
   destructive: DESTRUCTIVE_COMMAND_RULES.map((rule) => ({ code: rule.code, programs: rule.programs, examples: rule.examples })),
 });
 
+export interface PolicyEngineOptions {
+  /**
+   * The Synorch home (`~/.synorch` or `SYNORCH_HOME`). No write may land under it, except inside
+   * the current worker's own workspace root (an attempt worktree lives there).
+   */
+  readonly synorchHome?: string;
+}
+
 /**
  * Computes effective policy as an intersection and evaluates normalized actions against it.
  * Nothing in a model message, repository file or tool output reaches either function except
  * through the typed inputs, and no input can relax a hard rail.
  */
-export function createPolicyEngine(): PolicyEngine {
-  return { compute: computePolicy, evaluate: evaluateAction };
+export function createPolicyEngine(options: PolicyEngineOptions = {}): PolicyEngine {
+  return { compute: computePolicy, evaluate: (action, policy) => evaluateAction(action, policy, options) };
 }
 
-/** `--explain-permission`: the same evaluation the gateway runs, without executing anything. */
-export function explainPermission(action: NormalizedAction, policy: EffectivePolicy): PolicyDecision {
-  return evaluateAction(action, policy);
+/**
+ * `--explain-permission`: the same evaluation the gateway runs, without executing anything. The
+ * decision carries the exec allowlist verdict (`exec-allowlisted`, `exec-not-allowlisted`,
+ * `exec-unconfined`) as one of its reasons.
+ */
+export function explainPermission(action: NormalizedAction, policy: EffectivePolicy, options: PolicyEngineOptions = {}): PolicyDecision {
+  return evaluateAction(action, policy, options);
 }
 
 function computePolicy(inputs: PolicyInputs): EffectivePolicy {
@@ -125,6 +141,8 @@ function computePolicy(inputs: PolicyInputs): EffectivePolicy {
     network,
     sandbox: { backend: inputs.sandbox.backend, enforcement: inputs.sandbox.enforcement },
     require_full_sandbox: requireFullSandbox,
+    exec_confinement: execConfinementFor(inputs.sandbox.enforcement, mode),
+    verification_commands: unique((inputs.taskScope?.verification_commands ?? []).map((command) => command.trim()).filter((command) => command.length > 0)),
     layers,
   });
 }
@@ -135,7 +153,7 @@ interface DecisionBuilder {
   readonly reasons: { code: string; layer: PolicyLayer; message: string }[];
 }
 
-function evaluateAction(action: NormalizedAction, policy: EffectivePolicy): PolicyDecision {
+function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, options: PolicyEngineOptions): PolicyDecision {
   const builder: DecisionBuilder = { decision: "allow", rail: undefined, reasons: [] };
   const deny = (layer: PolicyLayer, code: string, message: string, rail?: HardRail): void => {
     builder.decision = "deny";
@@ -143,8 +161,8 @@ function evaluateAction(action: NormalizedAction, policy: EffectivePolicy): Poli
     builder.reasons.push({ code, layer, message: message.slice(0, 500) });
   };
 
-  evaluatePaths(action, policy, deny);
-  const effect = evaluateCommand(action, policy, deny);
+  evaluatePaths(action, policy, options, deny);
+  const { effect, confinement } = evaluateCommand(action, policy, deny);
   evaluateNetwork(action, policy.network, deny);
 
   const configured = policy.effects[effect];
@@ -158,6 +176,13 @@ function evaluateAction(action: NormalizedAction, policy: EffectivePolicy): Poli
   } else if (configured === "ask" && builder.decision !== "deny") {
     builder.decision = "ask";
     builder.reasons.push({ code: "approval-required", layer: "approval", message: `${effect} needs approval in ask mode` });
+  }
+  if (confinement?.decision === "deny" && (builder.decision !== "deny" || confinement.layer === "role")) {
+    // A sandbox-layer refusal is reported only when nothing else denied, so it never masks a clearer code.
+    deny(confinement.layer, confinement.code, confinement.message);
+  } else if (confinement !== undefined && confinement.decision !== "deny" && builder.decision !== "deny") {
+    if (confinement.decision === "ask") builder.decision = "ask";
+    builder.reasons.push({ code: confinement.code, layer: confinement.layer, message: confinement.message.slice(0, 500) });
   }
 
   if (builder.reasons.length === 0) {
@@ -179,7 +204,8 @@ function evaluateAction(action: NormalizedAction, policy: EffectivePolicy): Poli
 
 type Deny = (layer: PolicyLayer, code: string, message: string, rail?: HardRail) => void;
 
-function evaluatePaths(action: NormalizedAction, policy: EffectivePolicy, deny: Deny): void {
+function evaluatePaths(action: NormalizedAction, policy: EffectivePolicy, options: PolicyEngineOptions, deny: Deny): void {
+  // Repository-relative layer sources (e.g. the canonical `.ai/agents/<role>/AGENT.md` role layer) are policy sources no tool may write.
   const policySources = policy.layers
     .map((layer) => layer.source)
     .filter((source) => isSafeRelativePath(source) && source.includes("."))
@@ -191,9 +217,14 @@ function evaluatePaths(action: NormalizedAction, policy: EffectivePolicy, deny: 
   }
   for (const entry of action.paths) {
     if (entry.access === "write") {
-      if (hasReservedSegment(entry.path)) deny("platform", "reserved-path", `${entry.path} is a reserved path`, "reserved-path-write");
+      const canonical = canonicalTarget(policy.workspace_root, entry.path);
+      if (isGitHooksOrConfig(entry.path) || isGitHooksOrConfig(canonical)) {
+        deny("platform", "git-hooks-or-config", `${entry.path} is a git hook or git config; writing it would run or reconfigure code`, "reserved-path-write");
+      } else if (hasReservedSegment(entry.path)) deny("platform", "reserved-path", `${entry.path} is a reserved path`, "reserved-path-write");
       else if (policySources.includes(entry.path.toLowerCase())) deny("platform", "policy-source", `${entry.path} is a policy source`, "policy-self-modification");
-      else if (matchesAny(entry.path, policy.forbidden, { caseInsensitive: true })) deny("task", "forbidden-path", `${entry.path} is forbidden for this task`, "write-outside-scope");
+      else if (options.synorchHome !== undefined && isUnderSynorchHome(canonical, policy.workspace_root, options.synorchHome)) {
+        deny("platform", "synorch-home-write", `${entry.path} resolves inside the Synorch home`, "reserved-path-write");
+      } else if (matchesAny(entry.path, policy.forbidden, { caseInsensitive: true })) deny("task", "forbidden-path", `${entry.path} is forbidden for this task`, "write-outside-scope");
       else if (!matchesAny(entry.path, policy.write_scope, { caseInsensitive: false })) deny("task", "outside-write-scope", `${entry.path} is outside the write scope`, "write-outside-scope");
       continue;
     }
@@ -204,10 +235,16 @@ function evaluatePaths(action: NormalizedAction, policy: EffectivePolicy, deny: 
   }
 }
 
-function evaluateCommand(action: NormalizedAction, policy: EffectivePolicy, deny: Deny): ToolEffect {
+interface CommandEvaluation {
+  readonly effect: ToolEffect;
+  /** The exec allowlist verdict when one narrows this command (not a writer under a full sandbox). */
+  readonly confinement: ExecAllowlistDecision | undefined;
+}
+
+function evaluateCommand(action: NormalizedAction, policy: EffectivePolicy, deny: Deny): CommandEvaluation {
   if (action.command === undefined) {
     if (action.destructive) deny("platform", "destructive-action", `${action.tool_name} is marked destructive`, "destructive-command");
-    return action.effect;
+    return { effect: action.effect, confinement: undefined };
   }
   const classification = classifyCommand(action.command.argv, {
     cwd: action.command.cwd,
@@ -221,7 +258,71 @@ function evaluateCommand(action: NormalizedAction, policy: EffectivePolicy, deny
   if ((READ_ONLY_ROLES as readonly AgentRole[]).includes(action.role) && classification.mutating) {
     deny("role", "read-only-role-mutation", `${action.role} is read-only and this command can write`);
   }
-  return classification.effect === "external-write" && action.effect === "exec" ? "external-write" : action.effect;
+  const confinement = evaluateExecAllowlist({
+    argv: action.command.argv,
+    readOnly: isReadOnlyWorker(action.role, policy),
+    confinement: policy.exec_confinement ?? execConfinementFor(policy.sandbox.enforcement, policy.mode),
+    mode: policy.mode,
+    verificationCommands: policy.verification_commands ?? [],
+    exactGrants: policy.external_write_allowlist.filter((entry) => !entry.trim().endsWith("*")),
+  });
+  const effect = classification.effect === "external-write" && action.effect === "exec" ? "external-write" : action.effect;
+  return { effect, confinement };
+}
+
+/** Explorer and reviewer, and a debugger whose packet owns no paths (root-cause analysis only). */
+function isReadOnlyWorker(role: AgentRole, policy: EffectivePolicy): boolean {
+  return (READ_ONLY_ROLES as readonly AgentRole[]).includes(role) || (role === "debugger" && policy.write_scope.length === 0);
+}
+
+const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform === "darwin";
+
+/**
+ * The canonical absolute form of a workspace-relative target: the deepest existing ancestor
+ * resolved with `realpath` (links, junctions, 8.3 names), the rest appended, case-folded where
+ * the file system is case-insensitive.
+ */
+function canonicalTarget(workspaceRoot: string, relative: string): string {
+  return canonicalPath(path.resolve(workspaceRoot, ...relative.split("/")));
+}
+
+function canonicalPath(target: string): string {
+  const missing: string[] = [];
+  let current = path.resolve(target);
+  for (;;) {
+    try {
+      const resolved = path.join(realpathSync.native(current), ...[...missing].reverse());
+      return CASE_INSENSITIVE_FS ? resolved.toLowerCase() : resolved;
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) {
+        const unresolved = path.join(current, ...[...missing].reverse());
+        return CASE_INSENSITIVE_FS ? unresolved.toLowerCase() : unresolved;
+      }
+      missing.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isInside(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/** Under the Synorch home and not inside this worker's own workspace root (which may itself live there). */
+function isUnderSynorchHome(canonical: string, workspaceRoot: string, synorchHome: string): boolean {
+  const home = canonicalPath(synorchHome);
+  if (!isInside(home, canonical)) return false;
+  const root = canonicalPath(workspaceRoot);
+  const ownWorktree = root !== home && isInside(home, root) && isInside(root, canonical);
+  return !ownWorktree;
+}
+
+/** `.git/hooks/**` or `.git/config`, compared case-insensitively on any path shape. */
+function isGitHooksOrConfig(candidate: string): boolean {
+  const segments = candidate.replaceAll("\\", "/").toLowerCase().split("/");
+  return segments.some((segment, index) => segment === ".git" && (segments[index + 1] === "hooks" || (segments[index + 1] === "config" && index + 2 === segments.length)));
 }
 
 function evaluateNetwork(action: NormalizedAction, network: NetworkPolicy, deny: Deny): void {

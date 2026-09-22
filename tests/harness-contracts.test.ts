@@ -18,6 +18,7 @@ import {
   effectivePolicySchema,
   encodeUlid,
   EVENT_VERSIONS,
+  execConfinementFor,
   EXIT_CODES,
   exitCodeFor,
   findStaleSources,
@@ -301,6 +302,48 @@ test("event payload versions: new fields bump the version, older versions still 
   assert.match(JSON.stringify(early), /torn_tail requires event_version >= 2/);
   assert.equal(parseSessionEvent(resumed(3, {})).status, "unsupported");
   assert.deepEqual([...CONTEXT_BLOCK_SOURCES].slice(-2), ["history", "tool-result"]);
+});
+
+test("exec confinement: policy/snapshot v2 carries exec_confinement and verification_commands; a v1 snapshot stays readable", () => {
+  assert.equal(EVENT_VERSIONS["policy/snapshot"], 2);
+  assert.equal(execConfinementFor("full", "autonomous"), "full-sandbox");
+  assert.equal(execConfinementFor("partial", "autonomous"), "allowlist");
+  assert.equal(execConfinementFor("unavailable", "ask"), "ask");
+  const base = {
+    schema_version: 1,
+    policy_version: 1,
+    mode: "autonomous",
+    role: "implementer",
+    run_id: createId("run"),
+    workspace_root: "/w",
+    write_scope: ["src/**"],
+    read_scope: ["**"],
+    forbidden: [],
+    effects: { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "deny", control: "deny" },
+    external_write_allowlist: [],
+    network: { mode: "deny", hosts: [] },
+    sandbox: { backend: "policy-only", enforcement: "partial" },
+    require_full_sandbox: false,
+    layers: [{ layer: "role", source: "implementer", digest: digestText("implementer") }],
+  };
+  assert.equal(effectivePolicySchema.safeParse(base).success, true, "v1 policies without the fields still parse");
+  assert.equal(effectivePolicySchema.safeParse({ ...base, exec_confinement: "allowlist", verification_commands: ["pnpm test"] }).success, true);
+  assert.equal(effectivePolicySchema.safeParse({ ...base, exec_confinement: "full-sandbox" }).success, false, "a partial sandbox cannot claim full confinement");
+  assert.equal(effectivePolicySchema.safeParse({ ...base, exec_confinement: "ask" }).success, false, "ask confinement only in ask mode");
+  const snapshot = (version: number, policy: Record<string, unknown>) => ({
+    schema_version: 1,
+    event_id: createId("event"),
+    session_id: createId("session"),
+    seq: 1,
+    event_version: version,
+    timestamp: "2026-09-22T10:00:00Z",
+    actor: { kind: "policy" },
+    type: "policy/snapshot",
+    data: { policy, digest: digestText("policy") },
+  });
+  assert.equal(parseSessionEvent(snapshot(1, base)).status, "ok");
+  assert.equal(parseSessionEvent(snapshot(2, { ...base, exec_confinement: "allowlist", verification_commands: [] })).status, "ok");
+  assert.equal(parseSessionEvent(snapshot(1, { ...base, exec_confinement: "allowlist" })).status, "invalid");
 });
 
 test("report tool inputs: defaults for optional lists, strict keys, and a plan proposal lacks identity fields", () => {

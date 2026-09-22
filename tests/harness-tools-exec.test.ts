@@ -36,7 +36,20 @@ async function workspace(t: TestContext): Promise<string> {
   return root;
 }
 
-function harnessFor(root: string, environment: Readonly<Record<string, string | undefined>> = process.env): GatewayHarness {
+/** POSIX single-quoting, so a verification string parses back to exactly this argv. */
+function commandLine(argv: readonly string[]): string {
+  return argv.map((word) => `'${word.replaceAll("'", "'\\''")}'`).join(" ");
+}
+
+/**
+ * The partial sandbox runs only exact verification commands and a vetted build/test list, so each
+ * test names the exact argv it runs as a verification command of its task.
+ */
+function harnessFor(
+  root: string,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+  verification: readonly (readonly string[])[] = [],
+): GatewayHarness {
   return createGatewayHarness({
     engine,
     policy: engine.compute({
@@ -45,7 +58,7 @@ function harnessFor(root: string, environment: Readonly<Record<string, string | 
       runId: createId("run"),
       taskId: createId("task"),
       workspaceRoot: root,
-      taskScope: { owned: ["src/auth/**"], read: [], forbidden: [] },
+      taskScope: { owned: ["src/auth/**"], read: [], forbidden: [], verification_commands: verification.map(commandLine) },
       userConfig: undefined,
       workspaceConfig: undefined,
       sandbox: PARTIAL,
@@ -78,8 +91,8 @@ async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs: number
 
 test("AC-8: cancelling exec terminates the whole child tree and yields cancelled", async (t) => {
   const root = await workspace(t);
-  const harness = harnessFor(root);
   const pidFile = path.join(root, "src", "auth", "pids.json");
+  const harness = harnessFor(root, process.env, [[NODE, SPAWN_TREE, pidFile]]);
   const controller = new AbortController();
   const pending = harness.call("exec", { argv: [NODE, SPAWN_TREE, pidFile] }, controller.signal);
   const pids = await waitFor(async () => {
@@ -101,16 +114,18 @@ test("AC-8: cancelling exec terminates the whole child tree and yields cancelled
 
 test("exec timeout terminates the process tree and reports timeout", async (t) => {
   const root = await workspace(t);
-  const harness = harnessFor(root);
-  const outcome = await harness.call("exec", { argv: [NODE, "-e", "setInterval(() => {}, 1000)"], timeout_ms: 300 });
+  const argv = [NODE, "-e", "setInterval(() => {}, 1000)"];
+  const harness = harnessFor(root, process.env, [argv]);
+  const outcome = await harness.call("exec", { argv, timeout_ms: 300 });
   assert.equal(outcome.state, "failed");
   assert.equal(outcome.result.error?.code, "timeout");
 });
 
 test("exec runs argv without a shell, reports the exit code and keeps shell metacharacters literal", async (t) => {
   const root = await workspace(t);
-  const harness = harnessFor(root);
-  const outcome = await harness.call("exec", { argv: [NODE, "-e", "console.log(process.argv.slice(1).join('|')); process.exit(3)", "a && b", "$(whoami)", "> out.txt"] });
+  const argv = [NODE, "-e", "console.log(process.argv.slice(1).join('|')); process.exit(3)", "a && b", "$(whoami)", "> out.txt"];
+  const harness = harnessFor(root, process.env, [argv, ["definitely-not-a-real-program-xyz"]]);
+  const outcome = await harness.call("exec", { argv });
   assert.equal(outcome.state, "succeeded", JSON.stringify(outcome.result));
   assert.equal(outcome.result.exit_code, 3);
   assert.match(outcome.result.text, /a && b\|\$\(whoami\)\|> out\.txt/);
@@ -122,9 +137,10 @@ test("exec runs argv without a shell, reports the exit code and keeps shell meta
 test("exec passes only allowlisted parent variables plus permitted model variables", async (t) => {
   const root = await workspace(t);
   const parent = { ...process.env, OPENAI_API_KEY: "sk-parent-secret-should-not-leak", SYNORCH_TEST_SECRET: "hidden" };
-  const harness = harnessFor(root, parent);
+  const argv = [NODE, "-e", "console.log(JSON.stringify({o: process.env.OPENAI_API_KEY ?? null, s: process.env.SYNORCH_TEST_SECRET ?? null, m: process.env.MY_FLAG ?? null, p: Boolean(process.env.PATH || process.env.Path)}))"];
+  const harness = harnessFor(root, parent, [argv]);
   const outcome = await harness.call("exec", {
-    argv: [NODE, "-e", "console.log(JSON.stringify({o: process.env.OPENAI_API_KEY ?? null, s: process.env.SYNORCH_TEST_SECRET ?? null, m: process.env.MY_FLAG ?? null, p: Boolean(process.env.PATH || process.env.Path)}))"],
+    argv,
     env: { MY_FLAG: "on" },
   });
   assert.equal(outcome.state, "succeeded", JSON.stringify(outcome.result));
@@ -140,7 +156,7 @@ test("exec passes only allowlisted parent variables plus permitted model variabl
 
 test("exec refuses shell scripts on stdin so policy can always inspect them", async (t) => {
   const root = await workspace(t);
-  const harness = harnessFor(root);
+  const harness = harnessFor(root, process.env, [[NODE, "-e", "process.stdin.pipe(process.stdout)"]]);
   for (const shell of ["bash", "sh", "cmd", "powershell", "pwsh"]) {
     const outcome = await harness.call("exec", { argv: [shell], stdin: "rm -rf /" });
     assert.equal(outcome.state, "denied");
@@ -152,7 +168,7 @@ test("exec refuses shell scripts on stdin so policy can always inspect them", as
 
 test("exec cwd is resolved inside the workspace and outside cwd is refused", async (t) => {
   const root = await workspace(t);
-  const harness = harnessFor(root);
+  const harness = harnessFor(root, process.env, [[NODE, "-e", "console.log(process.cwd())"]]);
   const inside = await harness.call("exec", { argv: [NODE, "-e", "console.log(process.cwd())"], cwd: "src/auth" });
   assert.equal(inside.state, "succeeded", JSON.stringify(inside.result));
   assert.match(inside.result.text, /auth/);

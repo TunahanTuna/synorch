@@ -6,6 +6,7 @@ import {
   createId,
   digestOf,
   effectivePolicySchema,
+  execConfinementFor,
   EVENT_VERSIONS,
   isReservedWritePattern,
   READ_ONLY_ROLES,
@@ -233,6 +234,8 @@ export function createFakePolicyEngine(options: FakePolicyOptions = {}): PolicyE
         network: { mode: "deny", hosts: [] },
         sandbox: { backend: inputs.sandbox.backend, enforcement: inputs.sandbox.enforcement },
         require_full_sandbox: false,
+        exec_confinement: execConfinementFor(inputs.sandbox.enforcement, inputs.mode),
+        verification_commands: [...(inputs.taskScope?.verification_commands ?? [])],
         layers: [{ layer: "role", source: inputs.role, digest: digestOf({ role: inputs.role }) }],
       });
       computed.push(policy);

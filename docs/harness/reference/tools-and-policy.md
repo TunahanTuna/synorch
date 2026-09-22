@@ -8,8 +8,8 @@ Bu belge I3'ün **uyguladığı** davranışı anlatır. Sözleşmenin kendisi `
 
 | Fabrika | Modül | Döndürdüğü |
 | --- | --- | --- |
-| `createPolicyEngine()` | policy | `PolicyEngine` (`compute` + `evaluate`) |
-| `explainPermission(action, policy)` | policy | `PolicyDecision` (`--explain-permission`, salt okunur) |
+| `createPolicyEngine(options?)` | policy | `PolicyEngine` (`compute` + `evaluate`); `options.synorchHome` Synorch home yazma korumasını açar (composition root `home`'u verir) |
+| `explainPermission(action, policy, options?)` | policy | `PolicyDecision` (`--explain-permission`, salt okunur); exec allowlist kararı (`exec-allowlisted`, `exec-not-allowlisted`, `exec-unconfined`) gerekçelerden biridir |
 | `createHeadlessApprovalBroker(options?)` | policy | `ApprovalBroker` (yalnız reddeder) |
 | `classifyCommand(argv, scope)` | policy | Yıkıcı/dış yazma/yazan komut sınıflandırması |
 | `DESTRUCTIVE_COMMAND_RULES`, `EXTERNAL_WRITE_RULES` | policy | Veri tabloları (örnekleriyle) |
@@ -37,6 +37,7 @@ Modül sınırı: `tools` ve `policy` birbirini import etmez (ADR-01). Gateway `
 - **Allowlist ve ağ:** `external_write_allowlist` ve `network` kullanıcı katmanından gelir; workspace katmanı bunları yalnız kesiştirir (repo içindeki bir dosya allowlist ekleyemez, ağ modunu yükseltemez).
 - **Mod dönüşümü:** `ask` modunda `workspace-write`/`exec`/`external-write` → `ask`. `autonomous` modda `external-write` yalnız boş olmayan allowlist ile `allow`, aksi halde `deny`.
 - **Sandbox:** `require_full_sandbox` (kullanıcı veya workspace) ve rapor `full` değilse `workspace-write` ve `exec` → `deny`.
+- **Exec kısıtı:** `exec_confinement = execConfinementFor(sandbox.enforcement, mode)`: `full` → `full-sandbox`, aksi halde `autonomous` → `allowlist`, `ask` → `ask`. `verification_commands` = `taskScope.verification_commands` (I4 `worker-manager` packet'in `verification.commands` listesini verir), kırpılmış ve tekilleştirilmiş. İkisi de `policy/snapshot` v2 alanıdır.
 - **Grant'ler** `approval` katmanı olarak digest'le kaydedilir, kapsamı veya etkileri **genişletmez**; eylem onayı gateway'de digest'e bağlanır (§4).
 - Config şeması (`policyConfigSchema`) katıdır: `policy` altındaki bilinmeyen anahtar `config_invalid` verir. `policy_version` her hesaplamada `1`'dir; sürüm artırımı çağıranın (I4) sorumluluğundadır.
 - Sonuç `effectivePolicySchema.parse` ile doğrulanır; şema invariant'ı bozulursa hesaplama throw eder.
@@ -46,9 +47,15 @@ Modül sınırı: `tools` ve `policy` birbirini import etmez (ADR-01). Gateway `
 
 Sıra: yollar → komut → ağ → etki matrisi. Herhangi bir `deny` kalıcıdır; `ask` yalnız hiçbir deny yoksa verilir. Hard rail varsa karar her iki modda da `deny`'dır ve ilk rail `rail` alanına yazılır.
 
-- **Yazma yolu:** rezerve segment (büyük/küçük harf duyarsız) → `reserved-path-write`; policy katmanı kaynağı olan workspace-relative dosya → `policy-self-modification`; forbidden ile eşleşme (duyarsız) veya write_scope dışı (duyarlı) → `write-outside-scope`.
+- **Yazma yolu:** `.git/hooks/**` veya `.git/config` (hem leksik yolda hem kanonik realpath'te, duyarsız) → `reserved-path-write` + `git-hooks-or-config`; diğer rezerve segmentler → `reserved-path-write`; kanonik yolu (en derin var olan atanın `realpath`'i, Windows/macOS'ta harf katlanmış) Synorch home altında olan yazma → `reserved-path-write` + `synorch-home-write` — yalnız işçinin kendi workspace kökü home içindeyse (attempt worktree'si) o kökün altı serbesttir; forbidden ile eşleşme (duyarsız) veya write_scope dışı (duyarlı) → `write-outside-scope`. (Eski, hiçbir zaman eşleşmeyen "policy katmanı kaynağı" kontrolü kaldırıldı; policy dosyaları rezerve segmentler ve Synorch home koruması ile korunur.)
 - **Okuma yolu:** forbidden → deny; read_scope dışı → deny. Bir read deseninin üstündeki dizinler (`.`/`src` için `src/auth/**`) listelenebilir.
 - **Komut:** `classifyCommand` her argv'yi kendisi yeniden sınıflandırır; aracın `destructive: true` ipucu yalnız ekleyebilir, `false` hiçbir bulguyu silmez. Sınıflandırıcı `external-write` bulursa etki `exec`'ten `external-write`'a yükselir. Read-only rolde (explorer, reviewer) dosya yazabilen komut (shell sarmalayıcıları, yönlendirme, `git commit`, paket kurulumları, `node -e` gibi satır içi kod, PowerShell `Set-Content` vb.) → deny.
+- **Exec allowlist (`policy/exec-allowlist.ts`, varsayılan-ret):** kötü komutları saymaz; yalnız olumlu tanınan, tam ayrıştırılmış argv çalışır.
+  - *Read-only işçiler* (explorer, reviewer, owned path'i olmayan rca-only debugger), sandbox seviyesinden bağımsız: yalnız dosya yazan bayrak içermeyen yazmayan git alt komutları (`status`, `diff`, `log`, `show`, `blame`, `ls-files`, `rev-parse`; alt komut ilk argüman olmalı, `--output`/`--ext-diff` yok), dizin listeleme/dosya görüntüleme (`ls`, `dir`, `tree`, `cat`, `type`, `head`, `tail`, `wc`, `stat`, `file`, `pwd`; argümanlar workspace dışını adlandıramaz), `rg`/`grep`/`findstr` (`rg --pre` yok) ve birebir `verification_commands`. Diğer her şey `role` katmanında `exec-not-allowlisted` (`policy_denied`).
+  - *Sandbox `full` değilse* (Windows'ta bugün her zaman) tüm roller `autonomous` modda yalnız: birebir `verification_commands`, kullanıcı `external_write_allowlist`'inin birebir (yıldızsız) girdileri, read-only liste ve incelenmiş build/test listesi — paket yöneticisi (`npm|pnpm|yarn|bun`) `test`/`build`/`typecheck`/`run <script>`/`install --frozen-lockfile` (`npm ci`), `node --test` (yalnız `--test-*` bayrakları ve dosyalar), `tsc` (`-p`, `--noEmit`, `-b` …), yazmayan git alt komutları + workspace içinde `git add`/`git commit -m`, `dotnet build|test`, `mvn test`, `gradle test`, `cargo build|test`, `go build|test`, `pytest`. Script kabuğunu/config'i değiştiren paket yöneticisi bayrakları (`--script-shell`, `--config.*`, `-C` …), `go -exec/-toolexec`, `cargo --config`, `gradle --init-script` ve workspace dışını adlandıran argümanlar (mutlak, sürücü, UNC, `~`, `..`) listeyi düşürür. Satır içi kodla çağrılan yorumlayıcı (node/bun `-e|-p|--eval|--print`, python `-c`, powershell/pwsh `-Command|-EncodedCommand`, bash/sh `-c` kümeleri, `cmd /c`, `deno eval`, ruby `-e`, perl `-e|-E`) listede değildir. Program adı düz bir kelime değilse (`$SHELL`, `./x`, `C:\x\node.exe`) komut sınıflandırılamaz. Listede olmayan komut `autonomous` modda `sandbox` katmanında `exec-not-allowlisted` ile reddedilir (gateway `sandbox_insufficient`); `ask` modunda `exec-unconfined` ile sorulur. Başka bir katman zaten reddettiyse sandbox gerekçesi eklenmez (daha açık kod maskelenmez).
+  - *Sandbox `full`*: yazan roller için davranış değişmez.
+  - Birebir eşleşme: doğrulama dizesi POSIX kurallarıyla ayrıştırılır; ikame, yönlendirme veya pipe içeren dize hiçbir argv ile eşleşmez; `a && b` biçimindeki her basit komut ayrı ayrı eşleşebilir. Windows'ta `.cmd` shim'leri (`pnpm`, `npm`) doğrudan çalıştırılamadığından (§8) bu makinelerde build komutları pratikte birebir doğrulama komutu olarak gelir.
+- **Git ayarları:** `git config`'in yazma biçimleri (varsayılan-ret: yalnız `--get*`, `--list`, `get`/`list` veya tek anahtar okuma sayılır) ve `core.hooksPath` içeren her git çağrısı (`git -c core.hooksPath=…` dahil) `reserved-path-write` bulgusudur.
 - **Ağ:** `network_hosts` boş değilse `deny` modunda red, `allowlist` modunda liste dışı host red.
 - **Allowlist eşleşmesi** kelime kelime tam argv'dir; girdinin son kelimesi `*` ise önek eşleşmesidir. `["git","push origin harness"]` gibi birleştirme hileleri eşleşmez.
 - Glob anlamı: `**` sıfır veya daha çok segment, `*`/`?` segment içi, `[...]`/`{a,b}` segment içi. Glob içermeyen desen kendisini ve altındaki her şeyi kapsar. Grant eşleşmesi büyük/küçük harfe duyarlıdır (duyarsız bir diskte bu yalnız daraltır); red eşleşmeleri duyarsızdır.
@@ -96,9 +103,9 @@ Callback bağlanmamış control aracı `execution_failed` döner; rapor araçlar
 
 `resolveWorkspacePath(root, aday, access)` eylem anında çalışır:
 
-1. NUL, boş, UNC/cihaz yolu (`\\server`, `//server`, `\\?\`, `\\.\`) → red.
+1. NUL, boş, UNC/cihaz yolu (`\\server`, `//server`, `\\?\`, `\\.\`) → red. Eşleştirmeden önce Windows'un sessizce yeniden yazdığı veya farklı yorumladığı biçimler de reddedilir: nokta veya boşlukla biten segment (`src.`, `a /b`), `:` içeren segment (alternatif veri akışı `file:stream`, sürücüye göreli `C:x`; yalnız mutlak yolun sürücüsü serbest), ayrılmış cihaz adları (`CON`, `PRN`, `AUX`, `NUL`, `COM1–9`, `LPT1–9`, uzantılı biçimleri dahil, ör. `nul.txt`).
 2. Leksik çözüm (`path.resolve`) kökün dışındaysa → red. Windows'ta `path.relative` büyük/küçük harfe duyarsızdır.
-3. Var olan her segment `realpath` ile çözülür (symlink ve junction); kanonik kökün dışına çıkan her ara sonuç → red. Sarkan link → red.
+3. Var olan her segment `realpath` ile çözülür (symlink ve junction); kanonik kökün dışına çıkan her ara sonuç → red. Sarkan link → red. `~<rakam>` içeren (8.3 kısa ad) ve realpath uzun adı farklı olan segment → red.
 4. Kanonik göreli yol dosya sisteminden gelir: Windows'ta `SRC/AUTH/x.ts` var olan `src/auth` üzerinden `src/auth/x.ts` olur. Var olmayan segmentler verildiği gibi kalır (Linux'ta `SRC/...` bu yüzden kapsam dışıdır).
 5. Yazmada var olan dosyanın `nlink > 1` olması → red (diğer adları kapsam dışında olabilir).
 
@@ -143,11 +150,12 @@ Callback bağlanmamış control aracı `execution_failed` döner; rapor araçlar
 | AC-6 | gateway + engine testleri | `AC-6: require_full_sandbox …` (policy ve gateway), canlı probe ile snapshot farkı, `execution_started` seviyesi |
 | AC-7 | `tests/harness-tools-gateway.test.ts` | `AC-7: output above 16 KiB …`, `AC-7: secrets in output …`, `AC-7: arguments carrying a live credential …` |
 | AC-8 | `tests/harness-tools-exec.test.ts` | `AC-8: cancelling exec terminates the whole child tree …` |
+| Güvenlik sertleştirmesi | `tests/harness-security-policy.test.ts` | `SEC-H1 …` (read-only roller allowlist dışı exec çalıştıramaz, `git status` çalıştırabilir; gateway'de spawn yok), `SEC-H3 …` (kısmi sandbox: doğrulama komutu ve `pnpm test` izinli, satır içi yorumlayıcı ve bilinmeyen program reddedilir, `ask` sorar, `full` değişmez; gateway `sandbox_insufficient`), `SEC-H2 …` (opak satır içi betik ve düz olmayan program adı), `SEC-L1 …` (her reddedilen yol biçimi, 8.3 kısa ad), `SEC-L3 …` (Synorch home, kendi worktree, `.git/hooks`/`.git/config`, `git config`/`core.hooksPath`) |
 
 ## 11. Bilinen sınırlar
 
-- Windows v1'de OS dosya sistemi sandbox'ı yoktur: `exec` ile başlatılan bir program (ör. `node script.js`) kapsam dışına yazabilir. Yazma denetimi yerleşik yazma araçları için eylem anındadır; shell için sınıflandırıcı yalnız bilinen yıkıcı/yazan biçimleri yakalar. `require_full_sandbox` görevleri Windows'ta durur (ADR-06).
-- `npm run <script>` gibi dolaylı betikler ve yorumlayıcılara verilen kod opaktır; read-only rollerde satır içi kod reddedilir, yazabilen rollerde çalışır.
+- Windows v1'de OS dosya sistemi sandbox'ı yoktur. Bu yüzden `exec` kısmi sandbox'ta allowlist ile sınırlanır (§3): yalnız birebir doğrulama komutları ve incelenmiş build/test komutları çalışır. **Kalan risk:** allowlist'teki build/test komutları (`pnpm test`, `pnpm run <script>`, `node --test`, `cargo test`, `go test`, `pytest`, `git commit` hook'ları …) yine depo kodunu çalıştırır ve bu kod kapsam dışına yazabilir, ağa çıkabilir; doğrulama komutlarını planı yazan orchestrator (model) seçer. Exec'i gerçekten yalnız tam bir OS sandbox'ı (bubblewrap, sandbox-exec; Windows'ta sonraki sürümde AppContainer/job object) sınırlar. `require_full_sandbox` görevleri Windows'ta durur (ADR-06).
+- Read-only listedeki görüntüleme/arama komutlarının argümanları workspace dışını adlandıramaz, ama read_scope/forbidden ile süzülmezler (yerleşik `read_file`/`search` süzer).
 - `rm -rf` hedefi owned içindeki bir junction ise hedef leksik olarak kapsam içinde görünür; bazı araçlar (eski PowerShell sürümleri) junction'ın içine inebilir.
 - Yeniden kontrol ile `rename` arasındaki çok kısa pencerede ana dizinin junction ile değiştirilmesi teorik olarak mümkündür (dosya tanıtıcısı tabanlı yazma sonraki sürüm).
 - `search` kullanıcı regex'ini çalıştırır; satır başına 2000 karakter sınırı dışında ReDoS koruması yoktur.

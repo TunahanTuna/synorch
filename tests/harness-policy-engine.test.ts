@@ -181,8 +181,10 @@ test("AC-2: explorer and reviewer cannot write through patch tools or mutating s
       assert.equal(decision.decision, "deny", `${role} ${argv.join(" ")}`);
     }
   }
-  const reviewer = engine.compute(inputs({ role: "reviewer" }));
+  const verifying = { owned: [], read: [], forbidden: [], verification_commands: ["node --test"] };
+  const reviewer = engine.compute(inputs({ role: "reviewer", taskScope: verifying }));
   assert.equal(engine.evaluate(exec(["node", "--test"], "reviewer"), reviewer).decision, "allow");
+  assert.equal(engine.evaluate(exec(["node", "--test"], "reviewer"), engine.compute(inputs({ role: "reviewer" }))).decision, "deny", "not a verification command");
   const explorer = engine.compute(inputs({ role: "explorer" }));
   assert.equal(engine.evaluate(exec(["node", "--test"], "explorer"), explorer).decision, "deny");
 });

@@ -399,7 +399,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   };
 
   const canonical = await loadCanonicalStructure(workspaceRoot);
-  const policy = withRoleDefinitions(createPolicyEngine(), canonical.roles);
+  const policy = withRoleDefinitions(createPolicyEngine({ synorchHome: home }), canonical.roles);
   const sandbox = overrides.sandbox ?? (await probeSandbox({ platform }));
   const runner = createSandboxRunner(sandbox);
   const userConfig = config.userPolicy === undefined ? undefined : { policy: config.userPolicy };

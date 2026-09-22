@@ -8,7 +8,7 @@ import {
   isWholeWorkspacePattern,
   pathPatternSchema,
 } from "./paths.ts";
-import { SANDBOX_ENFORCEMENT, toolEffectSchema, TOOL_EFFECTS, type SandboxReport } from "./tools.ts";
+import { SANDBOX_ENFORCEMENT, toolEffectSchema, TOOL_EFFECTS, type SandboxEnforcement, type SandboxReport } from "./tools.ts";
 
 /**
  * Policy is computed, never prompted: effective = platform ∩ user ∩ workspace ∩ role ∩ task scope
@@ -39,6 +39,20 @@ export const HARD_RAILS = [
 export const hardRailSchema = z.enum(HARD_RAILS);
 export type HardRail = (typeof HARD_RAILS)[number];
 
+/**
+ * How `exec` is confined. `full-sandbox`: an OS backend confines every child, so any
+ * non-destructive command may run. Without a full sandbox the gateway cannot stop a child from
+ * writing outside the scope, so exec is default-deny: only exact `verification_commands` and a
+ * vetted build/test allowlist run (`allowlist`, autonomous mode) or anything else asks (`ask`).
+ */
+export const EXEC_CONFINEMENTS = ["full-sandbox", "allowlist", "ask"] as const;
+export type ExecConfinement = (typeof EXEC_CONFINEMENTS)[number];
+
+export function execConfinementFor(enforcement: SandboxEnforcement, mode: PolicyMode): ExecConfinement {
+  if (enforcement === "full") return "full-sandbox";
+  return mode === "ask" ? "ask" : "allowlist";
+}
+
 export const effectDecisionSchema = z.enum(["allow", "ask", "deny"]);
 export type EffectDecision = z.infer<typeof effectDecisionSchema>;
 
@@ -68,6 +82,10 @@ export const effectivePolicySchema = z
     }),
     sandbox: z.strictObject({ backend: z.string().min(1), enforcement: z.enum(SANDBOX_ENFORCEMENT) }),
     require_full_sandbox: z.boolean(),
+    /** Optional only so `policy/snapshot` v1 events stay readable; `compute` always sets it (v2). */
+    exec_confinement: z.enum(EXEC_CONFINEMENTS).optional(),
+    /** Exact commands of the task's verification section; absent means `[]` (v2). */
+    verification_commands: z.array(z.string().min(1).max(2000)).max(64).optional(),
     layers: z
       .array(z.strictObject({ layer: z.enum(POLICY_LAYERS), source: z.string().min(1), digest: digestSchema }))
       .min(1),
@@ -113,6 +131,13 @@ export const effectivePolicySchema = z
           context.addIssue({ code: "custom", path: ["effects", effect], message: "full sandbox is required but not available" });
         }
       }
+    }
+    if (policy.exec_confinement !== undefined && policy.exec_confinement !== execConfinementFor(policy.sandbox.enforcement, policy.mode)) {
+      context.addIssue({
+        code: "custom",
+        path: ["exec_confinement"],
+        message: `exec confinement must be ${execConfinementFor(policy.sandbox.enforcement, policy.mode)} for a ${policy.sandbox.enforcement} sandbox in ${policy.mode} mode`,
+      });
     }
     if (policy.network.mode !== "allowlist" && policy.network.hosts.length > 0) {
       context.addIssue({ code: "custom", path: ["network", "hosts"], message: "hosts are only meaningful for allowlist mode" });
@@ -247,7 +272,15 @@ export interface PolicyInputs {
   readonly runId: z.infer<typeof runIdSchema>;
   readonly taskId: z.infer<typeof taskIdSchema> | undefined;
   readonly workspaceRoot: string;
-  readonly taskScope: { readonly owned: readonly string[]; readonly read: readonly string[]; readonly forbidden: readonly string[] } | undefined;
+  readonly taskScope:
+    | {
+        readonly owned: readonly string[];
+        readonly read: readonly string[];
+        readonly forbidden: readonly string[];
+        /** The packet's exact verification commands; the only exec a partial sandbox allows beyond the vetted list. */
+        readonly verification_commands?: readonly string[];
+      }
+    | undefined;
   readonly userConfig: unknown;
   readonly workspaceConfig: unknown;
   readonly sandbox: SandboxReport;

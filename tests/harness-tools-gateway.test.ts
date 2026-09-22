@@ -48,6 +48,13 @@ interface SetupOptions {
   readonly runnerReport?: SandboxReport;
   readonly approvals?: ApprovalBroker;
   readonly redactionValues?: readonly string[];
+  /** Exact argv the task's verification section names; the only exec a partial sandbox runs beyond the vetted list. */
+  readonly verification?: readonly (readonly string[])[];
+}
+
+/** POSIX single-quoting, so a verification string parses back to exactly this argv. */
+function commandLine(argv: readonly string[]): string {
+  return argv.map((word) => `'${word.replaceAll("'", "'\\''")}'`).join(" ");
 }
 
 function setup(root: string, options: SetupOptions = {}): GatewayHarness {
@@ -58,7 +65,10 @@ function setup(root: string, options: SetupOptions = {}): GatewayHarness {
     runId: createId("run"),
     taskId: role === "orchestrator" ? undefined : createId("task"),
     workspaceRoot: root,
-    taskScope: role === "orchestrator" ? undefined : { owned: ["src/auth/**"], read: [], forbidden: ["src/billing/**"] },
+    taskScope:
+      role === "orchestrator"
+        ? undefined
+        : { owned: ["src/auth/**"], read: [], forbidden: ["src/billing/**"], verification_commands: (options.verification ?? []).map(commandLine) },
     userConfig: options.userConfig,
     workspaceConfig: options.workspaceConfig,
     sandbox: options.policyReport ?? PARTIAL,
@@ -270,8 +280,9 @@ test("AC-6: a non-full enforcement is recorded on tool/execution_started", async
 
 test("AC-7: output above 16 KiB goes to a blob and only a bounded preview stays inline", async (t) => {
   const root = await workspace(t);
-  const harness = setup(root);
-  const outcome = await harness.call("exec", { argv: [NODE, "-e", "process.stdout.write('a'.repeat(40000) + 'END')"] });
+  const argv = [NODE, "-e", "process.stdout.write('a'.repeat(40000) + 'END')"];
+  const harness = setup(root, { verification: [argv] });
+  const outcome = await harness.call("exec", { argv });
   assert.equal(outcome.state, "succeeded", JSON.stringify(outcome.result.error));
   assert.ok(outcome.result.blob !== undefined);
   assert.ok(Buffer.byteLength(outcome.result.text) <= 16 * 1024);
@@ -284,15 +295,16 @@ test("AC-7: output above 16 KiB goes to a blob and only a bounded preview stays 
 
 test("AC-7: secrets in output are redacted before the model, the log or a blob sees them", async (t) => {
   const root = await workspace(t);
-  const harness = setup(root, { redactionValues: ["SUPERSECRET-VALUE-42"] });
   const script = "console.log('cred=' + 'SUPER' + 'SECRET-VALUE-42'); console.log('key sk-' + 'x'.repeat(32)); console.log('API_TOKEN=' + 'abcdef' + '123456')";
+  const bigArgv = [NODE, "-e", "process.stdout.write('b'.repeat(30000) + 'SUPER' + 'SECRET-VALUE-42')"];
+  const harness = setup(root, { redactionValues: ["SUPERSECRET-VALUE-42"], verification: [[NODE, "-e", script], bigArgv] });
   const outcome = await harness.call("exec", { argv: [NODE, "-e", script] });
   assert.equal(outcome.state, "succeeded", JSON.stringify(outcome.result.error));
   assert.ok(outcome.result.redactions >= 3, String(outcome.result.redactions));
   assert.doesNotMatch(outcome.result.text, /SUPERSECRET-VALUE-42|sk-x{32}|abcdef123456/);
   assert.doesNotMatch(JSON.stringify(harness.events.events), /SUPERSECRET-VALUE-42|sk-x{32}|abcdef123456/);
 
-  const big = await harness.call("exec", { argv: [NODE, "-e", "process.stdout.write('b'.repeat(30000) + 'SUPER' + 'SECRET-VALUE-42')"] });
+  const big = await harness.call("exec", { argv: bigArgv });
   assert.ok(big.result.blob !== undefined);
   assert.doesNotMatch(harness.blobs.text(big.result.blob.digest), /SUPERSECRET-VALUE-42/);
   assert.ok(big.result.redactions > 0);

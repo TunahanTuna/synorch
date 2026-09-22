@@ -329,6 +329,8 @@ Required body sections, as level-two headings: `When this applies`, `When it doe
 
 The schema is `skillContractSchema` in `src/domain/canonical-contracts.ts`, and it is deliberately extendable so non-canonical generated skills can add their own provenance fields without redefining the base shape.
 
+The contract is enforced on the two skill sets Synorch authors or approves: the canonical base skills under `.ai/skills/<id>/` and the generated project skills under `.ai/skills/project/<id>/`. Skills under `.ai/skills/technology/**` and the bundled Ingenium library are exempt by design — they are imported at the `reference-only` trust level, carry their upstream authors' shape, and rewriting them to this contract would break their provenance.
+
 Skills are loaded on demand; not every skill's content is included in every session. Depth that only one step needs belongs in a `references/` file beside the skill, which is fetched only when that step reaches it.
 
 ## 9. The Protocol System

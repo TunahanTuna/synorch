@@ -246,7 +246,7 @@ syn doctor  [--target <path>] [--json]
 
 `--json` on `sync` and `doctor` gives machine-readable output for CI pipelines.
 
-**Safety defaults that actually hold:** existing differing files are never overwritten without an explicit `--force`; the active skill registry is written *last*, after every prerequisite output, so a failed write leaves the previous working registry intact; and nothing is reported `healthy` while a single reference is missing, broken, duplicated, or pointing outside the root.
+**Safety defaults that actually hold:** existing differing files are never overwritten without an explicit `--force`, and the observation ledger `.ai/tasks/observations.yaml` is never overwritten even with it — it is seeded once and reported as `preserved` thereafter; the active skill registry is written *last*, after every prerequisite output, so a failed write leaves the previous working registry intact; and nothing is reported `healthy` while a single reference is missing, broken, duplicated, or pointing outside the root.
 
 ---
 

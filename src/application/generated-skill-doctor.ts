@@ -5,7 +5,6 @@ import {
   GENERATED_SKILL_DIRECTORY,
   GENERATED_SKILL_MAX_BYTES,
   generatedSkillFrontmatterSchema,
-  splitFrontmatter,
   type GeneratedSkillFrontmatter,
 } from "../domain/generated-skill.ts";
 import {
@@ -14,6 +13,7 @@ import {
   type ObservationLedger,
 } from "../domain/observation-ledger.ts";
 import type { FileSystem } from "../infrastructure/file-system.ts";
+import { parseFrontmatter, type ParsedFrontmatter } from "../infrastructure/frontmatter.ts";
 import { parseYaml } from "../infrastructure/serialization.ts";
 import type { Diagnostic } from "./doctor-service.ts";
 
@@ -51,12 +51,11 @@ export async function diagnoseGeneratedSkills(
       });
     }
 
-    const frontmatter = readFrontmatter(content, relativePath, diagnostics);
-    if (frontmatter === undefined) continue;
-    const parsed = validateFrontmatter(frontmatter, relativePath, diagnostics);
+    const document = readSkillDocument(content, relativePath, diagnostics);
+    if (document === undefined) continue;
+    const parsed = validateFrontmatter(document.data, relativePath, diagnostics);
 
-    const document = splitFrontmatter(content);
-    reportShapeHeuristics(document?.body ?? "", parsed, relativePath, diagnostics);
+    reportShapeHeuristics(document.body, parsed, relativePath, diagnostics);
     if (parsed === undefined) continue;
 
     if (parsed.status === "active") activeSkills += 1;
@@ -153,13 +152,18 @@ function collectConfirmingTaskIds(ledger: ObservationLedger | undefined): Readon
   return taskIds;
 }
 
-function readFrontmatter(
+/**
+ * Reads the shared canonical frontmatter block. `missing` and `malformed` keep the dedicated
+ * codes the generated namespace already reports, so the two contracts share one parser without
+ * sharing a diagnostic vocabulary.
+ */
+function readSkillDocument(
   content: string,
   relativePath: string,
   diagnostics: Diagnostic[],
-): Record<string, unknown> | undefined {
-  const document = splitFrontmatter(content);
-  if (document === undefined) {
+): ParsedFrontmatter | undefined {
+  const result = parseFrontmatter(content);
+  if (result.kind === "missing") {
     diagnostics.push({
       severity: "error",
       code: "generated.frontmatter-missing",
@@ -168,29 +172,16 @@ function readFrontmatter(
     });
     return undefined;
   }
-
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(document.frontmatter);
-  } catch (error: unknown) {
+  if (result.kind === "malformed") {
     diagnostics.push({
       severity: "error",
       code: "generated.frontmatter-invalid",
-      message: error instanceof Error ? error.message : String(error),
+      message: result.message,
       path: relativePath,
     });
     return undefined;
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    diagnostics.push({
-      severity: "error",
-      code: "generated.frontmatter-invalid",
-      message: "Generated skill frontmatter must be a YAML mapping.",
-      path: relativePath,
-    });
-    return undefined;
-  }
-  return parsed as Record<string, unknown>;
+  return result;
 }
 
 /**

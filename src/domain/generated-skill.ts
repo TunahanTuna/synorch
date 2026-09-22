@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { skillContractSchema } from "./canonical-contracts.ts";
 import { OBSERVATION_PROMOTION_THRESHOLD } from "./observation-ledger.ts";
 
 /** Generated project skills live in their own namespace and are never touched by `sync`. */
@@ -9,26 +10,6 @@ export const GENERATED_SKILL_MAX_BYTES = 15_360;
 
 /** Blocking budget: the number of project skills that may be `active` at the same time. */
 export const GENERATED_SKILL_ACTIVE_BUDGET = 12;
-
-/** Body sections the Canonical Skill Contract requires of every skill. */
-export const REQUIRED_SKILL_SECTIONS = [
-  "When this applies",
-  "When it does not",
-  "Required inputs",
-  "Procedure",
-  "Tools",
-  "Verification",
-  "Stop and escalate",
-  "Output contract",
-] as const;
-
-const kebabCaseSchema = z
-  .string()
-  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "must be kebab-case");
-
-const semverSchema = z
-  .string()
-  .regex(/^\d+\.\d+\.\d+$/, "must be a three-part semantic version");
 
 const isoDateSchema = z
   .string()
@@ -58,21 +39,16 @@ export const generatedSkillEvidenceSchema = z.object({
 export type GeneratedSkillEvidence = z.infer<typeof generatedSkillEvidenceSchema>;
 
 /**
- * Canonical Skill Contract v1 base fields, inlined here for the first slice. Integration
- * re-bases this object onto `skillContractSchema.extend(...)` from `./canonical-contracts.ts`
- * once the shared contract module lands; the field set below is that contract plus §5.
+ * Canonical Skill Contract v1 (`skillContractSchema`) plus the provenance fields of
+ * design §5. Only two inherited fields are overridden, both to tighten them: a generated
+ * skill must state `priority: skill` explicitly rather than inherit the shared default,
+ * because the ceiling is a security property a reviewer has to be able to read in the file
+ * itself; and its `references` must be provably relative, since nothing else validates the
+ * reference paths of a skill outside the canonical set.
  */
-export const generatedSkillFrontmatterSchema = z
-  .object({
-    name: kebabCaseSchema,
-    description: z.string().min(1),
-    version: semverSchema,
-    not_for: z.string().min(1).optional(),
-    inputs: z.array(z.string().min(1)).optional(),
-    tools: z.array(z.string().min(1)).optional(),
-    outputs: z.string().min(1).optional(),
+export const generatedSkillFrontmatterSchema = skillContractSchema
+  .extend({
     references: z.array(referencePathSchema).optional(),
-    /** Priority ceiling: a generated skill can never claim constitutional or protocol authority. */
     priority: z.literal("skill"),
     origin: z.literal("generated"),
     status: z.enum(["proposed", "active", "stale", "retired"]),
@@ -117,25 +93,3 @@ export const generatedSkillFrontmatterSchema = z
     }
   });
 export type GeneratedSkillFrontmatter = z.infer<typeof generatedSkillFrontmatterSchema>;
-
-export interface SkillDocument {
-  readonly frontmatter: string;
-  readonly body: string;
-}
-
-/**
- * Minimal frontmatter splitter: the YAML block fenced by `---` at the very start of the file.
- * Integration replaces this single call with the shared parser in `infrastructure/frontmatter.ts`.
- */
-export function splitFrontmatter(content: string): SkillDocument | undefined {
-  const normalized = content.replaceAll("\r\n", "\n");
-  if (!normalized.startsWith("---\n")) return undefined;
-  const end = normalized.indexOf("\n---", 3);
-  if (end === -1) return undefined;
-  const afterFence = normalized.slice(end + 4);
-  if (afterFence.length > 0 && !afterFence.startsWith("\n")) return undefined;
-  return {
-    frontmatter: normalized.slice(4, end + 1),
-    body: afterFence.startsWith("\n") ? afterFence.slice(1) : afterFence,
-  };
-}

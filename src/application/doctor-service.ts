@@ -27,6 +27,7 @@ import {
   splitMarkdownSections,
 } from "../infrastructure/frontmatter.ts";
 import { parseYaml } from "../infrastructure/serialization.ts";
+import { diagnoseGeneratedSkills } from "./generated-skill-doctor.ts";
 
 export type DiagnosticSeverity = "error" | "warning" | "info";
 
@@ -151,6 +152,7 @@ export class DoctorService {
     }
 
     await this.validateCanonicalContracts(root, diagnostics);
+    diagnostics.push(...(await diagnoseGeneratedSkills(this.fileSystem, root)));
 
     if (diagnostics.length === 0) {
       diagnostics.push({

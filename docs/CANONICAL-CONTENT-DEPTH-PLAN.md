@@ -1,6 +1,6 @@
 # Canonical Content Depth — Analysis and Work Plan
 
-> Status: Analysed, planned, not implemented
+> Status: Implemented (W1–W7). Contracts in `src/domain/canonical-contracts.ts`, enforced by `doctor`.
 > Analysed: 2026-09-22
 > Related: [Architecture](./AI-ORCHESTRATION-ARCHITECTURE.md) §8.1, §8.2, [Skill Creator design](./SKILL-CREATOR-DESIGN.md), [Hermes research](./research/HERMES-SKILL-SYSTEM.md) §5
 > Purpose: The agent manifests and base skills produced by `syn init` are too thin to carry the behavior the architecture specifies. This document measures the gap, resolves it against the token budget, and defines the work.

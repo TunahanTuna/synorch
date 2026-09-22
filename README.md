@@ -268,9 +268,11 @@ syn doctor  [--target <path>] [--json]
 │       ├── context-handoff.md        verification.md
 │       ├── failure-recovery.md       user-communication.md
 ├── agents/
-│   └── orchestrator · explorer · implementer · reviewer · debugger
+│   └── <role>/AGENT.md           # Canonical Agent Manifest v1, one per role:
+│                                 # orchestrator · explorer · implementer · reviewer · debugger
 ├── skills/
-│   ├── <eight canonical base skills>/SKILL.md
+│   ├── <canonical base skills>/SKILL.md      # Canonical Skill Contract v1
+│   │   └── references/*.md                   # depth loaded only when a step needs it
 │   ├── technology/<selected>/SKILL.md
 │   ├── library/ingenium/**            # bundled, on-demand
 │   └── catalog.yaml                   # provenance, license, activation mode

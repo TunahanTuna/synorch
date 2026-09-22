@@ -9,8 +9,23 @@ import {
   type SkillRegistry,
   type WorkspaceConfig,
 } from "../domain/config.ts";
-import { BASE_SKILLS } from "../domain/skill-packs.ts";
+import {
+  agentManifestSchema,
+  skillContractSchema,
+  CANONICAL_SIZE_CEILINGS,
+  NUMBERED_PROCEDURE_SECTION,
+  REQUIRED_AGENT_SECTIONS,
+  REQUIRED_SKILL_SECTIONS,
+  TECHNOLOGY_SKILL_TOKEN,
+  type CanonicalSizeLayer,
+} from "../domain/canonical-contracts.ts";
+import { BASE_SKILLS, type SkillDefinition } from "../domain/skill-packs.ts";
 import type { FileSystem } from "../infrastructure/file-system.ts";
+import {
+  normalizeSectionName,
+  parseFrontmatter,
+  splitMarkdownSections,
+} from "../infrastructure/frontmatter.ts";
 import { parseYaml } from "../infrastructure/serialization.ts";
 
 export type DiagnosticSeverity = "error" | "warning" | "info";
@@ -30,6 +45,25 @@ const REQUIRED_PATHS = [
   ".ai/schemas/context-packet.schema.json",
   ".ai/schemas/completion-packet.schema.json",
 ] as const;
+
+const AGENTS_DIRECTORY = ".ai/agents";
+const CORE_PROTOCOLS_DIRECTORY = ".ai/protocols/core";
+
+/** One diagnostic code per layer, so an overrun names the budget it broke. */
+const SIZE_CODES: Readonly<Record<CanonicalSizeLayer, string>> = {
+  entrypoint: "size.entrypoint",
+  constitution: "size.constitution",
+  protocol: "size.protocol",
+  agentManifest: "size.agent-manifest",
+  baseSkill: "size.base-skill",
+  skillReference: "size.skill-reference",
+};
+
+/** Skill ids an agent manifest may name in allowed_skills or forbidden_skills. */
+const KNOWN_SKILL_REFERENCES: ReadonlySet<string> = new Set([
+  ...BASE_SKILLS.map((skill) => skill.id),
+  TECHNOLOGY_SKILL_TOKEN,
+]);
 
 export class DoctorService {
   private readonly fileSystem: FileSystem;
@@ -115,6 +149,8 @@ export class DoctorService {
     if (workspace !== undefined) {
       await this.validateWorkspaceChain(root, workspace, diagnostics);
     }
+
+    await this.validateCanonicalContracts(root, diagnostics);
 
     if (diagnostics.length === 0) {
       diagnostics.push({
@@ -609,6 +645,233 @@ export class DoctorService {
     }
   }
 
+  /**
+   * Canonical Agent Manifest v1 and Canonical Skill Contract v1 enforcement.
+   * Contract violations are errors; layer size overruns are warnings.
+   */
+  private async validateCanonicalContracts(
+    root: string,
+    diagnostics: Diagnostic[],
+  ): Promise<void> {
+    await this.checkFileSize(root, "AGENTS.md", "entrypoint", diagnostics);
+    await this.checkFileSize(root, "CLAUDE.md", "entrypoint", diagnostics);
+    await this.checkFileSize(root, ".ai/constitution.md", "constitution", diagnostics);
+    for (const protocolPath of await this.listMarkdownFiles(root, CORE_PROTOCOLS_DIRECTORY)) {
+      await this.checkFileSize(root, protocolPath, "protocol", diagnostics);
+    }
+
+    for (const agentId of await this.listDirectoryNames(root, AGENTS_DIRECTORY)) {
+      await this.validateAgentManifest(root, agentId, diagnostics);
+    }
+    for (const skill of BASE_SKILLS) {
+      await this.validateSkillContract(root, skill, diagnostics);
+    }
+  }
+
+  private async validateAgentManifest(
+    root: string,
+    agentId: string,
+    diagnostics: Diagnostic[],
+  ): Promise<void> {
+    const relativePath = `${AGENTS_DIRECTORY}/${agentId}/AGENT.md`;
+    const content = await this.readOptionalText(root, relativePath);
+    if (content === undefined) {
+      diagnostics.push({
+        severity: "error",
+        code: "contract.missing-file",
+        message: `Agent directory '${agentId}' has no AGENT.md manifest.`,
+        path: relativePath,
+      });
+      return;
+    }
+
+    checkByteCeiling(relativePath, content, "agentManifest", diagnostics);
+    const document = parseCanonicalDocument(relativePath, content, diagnostics);
+    if (document === undefined) return;
+
+    const parsed = agentManifestSchema.safeParse(document.data);
+    if (!parsed.success) {
+      diagnostics.push({
+        severity: "error",
+        code: "contract.invalid-frontmatter",
+        message: `Agent manifest frontmatter is invalid: ${parsed.error.message}`,
+        path: relativePath,
+      });
+    } else {
+      if (parsed.data.name !== agentId) {
+        diagnostics.push({
+          severity: "error",
+          code: "contract.identity-mismatch",
+          message: `Agent manifest declares name '${parsed.data.name}' in directory '${agentId}'.`,
+          path: relativePath,
+        });
+      }
+      for (const reference of [
+        ...parsed.data.allowed_skills,
+        ...(parsed.data.forbidden_skills ?? []),
+      ]) {
+        if (!KNOWN_SKILL_REFERENCES.has(reference)) {
+          diagnostics.push({
+            severity: "error",
+            code: "contract.unknown-skill-reference",
+            message:
+              `Agent '${agentId}' references unknown skill '${reference}'. Use a canonical ` +
+              `base skill id or the '${TECHNOLOGY_SKILL_TOKEN}' token.`,
+            path: relativePath,
+          });
+        }
+      }
+    }
+
+    checkRequiredSections(relativePath, document.body, REQUIRED_AGENT_SECTIONS, diagnostics);
+  }
+
+  private async validateSkillContract(
+    root: string,
+    skill: SkillDefinition,
+    diagnostics: Diagnostic[],
+  ): Promise<void> {
+    const content = await this.readOptionalText(root, skill.relativePath);
+    if (content === undefined) {
+      diagnostics.push({
+        severity: "error",
+        code: "contract.missing-file",
+        message: `Canonical base skill '${skill.id}' has no SKILL.md.`,
+        path: skill.relativePath,
+      });
+      return;
+    }
+
+    checkByteCeiling(skill.relativePath, content, "baseSkill", diagnostics);
+    const document = parseCanonicalDocument(skill.relativePath, content, diagnostics);
+    if (document === undefined) return;
+
+    const parsed = skillContractSchema.safeParse(document.data);
+    if (!parsed.success) {
+      diagnostics.push({
+        severity: "error",
+        code: "contract.invalid-frontmatter",
+        message: `Skill frontmatter is invalid: ${parsed.error.message}`,
+        path: skill.relativePath,
+      });
+    } else {
+      if (parsed.data.name !== skill.id) {
+        diagnostics.push({
+          severity: "error",
+          code: "contract.identity-mismatch",
+          message: `Skill declares name '${parsed.data.name}' but is registered as '${skill.id}'.`,
+          path: skill.relativePath,
+        });
+      }
+      await this.validateSkillReferences(root, skill, parsed.data.references ?? [], diagnostics);
+    }
+
+    checkRequiredSections(
+      skill.relativePath,
+      document.body,
+      REQUIRED_SKILL_SECTIONS,
+      diagnostics,
+    );
+  }
+
+  /**
+   * A declared reference must resolve inside its own skill directory both
+   * lexically and after symbolic links are canonicalized.
+   */
+  private async validateSkillReferences(
+    root: string,
+    skill: SkillDefinition,
+    references: readonly string[],
+    diagnostics: Diagnostic[],
+  ): Promise<void> {
+    const skillDirectory = path.dirname(path.resolve(root, ...skill.relativePath.split("/")));
+    for (const reference of references) {
+      const resolved = resolveSafeRelativePath(skillDirectory, reference);
+      if (resolved === undefined) {
+        diagnostics.push({
+          severity: "error",
+          code: "contract.unsafe-reference-path",
+          message: `Skill '${skill.id}' declares a reference outside its directory: ${reference}`,
+          path: skill.relativePath,
+        });
+        continue;
+      }
+      if (!(await this.isExistingRegularFile(resolved.absolute))) {
+        diagnostics.push({
+          severity: "error",
+          code: "contract.missing-reference-file",
+          message: `Skill '${skill.id}' declares a reference that is not a file: ${reference}`,
+          path: skill.relativePath,
+        });
+        continue;
+      }
+      if (
+        !(await this.isCanonicalPathWithin(skillDirectory, resolved.absolute)) ||
+        !(await this.isCanonicalPathWithin(root, resolved.absolute))
+      ) {
+        diagnostics.push({
+          severity: "error",
+          code: "contract.unsafe-reference-path",
+          message: `Skill '${skill.id}' reference escapes its directory: ${reference}`,
+          path: skill.relativePath,
+        });
+        continue;
+      }
+      checkByteCeiling(
+        `${path.posix.dirname(skill.relativePath)}/${resolved.relative}`,
+        await this.fileSystem.readText(resolved.absolute),
+        "skillReference",
+        diagnostics,
+      );
+    }
+  }
+
+  private async checkFileSize(
+    root: string,
+    relativePath: string,
+    layer: CanonicalSizeLayer,
+    diagnostics: Diagnostic[],
+  ): Promise<void> {
+    const content = await this.readOptionalText(root, relativePath);
+    if (content === undefined) return;
+    checkByteCeiling(relativePath, content, layer, diagnostics);
+  }
+
+  private async readOptionalText(
+    root: string,
+    relativePath: string,
+  ): Promise<string | undefined> {
+    const absolutePath = path.resolve(root, ...relativePath.split("/"));
+    if (!(await this.isExistingRegularFile(absolutePath))) return undefined;
+    return this.fileSystem.readText(absolutePath);
+  }
+
+  private async listDirectoryNames(
+    root: string,
+    relativeDirectory: string,
+  ): Promise<readonly string[]> {
+    const absolutePath = path.resolve(root, ...relativeDirectory.split("/"));
+    if (!(await this.isExistingDirectory(absolutePath))) return [];
+    const entries = await this.fileSystem.list(absolutePath);
+    return entries
+      .filter((entry) => entry.isDirectory)
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right));
+  }
+
+  private async listMarkdownFiles(
+    root: string,
+    relativeDirectory: string,
+  ): Promise<readonly string[]> {
+    const absolutePath = path.resolve(root, ...relativeDirectory.split("/"));
+    if (!(await this.isExistingDirectory(absolutePath))) return [];
+    const entries = await this.fileSystem.list(absolutePath);
+    return entries
+      .filter((entry) => !entry.isDirectory && entry.name.endsWith(".md"))
+      .map((entry) => `${relativeDirectory}/${entry.name}`)
+      .sort((left, right) => left.localeCompare(right));
+  }
+
   private async isExistingDirectory(targetPath: string): Promise<boolean> {
     return (
       (await this.fileSystem.exists(targetPath)) &&
@@ -680,6 +943,84 @@ export class DoctorService {
       return undefined;
     }
   }
+}
+
+interface CanonicalDocument {
+  readonly data: Record<string, unknown>;
+  readonly body: string;
+}
+
+function parseCanonicalDocument(
+  relativePath: string,
+  content: string,
+  diagnostics: Diagnostic[],
+): CanonicalDocument | undefined {
+  const result = parseFrontmatter(content);
+  if (result.kind === "missing") {
+    diagnostics.push({
+      severity: "error",
+      code: "contract.missing-frontmatter",
+      message: "File must open with a '---' YAML frontmatter block.",
+      path: relativePath,
+    });
+    return undefined;
+  }
+  if (result.kind === "malformed") {
+    diagnostics.push({
+      severity: "error",
+      code: "contract.malformed-frontmatter",
+      message: `Frontmatter cannot be parsed: ${result.message}`,
+      path: relativePath,
+    });
+    return undefined;
+  }
+  return { data: result.data, body: result.body };
+}
+
+function checkRequiredSections(
+  relativePath: string,
+  body: string,
+  required: readonly string[],
+  diagnostics: Diagnostic[],
+): void {
+  const sections = splitMarkdownSections(body);
+  for (const section of required) {
+    if (!sections.has(normalizeSectionName(section))) {
+      diagnostics.push({
+        severity: "error",
+        code: "contract.missing-section",
+        message: `Required section '## ${section}' is missing.`,
+        path: relativePath,
+      });
+    }
+  }
+
+  const procedure = sections.get(normalizeSectionName(NUMBERED_PROCEDURE_SECTION));
+  if (procedure !== undefined && !/^\s*1\.\s+\S/m.test(procedure)) {
+    diagnostics.push({
+      severity: "error",
+      code: "contract.unnumbered-procedure",
+      message: `Section '## ${NUMBERED_PROCEDURE_SECTION}' must be a numbered list.`,
+      path: relativePath,
+    });
+  }
+}
+
+function checkByteCeiling(
+  relativePath: string,
+  content: string,
+  layer: CanonicalSizeLayer,
+  diagnostics: Diagnostic[],
+): void {
+  const ceiling = CANONICAL_SIZE_CEILINGS[layer];
+  const size = Buffer.byteLength(content, "utf8");
+  if (size <= ceiling) return;
+  diagnostics.push({
+    severity: "warning",
+    code: SIZE_CODES[layer],
+    message: `File is ${size} bytes, above the ${ceiling} byte ceiling for this layer.`,
+    path: relativePath,
+  });
 }
 
 interface SafeRelativePath {

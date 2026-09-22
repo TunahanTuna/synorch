@@ -129,13 +129,22 @@ No background watcher or daemon is planned. When a new repository is added, the 
 │   ├── reviewer/AGENT.md
 │   └── debugger/AGENT.md
 ├── skills/
-│   ├── planning/SKILL.md
+│   ├── planning/
+│   │   ├── SKILL.md
+│   │   └── references/risk-classification.md
 │   ├── project-discovery/SKILL.md
 │   ├── codebase-exploration/SKILL.md
 │   ├── implementation/SKILL.md
-│   ├── verification/SKILL.md
-│   ├── debugging/SKILL.md
-│   ├── code-review/SKILL.md
+│   ├── verification/
+│   │   ├── SKILL.md
+│   │   └── references/evidence-ladder.md
+│   ├── debugging/
+│   │   ├── SKILL.md
+│   │   └── references/hypothesis-patterns.md
+│   ├── code-review/
+│   │   ├── SKILL.md
+│   │   └── references/severity-rubric.md
+│   ├── task-conductor/SKILL.md
 │   └── technology/
 │       └── <selected-skill>/SKILL.md
 ├── model-profiles/
@@ -147,6 +156,8 @@ No background watcher or daemon is planned. When a new repository is added, the 
     ├── codex.md
     └── claude-code.md
 ```
+
+A `references/` file is loaded only when a step in its own `SKILL.md` calls for it, so depth there costs nothing until a question needs it. Per-layer byte ceilings are enforced by `doctor` and defined in `src/domain/canonical-contracts.ts`: entrypoint 2 500, constitution 1 500, core protocol 2 000, agent manifest 3 000, base skill 6 000, reference file 15 000.
 
 Whether the records under `tasks/` are persistent or temporary, and whether they are included in Git, will be finalized later.
 
@@ -271,6 +282,12 @@ An agent definition contains:
 - The expected report format
 - Completion conditions
 
+**Canonical Agent Manifest v1** turns that list into something `doctor` can enforce. Frontmatter — required: `name` (kebab-case), `role`, `writes_product_files` (boolean), `model_tier` (`orchestrator` | `complex_worker` | `fast_worker` | `any`), `allowed_skills` (base skill ids, or the token `technology:*` for the skills carried by the task packet), `reports` (`completion-packet` | `evidence-report` | `review-report` | `final-report`); optional: `forbidden_skills`, `control_plane_write_scope`.
+
+Required body sections, as level-two headings: `Purpose`, `Authority` (an explicit *may do* list and an explicit *must never do* list), `Required inputs`, `Procedure` (a numbered list), `Escalation`, `Report contract`, `Completion conditions`.
+
+A rule that already lives in a core protocol is referenced by path from the manifest, never restated. The schema is `agentManifestSchema` in `src/domain/canonical-contracts.ts`.
+
 Initial roles:
 
 - `orchestrator`: Decisions, planning and coordination.
@@ -296,7 +313,13 @@ Every skill must contain at least:
 - Stop and escalation conditions
 - The expected output contract
 
-Skills are loaded on demand; not every skill's content is included in every session.
+**Canonical Skill Contract v1** makes that checkable. Frontmatter — required: `name` (kebab-case), `description` (the positive trigger), `version` (semver); optional: `not_for` (the negative trigger, which is what stops a skill loading on a task that merely sounds similar), `inputs`, `tools`, `outputs`, `references` (relative paths under the skill's own directory), `priority` (`skill`).
+
+Required body sections, as level-two headings: `When this applies`, `When it does not`, `Required inputs`, `Procedure` (a numbered list), `Tools`, `Verification`, `Stop and escalate`, `Output contract`.
+
+The schema is `skillContractSchema` in `src/domain/canonical-contracts.ts`, and it is deliberately extendable so non-canonical generated skills can add their own provenance fields without redefining the base shape.
+
+Skills are loaded on demand; not every skill's content is included in every session. Depth that only one step needs belongs in a `references/` file beside the skill, which is fetched only when that step reaches it.
 
 ## 9. The Protocol System
 

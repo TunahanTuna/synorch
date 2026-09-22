@@ -155,7 +155,7 @@ Yeni tur veya istek başlayınca iptal yeniden silahlanır. TUI'de ek olarak: bo
 | Onay | `brokerFor`: `ask` modunda ve renderer'ın broker'ı etkileşimliyse o; aksi halde `createHeadlessApprovalBroker({ mode })` |
 | Hafıza | `createMemoryStore(<home>/memory/<project-id>)` (kullanıcı `memory.root` verdiyse `resolveMemoryRoot`), ContextBuilder'a proje/branch ile recall olarak |
 | Orkestrasyon | `createContextBuilder` (+ `createCompactor`, `createBudgetGateSlot`), `createAgentDriver` (attempt başına gateway), `createModelPlanner`, `createWorkerFactory({ worktreesRoot: <home>/worktrees })`, `createCoordinator` |
-| Recovery | `recover(sessionId)`: oturumu `recoverSession` ile kapatır, sonra `attempt/started.session_id` ile başlattığı ve temiz bitmemiş her attempt oturumunu da kurtarır; hiçbir araç yeniden çalışmaz |
+| Recovery | `recover(sessionId)`: oturumu `recoverSession` ile kapatır, sonra `attempt/started.session_id` ile başlattığı ve temiz bitmemiş her attempt oturumunu da kurtarır; hiçbir araç yeniden çalışmaz. Ardından `pruneOrphanedAttempts` sahibi ölmüş worktree'leri kaldırır ve çökmüş scoped-dir attempt'lerinin sahip yollarındaki yarım yazmalarını kalıcı baseline'dan geri alır (SEC-M3) |
 
 ### 10.1 Kanonik `.ai/` yapısı runtime girdisi olarak
 
@@ -177,12 +177,16 @@ Geri dönüş: depoda `.ai/` yoksa `src/templates/structure-templates.ts`'in (`s
 
 YAML dosyaları, hepsi opsiyonel; üst düzey anahtarlar katıdır (bilinmeyen anahtar `config_invalid`, exit 2):
 
-| Katman | Dosya | Route kaynağı |
-| --- | --- | --- |
-| kullanıcı | `<home>/config.yaml` | `user` |
-| workspace | hedefin **üstündeki** en yakın `.synorch/config.yaml` (synorch home'u hariç) | `workspace` |
-| proje | `<hedef>/.synorch/config.yaml` | `project` |
-| oturum | `--profile <tier>=<provider>/<model>[@<adapter>]` (kalıcı yazılmaz) | `session` |
+| Katman | Dosya | Güven | Ayarlayabildiği |
+| --- | --- | --- | --- |
+| kullanıcı | `<home>/config.yaml` | güvenilir | her anahtar; route kaynağı `user` |
+| workspace | hedefin **üstündeki** en yakın `.synorch/config.yaml` (synorch home'u hariç) | repo içeriği, güvenilmez | yalnız `policy` (daraltma) ve `budget` (en küçüğü) |
+| proje | `<hedef>/.synorch/config.yaml` | repo içeriği, güvenilmez | yalnız `policy` (daraltma) ve `budget` (en küçüğü) |
+| oturum | `--profile <tier>=<provider>/<model>[@<adapter>]` (kalıcı yazılmaz) | açık kullanıcı bayrağı | route; kaynak `session` |
+
+**Güven katmanları (SEC-C1).** Repo katmanları (workspace, proje) kimlik bilgisini başka bir host'a yönlendiremez ve faturalandırmayı değiştiremez: `routes`, `adapters` (dolayısıyla `base_url`, profil, `script`), `memory` ve `ui` repo katmanında **yok sayılır**. Yok sayılan her anahtar bir `ConfigWarning` üretir: `syn doctor --runtime` `config` sonucunu `warn` yapıp mesajı gösterir, oturum başlığı uyarıyı notice olarak basar ve `session/opened.config_ignored` (v2) denetim kaydı olarak `{layer, path, key}` yazar. Yok sayılan anahtarlar şema doğrulamasından önce atılır; repo dosyasındaki bozuk bir `routes` değeri çalıştırmayı durduramaz. Bilinmeyen anahtar yine `config_invalid`'dir. İnsan-onaylı `provider-change` kararı repo yapılandırmasıyla atlanamaz, çünkü repo route seçemez.
+
+**Endpoint sabitleme.** `base_url` yalnız kullanıcı katmanında yazılır ve adapter türünün resmi origin'inde olmalıdır (`OFFICIAL_ENDPOINTS`: `openai-chatgpt` → `https://chatgpt.com`, `openai-responses` → `https://api.openai.com`, `anthropic-messages` → `https://api.anthropic.com`). API key adapter'ı için başka bir origin, aynı girdide açık `allow_custom_endpoint: true` ister. `openai-chatgpt` abonelik OAuth token'ı taşıdığından resmi olmayan host'u hiçbir koşulda kabul etmez. Kimlik bilgisi taşıyan URL (`user:pass@`) reddedilir. `claude-code` girdisi `allow_non_subscription_auth: true` alabilir (bkz. [sağlayıcılar](./providers-and-auth.md)); diğer türlerde bu anahtar `config_invalid`'dir.
 
 ```yaml
 routes:
@@ -191,13 +195,14 @@ routes:
   - { tier: complex_worker, role: reviewer, provider: openai, model: gpt-5, adapter: openai-responses }
 adapters:                                                                   # isteğe bağlı; scripted için zorunlu
   - { id: scripted-planner, kind: scripted, script: ./planner.json }        # yalnız test/smoke, ağ yok
+  - { id: corp-gw, kind: anthropic-messages, base_url: "https://gw.corp.example/v1", allow_custom_endpoint: true }
 policy: { mode: ask, forbidden: ["secrets/**"] }                            # repo katmanları yalnız daraltır
 memory: { root: ~/vaults/synorch }                                          # yalnız kullanıcı katmanı
 ui: { color: false }                                                        # yalnız kullanıcı katmanı
 budget: { max_wall_time_seconds: 1800, max_cost_usd: 5 }                    # katmanların en küçüğü
 ```
 
-Öncelik router'da uygulanır (`session > project > workspace > user > provider-default`); proje ve workspace policy blokları kesiştirilip engine'in workspace katmanına verilir. `.synorch/` rezerve yol olduğundan hiçbir worker bir yapılandırma katmanını değiştiremez. Varsayılan model kimliği uydurulmaz: orchestrator tier'ı için route yoksa `syn run`/`syn agent` oturum açmadan `config_invalid` (exit 2) ve `next: syn doctor --runtime` verir.
+Öncelik router'da uygulanır (`session > user > provider-default`; `project`/`workspace` route kaynakları şemada kalır ama artık üretilmez); proje ve workspace policy blokları kesiştirilip engine'in workspace katmanına verilir. `.synorch/` rezerve yol olduğundan hiçbir worker bir yapılandırma katmanını değiştiremez. Varsayılan model kimliği uydurulmaz: orchestrator tier'ı için route yoksa `syn run`/`syn agent` oturum açmadan `config_invalid` (exit 2) ve `next: syn doctor --runtime` verir.
 
 `scripted` betik dosyası JSON dizisidir; her öğe bir model isteğini yanıtlar: ham `ModelStreamEvent` dizisi, `{ "text" }`, `{ "tool_calls": [{ "name", "arguments" }] }` veya `{ "error": { "code", "message", "retry_after_ms"? } }`. Araç argümanlarında `$last_tool_call_id` ve `$tool_call_id[N]` istekteki araç sonuçlarının harness kimlikleriyle değiştirilir (kanıt göstermek için). Örnek: `tests/fixtures/cli/runtime/noop/`.
 
@@ -209,7 +214,7 @@ budget: { max_wall_time_seconds: 1800, max_cost_usd: 5 }                    # ka
 | `syn agent` | Aynı akış, her kullanıcı mesajı bir run; run'lar tek oturumda birikir. TTY'de run sürerken yazılan mesaj `steer` olarak kuyruğa girer (bekleyen bir `ask_user` sorusu varsa önce onu yanıtlar), `/cancel` çalışır. Steer bir sonraki güvenli sınırda (yeni dispatch'ten önce; çalışan attempt değişmez) uygulanır: orchestrator bir kez danışılır (`task_status`, `task_spawn`), plan steer'i `assumptions`'a ekleyen yeni bir sürümle (yeni `plan_id`, `version` n+1) önerilir ve modun kuralıyla onaylanır; eski plan yalnız revizyon onaylanınca `superseded` olur, reddedilen revizyonda run eski planla sürer. `--resume <ses>` önce recovery yapar ve kurtarılanları bildirir; `--fork <ses>[@seq]` yeni oturum açar (`session/opened.parent`). Çıkışta `Session saved: <ses>` stderr'e yazılır |
 | `syn runs [--json]` | Bu projenin oturumlarındaki run'lar (attempt oturumları gizli): zaman, kimlik, durum, görev sayısı, canlı kilit |
 | `syn show <run\|ses> [--json]` | Plan, görevler, attempt'ler (rol, route, izolasyon, oturum, durum), onaylar (run + araç), kanıt (completion blob'larından kriter → kanıt, komutlar), review'lar, route kararları, usage (kaynak etiketiyle). Lease almaz |
-| `syn doctor --runtime [--probe-model] [--json]` | Ayrı sonuçlar: `node`, `terminal`, `config`, `canonical` (kanonik `.ai/` kaynağı, protokoller, roller, skill'ler, profil ipuçları, tanılar; §10.1), `sandbox`, `store` (home'a dayanıklı yazma denemesi + oturum sayısı), `auth` (`AuthStatus[]`, secret yok), `capabilities` (adapter keşfi + statik health, eksik tier). Ağ isteği yok (`network_requests: "none"`); `--probe-model` her route'a bir küçük istek gönderir. Exit: `fail` varsa 1, yoksa 0 (`partial` sandbox `warn`) |
+| `syn doctor --runtime [--probe-model] [--json]` | Ayrı sonuçlar: `node`, `terminal`, `config`, `canonical` (kanonik `.ai/` kaynağı, protokoller, roller, skill'ler, profil ipuçları, tanılar; §10.1), `sandbox`, `store` (home'a dayanıklı yazma denemesi + oturum sayısı + sahibi ölmüş attempt çalışma alanlarının budanması, SEC-M3), `auth` (`AuthStatus[]`, secret yok), `capabilities` (adapter keşfi + statik health, eksik tier). Ağ isteği yok (`network_requests: "none"`); `--probe-model` her route'a bir küçük istek gönderir. Exit: `fail` varsa 1, yoksa 0 (`partial` sandbox `warn`) |
 | `syn login/logout/auth status` | I2 `authCommand`; `CommandIO.renderer` = stdin TTY ise etkileşimli plain renderer (`LineAuthInteraction`: gizli giriş, `claude-bridge-experimental` bildiriminin tek seferlik onayı), değilse headless (`syn login` exit 7). Ortak bayraklar komuta aktarılmadan ayıklanır |
 | `syn memory …` | I6 `memoryCommand`; vault kökü `<home>/memory/<project-id>` (veya kullanıcı `memory.root`). `accept`/`reject` kararının `memory/proposal_decided` ve `memory/persisted` yükleri projenin `syn memory decisions` oturumuna eklenir |
 

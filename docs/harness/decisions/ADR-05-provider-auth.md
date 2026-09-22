@@ -30,7 +30,7 @@ Accepted
 **Anthropic**
 
 - P0 `anthropic-messages` (`api-key`): Messages API; kesin ve desteklenen yol.
-- Claude aboneliği yalnızca `cli-bridge` ile: `claude-code` `AgentBackendAdapter`'ı, kullanıcının kurup giriş yaptığı Claude Code'u `@anthropic-ai/claude-agent-sdk` (tercih) veya `claude -p --input-format stream-json --output-format stream-json` ile sürer; `--tools ""`/`tools: []`; Synorch araçları MCP ile. Alt süreç ortamından `BRIDGE_STRIPPED_ENV` (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`) silinir. Deneysel, açık opt-in; tek seferlik uyarı (`claude-bridge-experimental`): politika statüsü belirsiz, kullanım "extra usage"a düşebilir.
+- Claude aboneliği yalnızca `cli-bridge` ile: `claude-code` `AgentBackendAdapter`'ı, kullanıcının kurup giriş yaptığı Claude Code'u `@anthropic-ai/claude-agent-sdk` (tercih) veya `claude -p --input-format stream-json --output-format stream-json` ile sürer; `--tools ""`/`tools: []`; Synorch araçları MCP ile. Alt süreç ortamından `BRIDGE_STRIPPED_ENV` (API key/token adları, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock/Vertex bayrakları ve token'ı) ile her `ANTHROPIC_*` / `CLAUDE_CODE_USE_*` adı silinir; `apiKeySource` abonelik değilse tur, kullanıcı yapılandırmasında açık opt-in yoksa reddedilir (güvenlik incelemesi SEC-M2). Deneysel, açık opt-in; tek seferlik uyarı (`claude-bridge-experimental`): politika statüsü belirsiz, kullanım "extra usage"a düşebilir.
 
 **Açık non-goal'lar (hard rail `foreign-credential-store`):**
 
@@ -45,6 +45,7 @@ Accepted
 - Profil başına süreçler arası refresh kilidi (`withRefreshLock`); yeni token yazılmadan eski silinmez; kalıcı hata → `login_required`.
 - `cli-bridge` için secret şeması yoktur; Synorch köprü token'ı görmez.
 - Ücretli API key'e sessiz geçiş yok: `provider-change` onayı yalnızca insan tarafından verilebilir ([ADR-08](./ADR-08-approval-policy.md)).
+- Yapılandırma güven katmanları (SEC-C1): adapter, `base_url`, route ve profil yalnız kullanıcı yapılandırmasından (`<home>/config.yaml`) ve açık oturum bayraklarından gelir; repo içindeki `.synorch/config.yaml` yalnız policy'yi daraltabilir ve bütçeyi küçültebilir, diğer anahtarları uyarıyla yok sayılır. `base_url` sağlayıcının resmi origin'ine sabitlenir; özel endpoint kullanıcı girdisinde `allow_custom_endpoint: true` ister, ChatGPT OAuth token'ı resmi olmayan host'a hiçbir koşulda gönderilmez ([CLI referansı §11](../reference/cli.md)).
 - Keychain native bağımlılığının seçimi I2'ye bırakılan alt karardır.
 
 ## Alternatives

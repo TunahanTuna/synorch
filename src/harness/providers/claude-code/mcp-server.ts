@@ -133,6 +133,11 @@ export class McpToolServer {
   }
 }
 
+/** Longest pre-authentication line (the session token is 64 hex characters). */
+export const MCP_PREAUTH_MAX_BYTES = 1024;
+/** Longest JSON-RPC line accepted from an authenticated relay. */
+export const MCP_LINE_MAX_BYTES = 16 * 1024 * 1024;
+
 /**
  * Serves one relay connection: the first line must be the session token (compared in constant
  * time); afterwards every line is a JSON-RPC message. Requests are answered concurrently.
@@ -144,6 +149,15 @@ export function serveMcpConnection(socket: Socket, server: McpToolServer, token:
   socket.on("error", () => socket.destroy());
   socket.on("data", (chunk: string) => {
     buffer += chunk;
+    // SEC-L3: an unauthenticated peer may send only the token line; an authenticated one only
+    // bounded JSON-RPC lines. Anything longer drops the connection instead of growing the buffer.
+    const limit = authenticated ? MCP_LINE_MAX_BYTES : MCP_PREAUTH_MAX_BYTES;
+    const pending = buffer.indexOf("\n");
+    if ((pending === -1 ? buffer.length : pending) > limit) {
+      buffer = "";
+      socket.destroy();
+      return;
+    }
     let newline = buffer.indexOf("\n");
     while (newline !== -1) {
       const line = buffer.slice(0, newline).replace(/\r$/, "");

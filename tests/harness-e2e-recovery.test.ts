@@ -88,7 +88,9 @@ test("crash after tool/execution_started: resume records tool/interrupted and ne
     await until(() => started() !== undefined && existsSync(path.join(sandbox.workspace, "marker.txt")), 60_000);
     child.kill("SIGKILL");
     await exited;
-    orphan = Number((await readFile(path.join(sandbox.workspace, "marker.txt"), "utf8")).trim());
+    const marker = (await readFile(path.join(sandbox.workspace, "marker.txt"), "utf8")).trim();
+    assert.equal(marker.split("\n").length, 1, "the side effect happened once");
+    orphan = Number(marker);
     try {
       process.kill(orphan);
     } catch {
@@ -113,7 +115,9 @@ test("crash after tool/execution_started: resume records tool/interrupted and ne
     assert.equal(eventsOf(attemptLog, "tool/result_recorded").filter((event) => event.data.tool_call_id === callId).length, 0);
     const interrupted = eventsOf(attemptLog, "tool/interrupted");
     assert.deepEqual(interrupted.map((event) => [event.data.tool_call_id, event.data.outcome, event.data.idempotent]), [[callId, "unknown", false]]);
-    assert.equal((await readFile(path.join(sandbox.workspace, "marker.txt"), "utf8")).trim().split("\n").length, 1, "the side effect happened once");
+    // SEC-M3: the crashed scoped-dir attempt's partial write is reverted from its persisted baseline,
+    // and nothing re-ran the call (a re-run would have written the marker again).
+    assert.equal(existsSync(path.join(sandbox.workspace, "marker.txt")), false, "resume reverted the crashed attempt's partial write");
 
     const runLog = await readSession(sandbox.home, hello.data.session_id);
     assert.equal(eventsOf(runLog, "session/resumed").length, 1);

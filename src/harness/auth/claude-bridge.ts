@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import {
-  BRIDGE_STRIPPED_ENV,
   HarnessError,
+  isBridgeStrippedEnvName,
   PROVIDER_ERROR_RETRYABLE,
   ProviderFailure,
   providerIdSchema,
@@ -29,9 +29,8 @@ export interface ClaudeBridgeAuthOptions {
 export const defaultClaudeProbe: ClaudeCliProbe = (signal) =>
   new Promise((resolve) => {
     const env: Record<string, string> = {};
-    const stripped = new Set<string>(BRIDGE_STRIPPED_ENV.map((name) => name.toUpperCase()));
     for (const [key, value] of Object.entries(process.env)) {
-      if (value !== undefined && !stripped.has(key.toUpperCase())) env[key] = value;
+      if (value !== undefined && !isBridgeStrippedEnvName(key)) env[key] = value;
     }
     let stdout = "";
     const child = spawn("claude --version", { shell: true, env, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });

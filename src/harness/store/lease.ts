@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { open, readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   sessionLeaseSchema,
   StoreFailure,
@@ -15,6 +16,68 @@ export interface LeaseSettings {
   readonly host: string;
   readonly ttlMs: number;
   readonly heartbeatMs: number;
+  /** Test seam: awaited inside a renewal after the token was verified, where a suspended process would stall. */
+  readonly checkpoint?: (point: "renew-verified") => Promise<void>;
+}
+
+/**
+ * `lock.json` is only ever rewritten (renew), moved aside (takeover) or removed (release) while
+ * holding `lock.json.cas`, created with O_EXCL. A renewal verifies the token under that mutex, so
+ * a takeover cannot interleave between the check and the write; a mutex older than
+ * `mutexStaleMs` is broken, and a renewal that held it that long (a suspended process) gives the
+ * lease up instead of writing (SEC-L2).
+ */
+const MUTEX_SUFFIX = ".cas";
+const MUTEX_ATTEMPTS = 400;
+const MUTEX_RETRY_MS = 5;
+
+function mutexStaleMs(settings: Pick<LeaseSettings, "ttlMs">): number {
+  return Math.max(1, Math.min(5_000, Math.floor(settings.ttlMs / 4)));
+}
+
+async function withLeaseMutex<T>(file: string, settings: Pick<LeaseSettings, "clock" | "ttlMs">, body: (acquiredAt: number) => Promise<T>): Promise<T> {
+  const mutex = `${file}${MUTEX_SUFFIX}`;
+  const token = randomBytes(12).toString("hex");
+  for (let attempt = 0; ; attempt += 1) {
+    const acquiredAt = settings.clock().getTime();
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(mutex, "wx", PRIVATE_FILE_MODE);
+    } catch (error: unknown) {
+      if (errnoCode(error) !== "EEXIST") throw new StoreFailure("write_failed", `cannot create ${mutex}: ${errnoCode(error) ?? String(error)}`);
+    }
+    if (handle !== undefined) {
+      try {
+        await writeAll(handle, Buffer.from(JSON.stringify({ token, at: acquiredAt }), "utf8"));
+      } finally {
+        await handle.close();
+      }
+      try {
+        return await body(acquiredAt);
+      } finally {
+        const held = await readFile(mutex, "utf8").catch(() => "");
+        if (held.includes(token)) await unlink(mutex).catch(() => undefined);
+      }
+    }
+    const held = await readFile(mutex, "utf8").catch(() => undefined);
+    let at: number | undefined;
+    try {
+      at = held === undefined ? undefined : (JSON.parse(held) as { at?: number }).at;
+    } catch {
+      at = undefined;
+    }
+    // A mutex that is still being written has no timestamp yet: judge it by its real mtime instead.
+    const writtenMs = at === undefined ? (await stat(mutex).catch(() => undefined))?.mtimeMs : undefined;
+    const age = at !== undefined ? settings.clock().getTime() - at : writtenMs === undefined ? 0 : Date.now() - writtenMs > 1_000 ? Number.POSITIVE_INFINITY : 0;
+    if (held !== undefined && age > mutexStaleMs(settings)) {
+      // A holder that stalled (or died) past the timeout: break it. It will notice and not write.
+      const again = await readFile(mutex, "utf8").catch(() => undefined);
+      if (again === held) await unlink(mutex).catch(() => undefined);
+      continue;
+    }
+    if (attempt >= MUTEX_ATTEMPTS) throw new StoreFailure("write_failed", `${file} is busy: could not take ${path.basename(mutex)}`);
+    await delay(MUTEX_RETRY_MS);
+  }
 }
 
 export type LeaseInspection =
@@ -57,7 +120,12 @@ export class SessionLeaseHandle {
       const inspection = await inspectLease(file, settings);
       if (inspection.state === "absent") continue;
       if (inspection.state === "live") throw lockedFailure(sessionId, inspection.lease);
-      await takeOver(file, inspection.lease);
+      await withLeaseMutex(file, settings, async () => {
+        // Re-inspect under the mutex: a renewal may have refreshed the lease since it was judged stale.
+        const again = await inspectLease(file, settings);
+        if (again.state !== "stale" || again.lease?.holder.token !== inspection.lease?.holder.token) return;
+        await takeOver(file, inspection.lease);
+      });
     }
     throw lockedFailure(sessionId, undefined);
   }
@@ -88,26 +156,39 @@ export class SessionLeaseHandle {
     await this.#renewing?.catch(() => undefined);
     if (this.#lostReason !== undefined) return;
     this.#lostReason = "released";
-    const current = await readLeaseFile(this.#file);
-    if (current.lease?.holder.token !== this.#lease.holder.token) return;
-    await unlink(this.#file).catch((error: unknown) => {
-      if (!isMissing(error)) throw error;
+    await withLeaseMutex(this.#file, this.#settings, async () => {
+      const current = await readLeaseFile(this.#file);
+      if (current.lease?.holder.token !== this.#lease.holder.token) return;
+      await unlink(this.#file).catch((error: unknown) => {
+        if (!isMissing(error)) throw error;
+      });
     });
   }
 
+  /** Compare-and-swap renewal: token check and write happen under the lease mutex (SEC-L2). */
   async #renewNow(): Promise<void> {
     if (this.#lostReason !== undefined) return;
-    await this.#checkToken();
-    if (this.#lostReason !== undefined) return;
-    const now = this.#settings.clock();
-    const renewed = sessionLeaseSchema.parse({
-      ...this.#lease,
-      heartbeat_at: now.toISOString(),
-      expires_at: new Date(now.getTime() + this.#settings.ttlMs).toISOString(),
-    });
     try {
-      await writeFileDurably(this.#file, `${JSON.stringify(renewed)}\n`);
-      this.#lease = renewed;
+      await withLeaseMutex(this.#file, this.#settings, async (acquiredAt) => {
+        await this.#checkToken();
+        if (this.#lostReason !== undefined) return;
+        await this.#settings.checkpoint?.("renew-verified");
+        const now = this.#settings.clock();
+        if (now.getTime() - acquiredAt > mutexStaleMs(this.#settings)) {
+          // This renewal stalled long enough for a contender to break the mutex and take over.
+          this.#markLost("the renewal stalled past the lease mutex timeout (process suspended?); the lease is given up");
+          return;
+        }
+        await this.#checkToken();
+        if (this.#lostReason !== undefined) return;
+        const renewed = sessionLeaseSchema.parse({
+          ...this.#lease,
+          heartbeat_at: now.toISOString(),
+          expires_at: new Date(now.getTime() + this.#settings.ttlMs).toISOString(),
+        });
+        await writeFileDurably(this.#file, `${JSON.stringify(renewed)}\n`);
+        this.#lease = renewed;
+      });
     } catch (error: unknown) {
       if (this.#settings.clock().getTime() >= Date.parse(this.#lease.expires_at)) {
         this.#markLost(`lease could not be renewed before expiry: ${errnoCode(error) ?? String(error)}`);

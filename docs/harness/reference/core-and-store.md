@@ -56,6 +56,7 @@ ADR-03 yerleşimi birebir uygulanır: `sessions/<project-id>/<session-id>/{sessi
 - Canlı lease → `session_locked`, mesajda sahibin `pid`, `host` ve `expires_at` değeri bulunur (exit 8).
 - Devralma: süresi dolmuş lease **veya** aynı host'ta süreci artık olmayan (`process.kill(pid, 0)` → `ESRCH`) lease devralınır. Devralma, eski dosyayı benzersiz bir ada rename ederek yapılır (tek kazanan); taşınan dosya incelenen lease değilse geri konur ve yeniden denenir.
 - `close()` handle'ı kapatır ve lease hâlâ bizimse `lock.json`'u siler.
+- **Compare-and-swap (SEC-L2).** `lock.json` yalnız `lock.json.cas` mutex'i (O_EXCL ile oluşturulan, `{token, at}` içeren küçük dosya) tutulurken yenilenir, kenara taşınır (devralma) veya silinir (bırakma). Yenileme token'ı mutex altında doğrular ve yazar; devralma mutex altında lease'i yeniden inceler ve hâlâ aynı bayat token'sa taşır. `at`'ı `min(5 s, ttl/4)`'ten eski mutex kırılır; mutex'i bu kadar uzun tutmuş (askıya alınmış) bir yenileme yazmak yerine lease'i kaybedilmiş sayar, böylece uyanan eski yazar bir devralmanın üstüne yazamaz. `LeaseSettings.checkpoint` yalnız bu askıya alınmayı simüle eden test kancasıdır.
 
 ### Windows davranışı
 

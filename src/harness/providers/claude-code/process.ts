@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { access, constants } from "node:fs/promises";
 import path from "node:path";
-import { BRIDGE_STRIPPED_ENV } from "../../contracts/index.ts";
+import { isBridgeStrippedEnvName } from "../../contracts/index.ts";
 
 /** How to start the backend: an executable plus fixed leading arguments (tests use `node fake.mjs`). */
 export interface ExecutableSpec {
@@ -43,19 +43,19 @@ function envValue(env: Readonly<Record<string, string | undefined>>, key: string
 }
 
 /**
- * The child environment: the caller's env minus every `BRIDGE_STRIPPED_ENV` name (case-insensitive
- * on Windows), so a subscription bridge can never bill an API key silently.
+ * The child environment: the caller's env minus every `BRIDGE_STRIPPED_ENV` name and every
+ * `ANTHROPIC_*` / `CLAUDE_CODE_USE_*` name (case-insensitive), so a subscription bridge can never
+ * bill an API key, a cloud account or a redirected endpoint silently.
  */
 export function bridgeEnvironment(
   env: Readonly<Record<string, string | undefined>>,
   extra: Readonly<Record<string, string>> = {},
-  platform: NodeJS.Platform = process.platform,
+  _platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
-  const stripped = new Set<string>(BRIDGE_STRIPPED_ENV.map((name) => (platform === "win32" ? name.toUpperCase() : name)));
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries({ ...env, ...extra })) {
     if (value === undefined) continue;
-    if (stripped.has(platform === "win32" ? key.toUpperCase() : key)) continue;
+    if (isBridgeStrippedEnvName(key)) continue;
     result[key] = value;
   }
   return result;

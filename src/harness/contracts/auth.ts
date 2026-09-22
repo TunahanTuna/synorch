@@ -109,13 +109,31 @@ export const FORBIDDEN_CREDENTIAL_SOURCES = [
   "keychain:Claude Code-credentials",
 ] as const;
 
-/** Removed from a bridge child's environment so a subscription bridge never bills an API key silently. */
+/**
+ * Removed from a bridge child's environment so a subscription bridge never bills an API key, a
+ * cloud account (Bedrock, Vertex) or a redirected endpoint silently (SEC-M2). Every name starting
+ * with a `BRIDGE_STRIPPED_ENV_PREFIXES` entry is removed as well.
+ */
 export const BRIDGE_STRIPPED_ENV = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "AWS_BEARER_TOKEN_BEDROCK",
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
 ] as const;
+
+/** Name prefixes stripped from a bridge child's environment (`ANTHROPIC_*`, `CLAUDE_CODE_USE_*`). */
+export const BRIDGE_STRIPPED_ENV_PREFIXES = ["ANTHROPIC_", "CLAUDE_CODE_USE_"] as const;
+
+/** True when `name` must not reach a bridge child. Matching is case-insensitive (Windows env names are). */
+export function isBridgeStrippedEnvName(name: string): boolean {
+  const upper = name.toUpperCase();
+  return (BRIDGE_STRIPPED_ENV as readonly string[]).includes(upper) || BRIDGE_STRIPPED_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix));
+}
 
 export const AUTH_NOTICE_IDS = [
   "chatgpt-subscription",

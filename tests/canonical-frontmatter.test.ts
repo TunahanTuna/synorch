@@ -11,6 +11,7 @@ import {
   parseFrontmatter,
   splitMarkdownSections,
 } from "../src/infrastructure/frontmatter.ts";
+import { createStructureFiles } from "../src/templates/structure-templates.ts";
 
 test("frontmatter parsing separates the YAML mapping from the body", () => {
   const result = parseFrontmatter("---\nname: planning\nversion: 1.0.0\n---\n\n# Planning\n\nBody.\n");
@@ -108,3 +109,52 @@ test("required section lists stay distinct and normalized", () => {
   assert.ok(REQUIRED_SKILL_SECTIONS.includes("Output contract"));
   assert.ok(REQUIRED_AGENT_SECTIONS.includes("Completion conditions"));
 });
+
+test("an agent manifest never restates a sentence its skills already own", () => {
+  // A rule lives in exactly one layer (CANONICAL-CONTENT-DEPTH-PLAN §6, W6): the skill owns the
+  // procedure, the inputs, the stop conditions and the output contract; the manifest points at it.
+  const files = createStructureFiles("repository");
+  const contentOf = (relativePath: string): string => {
+    const file = files.find((entry) => entry.relativePath === relativePath);
+    assert.ok(file, relativePath);
+    return file.content;
+  };
+  const sentencesOf = (relativePath: string): readonly string[] => {
+    const parsed = parseFrontmatter(contentOf(relativePath));
+    assert.equal(parsed.kind, "parsed", relativePath);
+    if (parsed.kind !== "parsed") return [];
+    return [...splitMarkdownSections(parsed.body).values()]
+      .flatMap((section) => section.split(/\n|(?<=\.)\s+/))
+      .map((line) => line.toLowerCase().replace(/[`*_]/g, "").replace(/\s+/g, " ").trim())
+      .filter((line) => line.length > 40);
+  };
+
+  for (const [agentId, skillIds] of AGENT_PRIMARY_SKILLS) {
+    const manifest = new Set(sentencesOf(`.ai/agents/${agentId}/AGENT.md`));
+    for (const skillId of skillIds) {
+      const skill = new Set(sentencesOf(`.ai/skills/${skillId}/SKILL.md`));
+      const shared = [...manifest].filter((sentence) => skill.has(sentence));
+      assert.deepEqual(shared, [], `${agentId} restates ${skillId}`);
+    }
+  }
+});
+
+test("every agent manifest points at the skill that owns its full contract", () => {
+  const files = createStructureFiles("repository");
+  for (const [agentId, skillIds] of AGENT_PRIMARY_SKILLS) {
+    const manifest =
+      files.find((file) => file.relativePath === `.ai/agents/${agentId}/AGENT.md`)?.content ?? "";
+    assert.ok(
+      skillIds.some((skillId) => manifest.includes(`.ai/skills/${skillId}/SKILL.md`)),
+      agentId,
+    );
+  }
+});
+
+const AGENT_PRIMARY_SKILLS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["orchestrator", ["planning", "task-conductor"]],
+  ["explorer", ["codebase-exploration", "project-discovery"]],
+  ["implementer", ["implementation", "verification"]],
+  ["debugger", ["debugging"]],
+  ["reviewer", ["code-review"]],
+];

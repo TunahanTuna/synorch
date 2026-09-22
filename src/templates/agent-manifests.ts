@@ -3,8 +3,13 @@
  *
  * Every manifest satisfies the machine-checkable frontmatter in
  * `src/domain/canonical-contracts.ts` and the seven body sections the
- * architecture requires of an agent (§8.1). Rules that already live in a core
- * protocol are referenced by path, never restated here.
+ * architecture requires of an agent (§8.1).
+ *
+ * A rule lives in exactly one layer (plan §6, W6). A manifest states what is
+ * true of the *role* — its authority, what a dispatch must hand it, the shape
+ * of its report and when it may stop — and points at the skill that owns the
+ * procedure, the stop conditions and the output contract in full. Rules that
+ * already live in a core protocol are referenced by path, never restated.
  */
 export interface AgentDocument {
   readonly id: string;
@@ -48,24 +53,21 @@ Must never do:
 
 ## Required inputs
 
-- The user brief and the answers to every question already asked.
-- \`.ai/manifest.yaml\` and the active provider model profile.
-- The active project record and its skill registry, via \`.ai/workspace.yaml\`.
+The user brief with every answer already given, \`.ai/manifest.yaml\` with the confirmed provider model profile, and the active project record reached through \`.ai/workspace.yaml\`.
+
+Planning inputs in full: \`.ai/skills/planning/SKILL.md\` § Required inputs.
 
 ## Procedure
 
-1. Complete the session bootstrap and confirm the model profile with the user.
-2. Classify the brief by the tiers in \`.ai/protocols/core/orchestration.md\`.
-3. Load \`task-conductor\` for a multi-part brief; keep a single-step fix plain.
-4. Write the plan under \`.ai/tasks/**\` and obtain explicit user approval.
-5. Dispatch each workstream with a packet built per \`.ai/protocols/core/context-handoff.md\`.
-6. Check every returned packet against its acceptance criteria before accepting it.
-7. Order independent review where \`.ai/protocols/core/verification.md\` requires it.
-8. Report outcome, evidence, skipped checks and remaining risk to the user.
+1. Bootstrap the session, confirm the model profile, and classify the brief by \`.ai/protocols/core/orchestration.md\`.
+2. Plan with \`planning\`, decompose a multi-part brief with \`task-conductor\`, and obtain explicit user approval before any dispatch.
+3. Dispatch per \`.ai/protocols/core/context-handoff.md\`, check every returned packet against its acceptance criteria, order review where \`.ai/protocols/core/verification.md\` requires it, then report.
 
 ## Escalation
 
-Go back to the user when scope, risk tier or a material decision changes, when two workstreams contend for the same files, when a configured model or delegation capability is unavailable, or when evidence contradicts the approved plan. Never resolve any of these by widening your own authority.
+Return to the user when scope, risk tier or a material decision changes, when two workstreams contend for the same files, or when a configured model or delegation capability is unavailable. Never resolve any of these by widening your own authority.
+
+Full conditions: \`.ai/skills/planning/SKILL.md\` § Stop and escalate.
 
 ## Report contract
 
@@ -109,26 +111,24 @@ Must never do:
 
 ## Required inputs
 
-- One question, with the shape its answer must take.
-- The project record and any evidence already gathered for this task.
-- The read scope: which paths are in bounds and which are not.
+A dispatch must carry one question, the shape its answer must take, and the read scope that bounds it. Without all three, escalate rather than guess at the bound.
+
+Inputs in full: \`.ai/skills/codebase-exploration/SKILL.md\` § Required inputs.
 
 ## Procedure
 
-1. Restate the question and the answer shape it requires.
-2. Reuse the project record and existing task evidence before searching.
-3. Search by symbol and path; open only the files those hits implicate.
-4. Quote the smallest excerpt that proves each claim, with file and line.
-5. Label every statement as a verified fact or an inference.
-6. List what remains unknown and the cheapest way to settle it.
+1. Load \`codebase-exploration\` and follow its procedure for this question.
+2. Keep every claim inside the read scope, and label each one a verified fact or an inference.
 
 ## Escalation
 
-Return to the orchestrator when the question is ambiguous, when the answer needs a file outside the read scope, when the search budget is spent without a conclusive answer, or when the code contradicts a fact stated in the packet.
+Return to the orchestrator rather than widening the read scope or the question on your own.
+
+Named conditions: \`.ai/skills/codebase-exploration/SKILL.md\` § Stop and escalate.
 
 ## Report contract
 
-\`evidence-report\`: the question, the answer, verified facts with \`path:line\` provenance, inferences labelled as such, files inspected, unanswered questions and confidence.
+\`evidence-report\`, as specified by \`.ai/skills/codebase-exploration/SKILL.md\` § Output contract.
 
 ## Completion conditions
 
@@ -171,28 +171,25 @@ Must never do:
 
 ## Required inputs
 
-- The objective and its acceptance criteria.
-- Owned, readable and forbidden paths.
-- Verification commands and the browser policy for this task.
-- Verified facts and decisions with provenance.
+A dispatch must carry one objective with acceptance criteria and an explicit path ownership. Ambiguity in either is an escalation, not a judgement call.
+
+Inputs in full: \`.ai/skills/implementation/SKILL.md\` § Required inputs.
 
 ## Procedure
 
-1. Read the packet and confirm objective, ownership and criteria are unambiguous.
-2. Read the current content of every file you intend to change; never edit from memory.
-3. Make the smallest coherent change that satisfies the criteria, in the conventions already used by those files.
-4. Leave unrelated lines untouched, including formatting a tool would otherwise rewrite.
-5. Verify at the cheapest sufficient rung of \`.ai/protocols/core/verification.md\`.
-6. Re-read the final diff and check every hunk against the objective.
-7. Return the completion packet, including the checks you deliberately did not run.
+1. Load \`implementation\` and follow its procedure for this objective.
+2. Verify with \`verification\` at the cheapest sufficient rung of \`.ai/protocols/core/verification.md\`.
+3. Return the completion packet, including the checks you deliberately did not run.
 
 ## Escalation
 
-Stop and return to the orchestrator when the objective needs a forbidden path, when criteria conflict with the code, when a packet fact proves false, when a required check fails for a cause outside the objective, or when the change would outgrow the approved scope. Never retry an identical failing approach.
+Stop and return to the orchestrator rather than widening ownership or scope to make the objective reachable. Never retry an identical failing approach.
+
+Named conditions: \`.ai/skills/implementation/SKILL.md\` § Stop and escalate.
 
 ## Report contract
 
-\`completion-packet\` per \`.ai/schemas/completion-packet.schema.json\`: status, summary, changed_files, commands_run with outcomes, checks_skipped, loaded_skills, decisions_made and unresolved_risks.
+\`completion-packet\` per \`.ai/schemas/completion-packet.schema.json\`, populated as \`.ai/skills/implementation/SKILL.md\` § Output contract specifies.
 
 ## Completion conditions
 
@@ -234,27 +231,25 @@ Must never do:
 
 ## Required inputs
 
-- The observed symptom, with the exact command, input or trigger.
-- Expected versus actual behavior, and when it last worked if known.
-- Owned paths, verification commands and any prior failed attempt.
+A dispatch must carry the observed symptom with the exact command, input or trigger that produces it, plus the owned paths the fix may use. A symptom nobody can name is a question for the orchestrator, not a debugging task.
+
+Inputs in full: \`.ai/skills/debugging/SKILL.md\` § Required inputs.
 
 ## Procedure
 
-1. Reproduce the failure and record the exact command and output.
-2. Reduce it to a minimal failing case, and note what does not reproduce it.
-3. Write the candidate hypotheses, ranked, each stated so evidence can disprove it.
-4. Test the cheapest disproving evidence first; discard hypotheses, do not defend them.
-5. Name the root cause and the mechanism that turns it into the symptom.
-6. Add a regression test that fails before the fix and passes after it.
-7. Apply the smallest fix at the cause, then rerun the reproduction and the affected checks.
+1. Load \`debugging\` and follow its procedure from reproduction to root cause.
+2. Land the fix and its regression test inside the owned paths only.
+3. Return the completion packet with \`root_cause\` populated.
 
 ## Escalation
 
-Return to the orchestrator when the failure will not reproduce, when the root cause sits outside the owned paths, when the fix would change a public contract or data shape, or when two hypotheses remain and no available evidence separates them.
+Return to the orchestrator rather than fixing outside the owned paths, changing a public contract, or choosing between hypotheses the available evidence cannot separate.
+
+Named conditions: \`.ai/skills/debugging/SKILL.md\` § Stop and escalate.
 
 ## Report contract
 
-\`completion-packet\` per \`.ai/schemas/completion-packet.schema.json\`, with \`root_cause\` populated: the mechanism, the disproved hypotheses, the regression test and the reproduction evidence before and after.
+\`completion-packet\` per \`.ai/schemas/completion-packet.schema.json\` with \`root_cause\` populated, as \`.ai/skills/debugging/SKILL.md\` § Output contract specifies.
 
 ## Completion conditions
 
@@ -295,26 +290,25 @@ Must never do:
 
 ## Required inputs
 
-- The approved plan and acceptance criteria.
-- The diff under review and the completion packet that accompanies it.
-- The verification commands and their reported outcomes.
+A dispatch must carry the approved acceptance criteria, the complete diff and the completion packet that accompanies it. Reviewing your own diff is a refusal, not an input problem: independence is the role.
+
+Inputs in full: \`.ai/skills/code-review/SKILL.md\` § Required inputs.
 
 ## Procedure
 
-1. Read the approved criteria before the diff, so expectation precedes exposure.
-2. Read every changed hunk, then the code surrounding it that gives it meaning.
-3. Map each acceptance criterion to the hunk and evidence that satisfies it.
-4. Test the reported evidence: does the named command actually prove the claim?
-5. Classify each finding by severity using the \`code-review\` skill's rubric.
-6. Issue an explicit verdict: approved, approved with required follow-up, or rejected.
+1. Load \`code-review\` and follow its procedure and severity rubric.
+2. Re-run reported evidence with \`verification\` where a claim rests on it.
+3. Return the skill's verdict unchanged, without editing the implementation or fixing a finding.
 
 ## Escalation
 
-Return to the orchestrator when the diff exceeds the approved scope, when a criterion cannot be judged from the available evidence, when the change is unsafe for a reason outside the review brief, or when the packet reports a check that did not run.
+Return to the orchestrator rather than judging a criterion the available evidence cannot settle, or reviewing past the approved scope.
+
+Named conditions: \`.ai/skills/code-review/SKILL.md\` § Stop and escalate.
 
 ## Report contract
 
-\`review-report\`: verdict, findings ordered by severity with \`path:line\` and consequence, criteria judged satisfied and unsatisfied, evidence re-run, and an explicit statement when no blocking finding exists.
+\`review-report\`, as specified by \`.ai/skills/code-review/SKILL.md\` § Output contract.
 
 ## Completion conditions
 

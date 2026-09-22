@@ -2,6 +2,8 @@
 
 > Statü: plan önerisi. [Eski harness vizyonundaki fazlar](../../FUTURE-MULTI-PROVIDER-HARNESS.md) ürün yönünü verir; buradaki sıra CLI runtime için ölçülebilir teslim kapıları ekler. Bu belgeleri hazırlamak, geliştirmeyi başlatmaz.
 
+Bu fazların günlük yürütme sırası [geliştirme iş akışında](../workflow/README.md), belge teslim sırası [dokümantasyon planında](../workflow/documentation-plan.md) tanımlıdır. Entegrasyon hedefi `harness` dalıdır; `main`e aktarım bu planın otomatik sonucu değildir.
+
 ## Faz 0 — Karar ve sözleşme temeli
 
 Çıktı: [açık kararları](./decisions.md) ADR ile kapatma; canonical packet/ledger/event ve provider capability şemaları; risk/onay politikasının açık matrisi; mevcut `syn` komutlarının geriye uyumluluk testi. Upstream referanslar commit SHA ile sabitlenir. Kod taşınacaksa lisans ve bağımlılık denetimi yapılır.

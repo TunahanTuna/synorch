@@ -1,8 +1,8 @@
 # Synorch CLI Harness: araştırma ve tasarım dosyası
 
-> Durum: araştırma ve önerilen tasarım; runtime uygulanmadı. İnceleme tarihi: 2026-09-22.
+> Durum: araştırma, önerilen tasarım ve geliştirme iş akışı; runtime uygulanmadı. İnceleme tarihi: 2026-09-22.
 
-Bu dizin, Synorch'un gelecekte kendi CLI agent harness'ını geliştirmek için başvuru kaynağıdır. [Bugünkü Synorch mimarisi](../AI-ORCHESTRATION-ARCHITECTURE.md) ve [önceki çok sağlayıcılı harness vizyonu](../FUTURE-MULTI-PROVIDER-HARNESS.md) geçerliliğini korur. Bu belgeler onların yerine geçmez; kaynak araştırmasını, somut runtime sınırlarını ve doğrulama ölçütlerini ekler.
+Bu dizin, Synorch'un gelecekte kendi CLI agent harness'ını geliştirmek için başvuru kaynağıdır. `harness` bu girişimin ana entegrasyon dalıdır; geliştirme işlerinin tabanı ve hedefi burasıdır. `main`e taşıma ayrı karardır. [Bugünkü Synorch mimarisi](../AI-ORCHESTRATION-ARCHITECTURE.md) ve [önceki çok sağlayıcılı harness vizyonu](../FUTURE-MULTI-PROVIDER-HARNESS.md) geçerliliğini korur. Bu belgeler onların yerine geçmez; kaynak araştırmasını, somut runtime sınırlarını ve doğrulama ölçütlerini ekler.
 
 ## Okuma sırası
 
@@ -14,7 +14,8 @@ Bu dizin, Synorch'un gelecekte kendi CLI agent harness'ını geliştirmek için 
 6. [Araçlar, izin ve güvenlik](./design/tools-and-security.md), [audit ve işletim](./design/audit-and-operations.md)
 7. [CLI deneyimi](./design/cli-experience.md)
 8. [Aşamalı teslim](./delivery/roadmap.md) ve [doğrulama](./delivery/verification.md)
-9. [Açık kararlar](./delivery/decisions.md)
+9. [Geliştirme iş akışı](./workflow/README.md), [dokümantasyon planı](./workflow/documentation-plan.md), [görev oyun kitabı](./workflow/task-playbook.md) ve [yönetişim](./workflow/governance.md)
+10. [Açık kararlar](./delivery/decisions.md)
 
 Kaynak incelemeleri: [Oh My Pi](./research/oh-my-pi.md), [DeepSeek Harness](./research/deepseek-harness.md), [Claude Code](./research/claude-code.md).
 

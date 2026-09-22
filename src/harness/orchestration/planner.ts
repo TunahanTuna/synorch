@@ -36,8 +36,37 @@ export interface PlannerInput {
   readonly sessionId: SessionId;
 }
 
+export interface ConsultInput {
+  readonly runId: RunId;
+  readonly goal: string;
+  readonly planVersion: number;
+  /** Steering the user queued since the plan was approved, oldest first. */
+  readonly steering: readonly string[];
+  /** One line per task of the active plan with its current state. */
+  readonly tasks: readonly string[];
+  readonly route: ModelRoute;
+  readonly policy: EffectivePolicy;
+  readonly events: EventStore;
+  readonly sessionId: SessionId;
+}
+
 export interface Planner {
   propose(input: PlannerInput, signal: AbortSignal): Promise<unknown>;
+  /**
+   * Mid-run consultation at a safe boundary (after user steering): one orchestrator turn that may
+   * call `task_status` and `task_spawn`. Whatever it adds reaches workers only through a new,
+   * approved plan revision. Optional: a planner without it re-versions the plan with the steering.
+   */
+  consult?(input: ConsultInput, signal: AbortSignal): Promise<void>;
+}
+
+export function renderConsultPrompt(input: ConsultInput): string {
+  return [
+    `The user steered the running plan v${input.planVersion} for: ${input.goal}`,
+    `User steering (newest last):\n${input.steering.map((line) => `- ${line}`).join("\n")}`,
+    `Tasks:\n${input.tasks.map((line) => `- ${line}`).join("\n")}`,
+    "Tasks that have not started yet will receive this steering through a revised plan. If the steering needs extra work, call task_spawn with one plan task per follow-up (same fields as a plan_propose task); use task_status to inspect tasks. You never implement anything yourself. End your turn when done.",
+  ].join("\n\n");
 }
 
 export const PLAN_FORMAT = [
@@ -99,6 +128,24 @@ export function createModelPlanner(deps: ModelPlannerDependencies): Planner {
         version: input.version,
         created_at: input.createdAt,
       };
+    },
+    async consult(input, signal) {
+      await deps.createDriver(input.events).runTurn(
+        {
+          sessionId: input.sessionId,
+          runId: input.runId,
+          taskId: undefined,
+          attemptId: undefined,
+          role: "orchestrator",
+          route: input.route,
+          policy: input.policy,
+          packet: undefined,
+          userMessage: renderConsultPrompt(input),
+          trigger: "steer",
+          maxSteps: deps.maxSteps ?? 20,
+        },
+        signal,
+      );
     },
   };
 }

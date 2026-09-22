@@ -1,6 +1,9 @@
+import type { AgentRole } from "../contracts/index.ts";
+
 /**
  * Skill catalog (progressive disclosure). Every step sees the one-line catalog; the full SKILL.md
- * body is loaded only for a skill whose name or trigger phrase appears in the task text.
+ * body is loaded only for a skill whose name or trigger phrase appears in the task text. A catalog
+ * may scope both to the requesting role (e.g. an agent manifest's allowed and forbidden skills).
  */
 
 export interface SkillEntry {
@@ -10,9 +13,9 @@ export interface SkillEntry {
 }
 
 export interface SkillCatalog {
-  list(): readonly SkillEntry[] | Promise<readonly SkillEntry[]>;
-  /** The full SKILL.md text, or undefined when the skill cannot be loaded. */
-  load(name: string): Promise<string | undefined>;
+  list(role?: AgentRole): readonly SkillEntry[] | Promise<readonly SkillEntry[]>;
+  /** The full SKILL.md text, or undefined when the skill cannot be loaded (or is not for `role`). */
+  load(name: string, role?: AgentRole): Promise<string | undefined>;
 }
 
 export function renderCatalog(entries: readonly SkillEntry[]): string {

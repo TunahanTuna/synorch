@@ -50,6 +50,14 @@ const ALLOWED_HARNESS_DEPENDENCIES: { readonly [M in HarnessModule]: readonly Ha
   cli: HARNESS_MODULES.filter((module) => module !== "cli"),
 };
 
+/**
+ * The one non-domain source the composition root may read: the generator's structure templates,
+ * which are the built-in canonical `.ai/` defaults the runtime falls back to when a repository has
+ * no `.ai/` (one source of truth for what `syn init` writes and what the runtime assumes). Only
+ * `cli` may import it; every other harness module still sees `contracts` and `src/domain` only.
+ */
+const CLI_EXTRA_SOURCES: readonly string[] = [path.join(SRC, "templates", "structure-templates.ts")];
+
 const HARNESS_CLI_ENTRY = "./harness/cli/index.ts";
 const PI_TUI_PACKAGE = "@earendil-works/pi-tui";
 const PI_TUI_ADAPTER = path.join(HARNESS, "tui", "pi-tui-renderer.ts");
@@ -142,6 +150,7 @@ test("harness modules depend only on contracts; cli is the only composition root
         );
         continue;
       }
+      if (owner === "cli" && CLI_EXTRA_SOURCES.includes(target)) continue;
       assert.ok(
         isInside(path.join(SRC, "domain"), target),
         `${path.relative(SRC, file)} reaches outside harness and domain: ${site.specifier}`,

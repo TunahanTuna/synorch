@@ -12,6 +12,7 @@ import {
   type Usage,
 } from "../contracts/index.ts";
 import type { ResultData } from "../tui/index.ts";
+import { describeCanonical, describeProfiles } from "./canonical.ts";
 import type { Runtime } from "./runtime.ts";
 
 /** Turns a run's recorded events into the header, the JSONL result/error frame and the human summary. */
@@ -25,13 +26,19 @@ export function headerFor(runtime: Runtime, notices: readonly string[] = []): Se
     if (rule !== undefined) routes.push({ tier, model: `${rule.route.provider_id}/${rule.route.model_id}`, source: rule.source });
   }
   const sandboxNotes = runtime.sandbox.enforcement === "full" ? [] : runtime.sandbox.notes.map((note) => `sandbox ${runtime.sandbox.enforcement}: ${note}`);
+  const profiles = describeProfiles(runtime.canonical);
+  const canonicalNotes = [
+    describeCanonical(runtime.canonical, runtime.workspaceRoot),
+    ...(profiles === undefined ? [] : [profiles]),
+    ...runtime.canonical.diagnostics.map((diagnostic) => `canonical .ai: ${diagnostic}`),
+  ];
   return {
     workspaceRoot: runtime.workspaceRoot,
     gitBranch: runtime.gitBranch,
     policyMode: runtime.policyMode,
     routes,
     sandboxEnforcement: runtime.sandbox.enforcement,
-    notices: [...sandboxNotes, ...notices],
+    notices: [...canonicalNotes, ...sandboxNotes, ...notices],
   };
 }
 

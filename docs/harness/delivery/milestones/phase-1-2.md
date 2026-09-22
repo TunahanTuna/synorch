@@ -2,7 +2,7 @@
 
 > Durum: kanıt kaydı, 2026-09-23 (I5 Aşama B teslimi). Kapılar: [yol haritası](../roadmap.md). Eşleme kuralı: [uygulama planı §5](../../implementation-plan.md#5-faz-kapıları-ile-eşleme). Senaryolar: [verification.md Seviye 3](../verification.md#seviye-3-uçtan-uca-senaryolar). Bu belge kapıların **otomatik testlerle** nerede kanıtlandığını ve neyin henüz kanıtlanmadığını dürüstçe kaydeder; bir kapıyı "kapandı" ilan etmek entegrasyon sahibinin bağımsız review'undan sonra olur.
 
-Kanıt ortamı: Windows 11, Node 24.11, `pnpm check` 522 test, 521 geçti, 1 platform atlaması, 0 hata. Model yanıtları scripted adapter'dan gelir; ağ, gerçek hesap ve gerçek TTY kullanılmadı.
+Kanıt ortamı: Windows 11, Node 24.11, `pnpm check` 544 test, 543 geçti, 1 platform atlaması, 0 hata (Dalga 3 boşluk kapatma sonrası; I5 Aşama B teslimi 522/521/1 idi). Model yanıtları scripted adapter'dan gelir; ağ, gerçek hesap ve gerçek TTY kullanılmadı. `.github/workflows/harness-ci.yml` aynı kapıyı `windows-latest`, `ubuntu-latest`, `macos-latest` üzerinde Node 24 ile koşacak şekilde eklendi; henüz uzakta koşmadı (push yapılmadı).
 
 ## Faz 1 — Tek sağlayıcılı yerel agent çekirdeği
 
@@ -34,18 +34,21 @@ Kanıt ortamı: Windows 11, Node 24.11, `pnpm check` 522 test, 521 geçti, 1 pla
 | Retry yeni attempt, kanıt korunur (I4 AC-5) | `harness-orchestration-review` › "a retry is a new attempt and the failed attempt and its evidence stay in the log"; e2e: `harness-e2e-provider` (iki başarısız attempt ayrı oturumlarda, sessiz fallback yok) | Otomatik kanıtlı |
 | Explorer/reviewer yazamaz (I3 AC-2) | `harness-tools-gateway`, `harness-policy-engine` › "AC-2: explorer and reviewer cannot write…" | Otomatik kanıtlı |
 | Uçtan uca trivial + standart (I5 AC-5) | `harness-e2e-trivial`, `harness-e2e-standard` | Otomatik kanıtlı |
+| Synorch orkestrasyon modeli runtime'da (kanonik `.ai/` → anayasa/protokol blokları, rol tanımları policy'yi yalnız daraltır, rol kapsamlı skill kataloğu, profil ipuçları; `.ai/` yoksa yerleşik varsayılan ve bunun bildirilmesi) | `harness-cli-canonical` (5 test); `harness-e2e-doctor` (`canonical` sonucu) | Otomatik kanıtlı |
+| Orchestrator delegasyonu (`task_spawn`/`task_status` sahiplik + bütçe kontrollü), `ask_user` bağlama | `harness-orchestration-delegation`, `harness-e2e-steer`, `harness-e2e-ask-user` | Otomatik kanıtlı |
+| Exit code ayrımı (provider/tool → 4, doğrulama → 5) | `harness-orchestration-exit-codes` (6 test); `harness-e2e-provider` (artık exit 4) | Otomatik kanıtlı |
 
 ## Seviye 3 senaryo durumu
 
 | Senaryo | Durum |
 | --- | --- |
 | Trivial belge düzeltmesi, standart kod değişikliği, iki çakışan task, crash (tool sonrası kayıt öncesi), provider rate limit/kota, headless onay | Otomatik e2e kanıtı var (§ yukarı; ayrıntı [CLI başvurusu §14](../../reference/cli.md#14-uçtan-uca-senaryolar-verificationmd-seviye-3)) |
-| Yüksek riskli değişiklik (güçlü izolasyon + açık onay) | e2e yok; `harness-orchestration-isolation` high-risk reddi birim düzeyinde |
-| Çalışırken kullanıcı düzeltmesi (steer) | e2e yok; `syn agent` TTY'de steer'i bağlar, otomatik testi yok |
+| Yüksek riskli değişiklik (güçlü izolasyon + açık onay) | `harness-e2e-high-risk`: `autonomous`'ta zorunlu worktree, ayrı oturumda farklı modelli reviewer ve reviewer'ın kendi test kanıtı; `ask`'ta plan ve her etkili eylem (`write_file`, iki `exec`) insan onaylı; git yoksa daha zayıf izolasyona düşmek yerine ret (exit 6) |
+| Çalışırken kullanıcı düzeltmesi (steer) | `harness-e2e-steer`: TTY `syn agent`'ta run sırasında yazılan satır güvenli sınırda uygulanır, orchestrator danışılır (`task_status`, `task_spawn`), plan v2 onaylanınca v1 `superseded`, sonraki görevin packet'i steer'i taşır, çalışan attempt değişmez; `harness-orchestration-delegation`: `ask`'ta revizyon onayı ve reddi |
 
 ## Doğrulanmamış olanlar (açık)
 
 - **Gerçek hesaplar:** ChatGPT OAuth (PKCE/device-code, refresh), OpenAI/Anthropic API key akışları, `claude` köprüsü ve `doctor --runtime --probe-model` gerçek uç noktalara karşı hiç koşulmadı ([providers-and-auth §9](../../reference/providers-and-auth.md#9-doğrulanmamış-varsayımlar-ve-gerçek-hesap-gerektirenler)).
 - **Gerçek TTY matrisi:** pi-tui renderer yalnız `@xterm/headless` ile test edildi; Windows Terminal/conhost/PowerShell/cmd, macOS/Linux terminalleri, SSH ve ekran okuyucu matrisi ([CLI başvurusu §9](../../reference/cli.md#9-manuel-çapraz-platform-doğrulaması-açık)) işaretlenmedi. `syn agent` TUI modu elle denenmedi.
-- **Linux/macOS host'lar:** tüm kanıt Windows 11'de üretildi; `ubuntu-latest`/`macos-latest` CI matrisi (bubblewrap/sandbox-exec `full` yolu, keychain CLI'ları, POSIX sinyal iptali, crash testindeki süreç öldürme) koşulmadı.
-- Başarısız run'lar provider hatası dahil exit 5 verir (provider/tool için exit 4 ayrımı coordinator değişikliği ister); `ask_user`/`task_spawn`/`task_status` bağlı değil; skill kataloğu ve repo anayasası ContextBuilder'a verilmiyor.
+- **Linux/macOS host'lar:** tüm kanıt Windows 11'de üretildi; `harness-ci.yml` matrisi eklendi ama uzakta koşmadı (bubblewrap/sandbox-exec `full` yolu, keychain CLI'ları, POSIX sinyal iptali, crash testindeki süreç öldürme doğrulanmadı).
+- **Dalga 3 sınırları:** steer yalnız dispatch sınırında uygulanır (çalışan attempt'e iletilmez); `task_spawn` yalnız steer danışması sırasında kabul edilir; `task_spawn.packet`'in plan görevi olarak yorumlanması `tools.md` için bir netleştirme isteğidir; model profilleri route değil ipucudur; kanonik `.ai/` gerçek bir `syn init`/`syn sync` deposunda yalnız test fixture'ıyla denendi.

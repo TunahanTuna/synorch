@@ -191,7 +191,7 @@ export class PlainLineRenderer implements TerminalRenderer {
         return;
       }
     }
-    const line = describeEvent(event);
+    const line = describeEvent(event, { policyMode: this.options.policyMode });
     if (line !== undefined) this.writeLine(this.formatLine(line));
   }
 

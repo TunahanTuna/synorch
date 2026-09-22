@@ -1,4 +1,4 @@
-import type { HarnessErrorInfo, SessionEvent } from "../contracts/index.ts";
+import { HUMAN_ONLY_APPROVAL_SUBJECTS, type HarnessErrorInfo, type PolicyMode, type SessionEvent } from "../contracts/index.ts";
 import { sanitizeInline } from "./sanitize.ts";
 
 /**
@@ -34,7 +34,17 @@ function short(id: string): string {
   return id.length > 12 ? `${id.slice(0, 12)}…` : id;
 }
 
-export function describeEvent(event: SessionEvent): EventLine | undefined {
+export interface DescribeContext {
+  /** The session's policy mode; in `autonomous` mode the orchestrator's own plan approvals are audit lines, not warnings. */
+  readonly policyMode?: PolicyMode;
+}
+
+/** A request the orchestrator decides itself under `autonomous` policy (ADR-08); human-only subjects still need a person. */
+function selfApproved(subject: string, context: DescribeContext): boolean {
+  return context.policyMode === "autonomous" && !(HUMAN_ONLY_APPROVAL_SUBJECTS as readonly string[]).includes(subject);
+}
+
+export function describeEvent(event: SessionEvent, context: DescribeContext = {}): EventLine | undefined {
   switch (event.type) {
     case "session/opened":
       return line("info", `Session ${event.session_id} opened in ${event.data.workspace_root} (policy ${event.data.policy_mode})`);
@@ -59,8 +69,13 @@ export function describeEvent(event: SessionEvent): EventLine | undefined {
     case "plan/state_changed":
       return line("info", `Plan ${event.data.from} -> ${event.data.to}: ${event.data.reason}`);
     case "approval/requested":
-      return line("warning", `Approval needed (${event.data.request.subject_kind}): ${event.data.request.summary}`);
+      return selfApproved(event.data.request.subject_kind, context)
+        ? line("info", `Approval (${event.data.request.subject_kind}) decided by the orchestrator under autonomous policy, recorded for audit: ${event.data.request.summary}`)
+        : line("warning", `Approval needed (${event.data.request.subject_kind}): ${event.data.request.summary}`);
     case "approval/decided":
+      if (event.data.decision.decided_by === "orchestrator" && event.data.decision.outcome.startsWith("allowed")) {
+        return line("info", `Approval ${event.data.decision.outcome} by orchestrator (autonomous self-approval, audited)`);
+      }
       return line(
         event.data.decision.outcome.startsWith("allowed") ? "success" : "warning",
         `Approval ${event.data.decision.outcome} by ${event.data.decision.decided_by}`,

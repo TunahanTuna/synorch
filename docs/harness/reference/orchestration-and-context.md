@@ -56,9 +56,13 @@ const coordinator = createCoordinator({ sessions, blobs, router, policy, approva
 | review `block` / geçerli review yok | `reviewing → failed`. |
 
 6. Başarısız görevin bağımlıları `cancelled` olur; başarısız görevin scoped-dir değişiklikleri geri alınır, worktree'ler temizlenir.
-7. **Final rapor.** Görev başına durum ve integrate edilen dosyalar `RunOutcome.summary`'dir. Hepsi `completed` → exit 0; bütçe durdurması → 9; diğer başarısızlık → 5; iptal → 130. `ledger: true` ise `plan.json` ve `report.md` `.ai/tasks/<run-id>/` altına control-plane writer ile yazılır.
+7. **Final rapor.** Görev başına durum ve integrate edilen dosyalar `RunOutcome.summary`'dir. Hepsi `completed` → exit 0; bütçe durdurması → 9; iptal → 130; diğer başarısızlıkta `failedRunExitCode(nedenler)`: her görev son başarısızlığının nedenini (`TaskEntry.failure`) taşır — doğrulama/review/freshness → 5 (öncelikli), attempt günlüğünden sınıflanan provider/araç hatası (`AttemptRecord.failure`, `classifyAttemptFailure`) veya bloklu route → 4, izolasyonun `sandbox_insufficient` reddi → 6; nedeni kayıtlı olmayan görev 5 sayılır. Plan üretilemezse planlama turu günlüğüne bakılır: provider hatası → 4, cevapsız `ask_user` (`approval_unavailable`) → 3, geçersiz aday → 5. `ledger: true` ise `plan.json` ve `report.md` `.ai/tasks/<run-id>/` altına control-plane writer ile yazılır.
 
 `Coordinator.onEvent` run günlüğüne eklenen her olayı ve uyarıları beklemeden (`queueMicrotask`) dinleyicilere dağıtır; yavaş bir renderer run'ı yavaşlatmaz. `steer(text)` `steer/queued` yazar ve planlama sürüyorsa bir sonraki plan denemesine geri besleme olur.
+
+**Plan onaylandıktan sonra steer ve delegasyon.** Kuyruktaki steer bir **güvenli sınırda** uygulanır: scheduler döngüsünde yeni dispatch'lerden önce (ve son görev bittikten sonra); çalışan attempt'in packet'i değişmez. Sırası: (1) `Planner.consult` varsa orchestrator run oturumunda bir tur çalıştırır (`renderConsultPrompt`: steer, görev durumları); bu turda `task_status` görev tablosunu, `task_spawn` bir plan görevini revizyon taslağına ekler. (2) Başlamamış görev veya eklenen görev yoksa steer yalnız bildirilir. (3) Aksi halde revizyon: yeni `plan_id`, `version` n+1, aynı bütçe, `assumptions`'a `User steering: …`, görevlere eklenenler; `validatePlan` DAG/sahiplik/çakışmayı yeniden denetler. (4) `plan/proposed`, modun onay kuralı (`autonomous`: denetlenen öz-onay; `ask`: run `waiting_for_approval` → insan), `approval/*`. (5) Onaylanırsa önce eski plan `approved → superseded`, sonra yeni `proposed → approved`; eklenen görevler `task/created` (yeni `plan_id`) ile scheduler'a (`DagScheduler.add`) girer, sonradan başlayan görevlerin packet'leri yeni sürümden derlenir (steer `decisions`'da `Assumption: User steering: …`). Reddedilirse yeni plan `proposed → rejected`, eklenenler atılır, run eski planla sürer. Her revizyon ayrı bir plan kaydıdır çünkü projection planları `plan_id` ile izler.
+
+`task_spawn` kontrolleri (`DelegationPort`, `createDelegationSlot` ile etkin run'a bağlı; run bitince temizlenir): çağıran bu run'ın orchestrator'ı olmalı (`policy_denied`), yalnız danışma turunda kabul edilir (`execution_failed`), run başına en çok `maxSpawnedTasks` (4), bütçe tükenmişse ret, girdi `planTaskSchema`, benzersiz anahtar, ve aday revizyon `validatePlan`'dan geçmeli (sıralanmamış iki görev aynı yola sahip olamaz). Kabul edilen görev yalnız revizyon onaylanınca çalışır.
 
 ## 3. Attempt'ler ve izolasyon (ADR-07)
 
@@ -122,7 +126,7 @@ Her adımda model girdisi yalnız kalıcı durumdan yeniden kurulur:
 2. Bütçe kapısı (`RequestBudgetGate.admit`): session'daki `provider/usage` olayları izleyiciye verilir; reddedilirse `{ ok: false, reason: "budget-exceeded", detail }` döner ve istek hazırlanmaz (driver turu `budget_exceeded` bitirir).
 3. History: son `context/compacted` olayının `first_kept_seq`'inden sonraki `message/recorded` olayları ve `steer/queued` (kullanıcı mesajı olarak). Yalnız bu rolün ve (verildiyse) bu `attemptId`'nin asistan/tool mesajları alınır; kullanıcı rollü girdi kullanıcıdan veya orchestrator'dan gelebilir. Cevapsız tool çağrısına "sonuç bilinmiyor, tekrarlanmadı" hata sonucu eklenir, eşsiz sonuç düşürülür.
 4. Sistem blokları güven sırasıyla: `harness` (Synorch'un rol kuralları) → `project` (anayasa, protokoller, repo rol metni, skill kataloğu, tetiklenen skill'ler, packet) → `untrusted` (compaction özeti, hafıza). Blok digest'i `digestText(text)`'tir.
-5. Skill kataloğu her adımda tek satırlık listedir; tam `SKILL.md` yalnız adı veya tetik ifadesi packet hedefinde/kararlarında ya da son kullanıcı mesajında geçen skill için yüklenir.
+5. Skill kataloğu her adımda tek satırlık listedir; tam `SKILL.md` yalnız adı veya tetik ifadesi packet hedefinde/kararlarında ya da son kullanıcı mesajında geçen skill için yüklenir. `SkillCatalog.list(role)`/`load(name, role)` isteyen rolü alır; runtime kataloğu (kanonik `.ai/`, [CLI §10.1](./cli.md#101-kanonik-ai-yapısı-runtime-girdisi-olarak)) rol manifestinin `allowed_skills`/`forbidden_skills`'ine göre süzer. Anayasa, protokoller ve rol metni de runtime'da hedef deponun `.ai/`'sinden (yoksa yerleşik varsayılanlardan) gelir.
 6. Hafıza (`MemoryStore.search`, proje/branch filtresiyle): her not `source: memory`, `trust: untrusted` bloktur; neden seçildiği yazılır, `stale` not açıkça işaretlenir, `superseded`/`rejected` kararlar atlanır.
 7. Token bütçesi (yaklaşık 4 karakter = 1 token): sınır `pencere − max(rezerv 16k, max_output)`. Aşımda önce hafıza, sonra skill, sonra katalog kısaltılır ve raporda `truncated: true` olur. Hâlâ aşıyorsa compaction; olmazsa `context-overflow`.
 8. İstek `ModelRequest` olarak kurulur, `envelopeDigest = digestOf(request)`. Aynı günlük ve aynı `requestId` için digest bayt bayt aynıdır (replay). Rapor her blok için kaynak, güven, token tahmini ve kısaltma bilgisini, ayrıca `history` ve `tool-results` satırlarını içerir.
@@ -162,6 +166,8 @@ Her adımda model girdisi yalnız kalıcı durumdan yeniden kurulur:
 | AC-8 | `harness-orchestration-control-plane` (policy reddi, motordan bağımsız koruma, symlink kaçışı, orchestrator write_scope'u) |
 | ADR-07 | `harness-orchestration-isolation` (worktree yolu, yanlış digest reddi, owned dışı reddi, untracked koruma, scoped-dir geri dönüş ve revert, high-risk reddi, read-only, seed) |
 | ADR-10 | `harness-orchestration-review`: `an rca-only debugger gets no write scope…` |
+| Steer/delegasyon | `harness-orchestration-delegation` (araç çağıranı reddi, güvenli sınırda revizyon + `task_spawn` kontrolleri, `ask`'ta revizyon onayı ve reddi) |
+| Exit 4/5 | `harness-orchestration-exit-codes` (`failedRunExitCode`, `classifyAttemptFailure`, provider/araç hatası → 4, worker raporlu başarısızlık → 5, planlama provider hatası → 4, cevapsız `ask_user` → 3) |
 | Geçişler | Uçtan uca testlerde `replayTransitions(events)` boş: her `*_state_changed` projeksiyondaki durumdan başlar ve `validateTransition`'dan geçer. |
 
 ## 12. Sapmalar ve bilinen sınırlar
@@ -173,6 +179,7 @@ Her adımda model girdisi yalnız kalıcı durumdan yeniden kurulur:
 - **Digest kuralları.** Packet kaynakları `digestText` (LF), artifact ve `file` kanıtı ham `sha256` kullanır.
 - **Maliyet.** Git dışı scoped-dir ağacın tamamını (`.git`, `.synorch`, `node_modules` hariç) iki kez okur; büyük depolarda pahalıdır. Worktree oluşturma + kaldırma, bu Windows makinesinde küçük test depolarında yaklaşık 0,3–0,6 s sürdü; büyük depolar ve `node_modules` kurulumu ölçülmedi.
 - **Token tahmini** sağlayıcıdan bağımsız kaba bir tahmindir; gerçek kullanım `provider/usage`'dan gelir.
+- **Steer yalnız dispatch sınırında.** Çalışan attempt'in sürücüsüne (`AgentDriver.steer`) iletilmez; uzun tek bir görev sürerken yazılan düzeltme o görev bitene kadar bekler. Orchestrator yalnız planlamada ve steer danışmasında tur çalıştırır; `task_spawn` başka anda reddedilir.
 
 ## 13. Sözleşme değişiklik istekleri (Dalga 2a sonucu)
 

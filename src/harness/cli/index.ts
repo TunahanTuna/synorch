@@ -39,7 +39,9 @@ export { parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from 
 export { commandHelp } from "./help.ts";
 export { approvalFailure, failureInfo, isAbortError } from "./outcome.ts";
 export { resolveTerminalSettings, streamHasColors, type TerminalFacts, type TerminalRequest, type TerminalSettings } from "./terminal.ts";
-export { createRuntime, type Runtime, type RuntimeOptions, type RuntimeOverrides } from "./runtime.ts";
+export { createRuntime, type Runtime, type RuntimeOptions, type RuntimeOverrides, type UserPrompt } from "./runtime.ts";
+export { describeCanonical, loadCanonicalStructure, type CanonicalStructure, type RoleDefinition } from "./canonical.ts";
+export { narrowPolicy, withRoleDefinitions } from "./role-policy.ts";
 export { loadRuntimeConfig, resolveHome, type RuntimeConfig } from "./config.ts";
 export { loadScript, scriptStep } from "./scripted-script.ts";
 

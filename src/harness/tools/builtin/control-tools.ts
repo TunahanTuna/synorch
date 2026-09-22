@@ -100,7 +100,13 @@ export function createControlTools(callbacks: ControlCallbacks): Tool[] {
       callbacks.askUser,
       "approval_unavailable",
     ),
-    controlTool("task_spawn", "Dispatch a task from a task context packet (schema, DAG and ownership are validated).", ["orchestrator"], taskSpawnInput, callbacks.taskSpawn),
+    controlTool(
+      "task_spawn",
+      "Add a follow-up task to the running plan: `packet` is one plan task (key, role, objective, depends_on, owned_paths, read_paths, risk, model_tier, acceptance_criteria, verification). DAG, ownership and budget are validated; it runs only after the revised plan is approved.",
+      ["orchestrator"],
+      taskSpawnInput,
+      callbacks.taskSpawn,
+    ),
     controlTool("task_status", "Report the state of one task, or of every task in the run.", ["orchestrator"], taskStatusInput, callbacks.taskStatus),
     controlTool("memory_propose", "Propose a memory note, relation or status change; persistence is decided by the memory module.", [...AGENT_ROLES], memoryProposeInput, callbacks.memoryPropose),
   ] as Tool[];

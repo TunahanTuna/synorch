@@ -40,6 +40,7 @@ Modül sınırı: `tools` ve `policy` birbirini import etmez (ADR-01). Gateway `
 - **Grant'ler** `approval` katmanı olarak digest'le kaydedilir, kapsamı veya etkileri **genişletmez**; eylem onayı gateway'de digest'e bağlanır (§4).
 - Config şeması (`policyConfigSchema`) katıdır: `policy` altındaki bilinmeyen anahtar `config_invalid` verir. `policy_version` her hesaplamada `1`'dir; sürüm artırımı çağıranın (I4) sorumluluğundadır.
 - Sonuç `effectivePolicySchema.parse` ile doğrulanır; şema invariant'ı bozulursa hesaplama throw eder.
+- **Kanonik rol manifesti (runtime).** Composition root motoru `withRoleDefinitions` ile sarar: hedef deponun `.ai/agents/<rol>/AGENT.md`'si (veya yerleşik varsayılan) hesaplanan politikayı yalnız **daraltır** (`writes_product_files: false` → yazma kapsamı boş, `workspace-write: deny`; orchestrator için `.ai/tasks/` altında daha dar `control_plane_write_scope`) ve ek bir `role` katmanı (`source` = manifest yolu) olarak kaydedilir; böylece manifest bir policy kaynağı olur ve `policy-self-modification` rayıyla yazılamaz. Genişletmeye çalışan manifest alanları yükleme sırasında yok sayılır; `assertNotWider` her sonuçta etki ve yazma desenlerinin genişlemediğini doğrular. Ayrıntı: [CLI §10.1](./cli.md#101-kanonik-ai-yapısı-runtime-girdisi-olarak).
 
 ## 3. Karar (`evaluate`)
 
@@ -82,8 +83,8 @@ tool/execution_started → execute (timeout + iptal) → redaksiyon → sınırl
 | `write_file` | workspace-write | implementer, debugger | Var olan dosya için `expected_digest` (ham baytların sha256'sı) zorunlu; yeni dosyada boş/null |
 | `apply_patch` | workspace-write | implementer, debugger, orchestrator | Katı unified diff (fuzz yok), dokunulan her yol için `expected` digest (yeni dosyada `null`), CRLF korunur, çok dosyada hata olursa yazılanlar geri alınır |
 | `exec` | exec | implementer, debugger, reviewer | argv (shell yok), `cwd` workspace içinde, env allowlist, `timeout_ms` ≤ 600 s, 1 MiB çıktı üst sınırı |
-| `ask_user` | control | orchestrator | `control.askUser` yoksa `approval_unavailable` |
-| `task_spawn`, `task_status` | control | orchestrator | Yalnız tanım; davranış `control.taskSpawn`/`taskStatus` (I4). Packet'i I4 doğrular |
+| `ask_user` | control | orchestrator | `control.askUser` yoksa `approval_unavailable`. Runtime'da oturumun etkileşimli renderer'ına bağlanır (CLI `bindUserPrompt`); headless/JSONL/pipe'ta `approval_unavailable`, cevapsız kalıp plan üretilemeyen run exit 3 |
+| `task_spawn`, `task_status` | control | orchestrator | Tanım burada; davranış `control.taskSpawn`/`taskStatus` = orchestration `delegationCallbacks(slot)`: etkin run'ın orchestrator'ı dışındaki çağıran reddedilir; `task_spawn`'ın `packet`'i bir plan görevidir, DAG/sahiplik/bütçe coordinator'da denetlenir ve görev yalnız onaylı plan revizyonuyla çalışır ([orkestrasyon §2](./orchestration-and-context.md#2-run-akışı)) |
 | `memory_propose` | control | hepsi | Yalnız öneri; davranış `control.memoryPropose` (I6) |
 | `task_report` | control | explorer, implementer, debugger | Girdi `taskReportInputSchema`; callback opsiyonel (`control.taskReport`), yoksa `report recorded` onayı |
 | `review_report` | control | reviewer | Girdi `reviewReportInputSchema`; callback opsiyonel |

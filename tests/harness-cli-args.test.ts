@@ -249,7 +249,7 @@ test("the real binary routes runtime commands and keeps stdout free of escapes i
   assert.equal(report.schema, "synorch.doctor.runtime");
   assert.equal(doctorRuntime.status, report.ok ? 0 : 1);
   assert.equal(report.network_requests, "none");
-  assert.deepEqual(report.checks.map((check) => check.id), ["node", "terminal", "config", "sandbox", "store", "auth", "capabilities"]);
+  assert.deepEqual(report.checks.map((check) => check.id), ["node", "terminal", "config", "canonical", "sandbox", "store", "auth", "capabilities"]);
 
   const usageError = cli(["login"]);
   assert.equal(usageError.status, 2);

@@ -40,7 +40,7 @@ const CONFIG = [
 interface Report {
   readonly ok: boolean;
   readonly network_requests: string;
-  readonly checks: readonly { readonly id: string; readonly status: string; readonly details: readonly unknown[] }[];
+  readonly checks: readonly { readonly id: string; readonly status: string; readonly summary: string; readonly details: readonly unknown[] }[];
 }
 
 test("doctor --runtime --json reports each area separately and makes no network request (AC-6)", async () => {
@@ -64,8 +64,11 @@ test("doctor --runtime --json reports each area separately and makes no network 
     const report = JSON.parse(doctor.stdout()) as Report;
     assert.deepEqual(network.urls, [], "doctor --runtime must not send any request");
     assert.equal(report.network_requests, "none");
-    assert.deepEqual(report.checks.map((check) => check.id), ["node", "terminal", "config", "sandbox", "store", "auth", "capabilities"]);
+    assert.deepEqual(report.checks.map((check) => check.id), ["node", "terminal", "config", "canonical", "sandbox", "store", "auth", "capabilities"]);
     const byId = new Map(report.checks.map((check) => [check.id, check]));
+    const canonical = byId.get("canonical");
+    assert.equal(canonical?.status, "warn", "a repository without .ai/ runs on the built-in defaults, and doctor says so");
+    assert.match(canonical?.summary ?? "", /canonical \.ai: none in .*; using the built-in Synorch defaults \(constitution loaded, 8 core protocol\(s\), 5 role manifest\(s\), 9 skill\(s\)/);
     assert.equal(byId.get("sandbox")?.status, "warn", "a partial sandbox is reported, not hidden");
     assert.equal(byId.get("store")?.status, "ok");
     const auth = byId.get("auth")?.details as { provider_id: string; method: string; state: string }[];
@@ -84,6 +87,7 @@ test("doctor --runtime --json reports each area separately and makes no network 
     const human = capture({ cwd: sandbox.workspace });
     assert.equal(await runHarnessCommand(["doctor", "--runtime"], human.io, overrides), 0);
     assert.match(human.stdout(), /^WARN  sandbox/m);
+    assert.match(human.stdout(), /^WARN  canonical\s+canonical \.ai: none in/m);
     assert.match(human.stdout(), /No network request was made/);
     assert.deepEqual(network.urls, []);
 

@@ -215,11 +215,11 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
       lastUserText(history),
     ].join("\n");
     if (deps.skills !== undefined) {
-      const entries = [...(await deps.skills.list())].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      const entries = [...(await deps.skills.list(input.role))].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       if (entries.length > 0) {
         blocks.push({ id: "skill-catalog", source: "skill-catalog", trust: "project", text: renderCatalog(entries), truncated: false, optional: true });
         for (const entry of triggeredSkills(entries, taskText)) {
-          const text = await deps.skills.load(entry.name);
+          const text = await deps.skills.load(entry.name, input.role);
           if (text !== undefined) blocks.push({ id: `skill:${entry.name}`, source: "skill", trust: "project", text, truncated: false, optional: true });
         }
       }

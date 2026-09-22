@@ -49,6 +49,7 @@ import {
   type TurnOutcome,
 } from "../contracts/index.ts";
 import { createBudgetGateSlot, type BudgetGateSlot } from "./budget.ts";
+import type { DelegationSlot } from "./delegation.ts";
 import { createCoordinator, type CoordinatorLimits } from "./coordinator.ts";
 import { createWorkerFactory } from "./factories.ts";
 import { runGit } from "./git.ts";
@@ -676,6 +677,7 @@ export interface TestRuntimeOptions {
   readonly preferWorktree?: boolean;
   readonly ledger?: boolean;
   readonly headless?: boolean;
+  readonly delegation?: DelegationSlot;
 }
 
 export interface TestRuntime {
@@ -726,6 +728,7 @@ export function createTestRuntime(options: TestRuntimeOptions): TestRuntime {
       return manager;
     },
     budgetGate,
+    ...(options.delegation === undefined ? {} : { delegation: options.delegation }),
     ...(options.limits === undefined ? {} : { limits: options.limits }),
     ...(options.preferWorktree === undefined ? {} : { preferWorktree: options.preferWorktree }),
     ...(options.ledger === undefined ? {} : { ledger: options.ledger }),

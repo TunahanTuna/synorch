@@ -13,6 +13,7 @@ import {
 import { createAuthProviders, createCredentialStore, ProfileStateStore, type SynorchCredentialStore } from "../auth/index.ts";
 import { createSessionStore } from "../store/index.ts";
 import { probeSandbox } from "../tools/index.ts";
+import { describeCanonical, describeProfiles } from "./canonical.ts";
 import { resolveHome } from "./config.ts";
 import { failureInfo } from "./outcome.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
@@ -27,7 +28,7 @@ import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts
 export type CheckStatus = "ok" | "warn" | "fail";
 
 export interface DoctorCheck {
-  readonly id: "node" | "terminal" | "config" | "sandbox" | "store" | "auth" | "capabilities" | "probe-model";
+  readonly id: "node" | "terminal" | "config" | "canonical" | "sandbox" | "store" | "auth" | "capabilities" | "probe-model";
   readonly status: CheckStatus;
   readonly summary: string;
   readonly details: readonly unknown[];
@@ -72,6 +73,34 @@ function terminalCheck(io: DoctorIO): DoctorCheck {
     status: "ok",
     summary: `interactive sessions render as ${kind} (stdin ${io.stdinIsTTY ? "tty" : "not a tty"}, stdout ${io.stdoutIsTTY ? "tty" : "not a tty"}, TERM=${io.env.TERM ?? "unset"})`,
     details: [{ renderer: kind, stdin_tty: io.stdinIsTTY, stdout_tty: io.stdoutIsTTY, term: io.env.TERM ?? null }],
+  };
+}
+
+/** The canonical `.ai/` structure the runtime feeds to context and policy, or the built-in fallback. */
+function canonicalCheck(runtime: Runtime): DoctorCheck {
+  const canonical = runtime.canonical;
+  const profiles = describeProfiles(canonical);
+  return {
+    id: "canonical",
+    status: canonical.origin === "repository" && canonical.diagnostics.length === 0 ? "ok" : "warn",
+    summary: `${describeCanonical(canonical, runtime.workspaceRoot)}${profiles === undefined ? "" : `; ${profiles}`}`,
+    details: [
+      {
+        origin: canonical.origin,
+        constitution: canonical.instructions.constitution !== undefined,
+        protocols: canonical.protocolIds,
+        roles: [...canonical.roles.values()].map((role) => ({
+          role: role.role,
+          source: role.source,
+          model_tier: role.modelTier,
+          writes_product_files: role.writesProductFiles,
+          control_plane_write_scope: role.controlPlaneWriteScope ?? null,
+        })),
+        skills: canonical.skillEntries.map((skill) => ({ name: skill.name, kind: skill.kind, path: skill.path })),
+        model_profile_hints: canonical.profiles,
+        diagnostics: canonical.diagnostics,
+      },
+    ],
   };
 }
 
@@ -222,6 +251,7 @@ export async function doctorRuntime(io: DoctorIO, target: string | undefined, pr
       summary: runtime.config.files.length === 0 ? "no configuration files; defaults apply" : runtime.config.files.map((file) => `${file.layer}: ${file.path}`).join("; "),
       details: runtime.config.files,
     });
+    checks.push(canonicalCheck(runtime));
   } catch (error) {
     checks.push({ id: "config", status: "fail", summary: failureInfo(error).message, details: [] });
   }

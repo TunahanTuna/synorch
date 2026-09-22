@@ -15,7 +15,8 @@ import type { ParsedCommand } from "./args.ts";
 import { failureInfo } from "./outcome.ts";
 import { createSessionRenderer, type RendererIO, type SessionRenderer } from "./renderers.ts";
 import { headerFor, isResultOutcome, outcomeError, resultData, runEvents } from "./run-summary.ts";
-import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
+import { profileHintsFor } from "./canonical.ts";
+import { createRuntime, type Runtime, type RuntimeOverrides, type UserPrompt } from "./runtime.ts";
 import { handleSlashCommand } from "./slash-commands.ts";
 import { resolveTerminalSettings, streamHasColors } from "./terminal.ts";
 
@@ -60,9 +61,10 @@ function readAll(stream: InputStream): Promise<string> {
 
 function requireOrchestratorRoute(runtime: Runtime): void {
   if (runtime.config.router.rules.some((rule) => rule.tier === "orchestrator")) return;
+  const hints = profileHintsFor(runtime.canonical, "orchestrator").map((hint) => `${hint.provider}/${hint.model}`);
   throw new HarnessError({
     code: "config_invalid",
-    message: `no model route is configured for tier orchestrator; add a routes entry to ${path.join(runtime.home, "config.yaml")} or pass --profile orchestrator=<provider>/<model>`,
+    message: `no model route is configured for tier orchestrator; add a routes entry to ${path.join(runtime.home, "config.yaml")} or pass --profile orchestrator=<provider>/<model>${hints.length === 0 ? "" : ` (the canonical model profiles suggest ${hints.join(" or ")})`}`,
     workspace_effect: "none",
     retry_safe: true,
     next_command: "syn doctor --runtime",
@@ -84,11 +86,73 @@ function describeOutcome(outcome: RunOutcome): string {
   return `Run ${outcome.runId} ${outcome.status} (exit ${outcome.exitCode}); session ${outcome.sessionId}\n${outcome.summary}\n`;
 }
 
+/**
+ * `ask_user` in `syn agent`: while a run is active the terminal's input is read by the steering
+ * loop, so a pending question is answered by the next typed message instead of steering the run.
+ */
+class QuestionDesk {
+  private pending: ((answer: string) => void) | undefined;
+
+  public ask(signal: AbortSignal): Promise<string> {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException("aborted", "AbortError"));
+        return;
+      }
+      const onAbort = (): void => {
+        this.pending = undefined;
+        reject(new DOMException("aborted", "AbortError"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.pending = (answer) => {
+        signal.removeEventListener("abort", onAbort);
+        this.pending = undefined;
+        resolve(answer);
+      };
+    });
+  }
+
+  public answer(text: string): boolean {
+    const pending = this.pending;
+    if (pending === undefined) return false;
+    pending(text);
+    return true;
+  }
+}
+
+function questionLines(question: string, options: readonly string[] | undefined): string[] {
+  return [`Question from the orchestrator: ${question}`, ...(options === undefined || options.length === 0 ? [] : [`Options: ${options.join(" | ")}`]), "Type your answer and press Enter."];
+}
+
+/** The `ask_user` binding for an interactive session; undefined when nobody can answer. */
+function userPromptFor(parsed: RunCommand | AgentCommand, renderer: SessionRenderer, desk: QuestionDesk): UserPrompt | undefined {
+  const input = renderer.input;
+  if (renderer.kind === "jsonl" || renderer.approvals.availability !== "interactive" || input === undefined) return undefined;
+  const show = (question: string, options: readonly string[] | undefined): void => {
+    for (const line of questionLines(question, options)) renderer.render({ kind: "notice", level: "info", message: line });
+  };
+  if (parsed.kind === "agent") {
+    return (question, options, signal) => {
+      show(question, options);
+      return desk.ask(signal);
+    };
+  }
+  return async (question, options, signal) => {
+    show(question, options);
+    for (;;) {
+      const next = await input.next(signal);
+      if (!("text" in next)) throw new DOMException("the question was not answered", "AbortError");
+      if (next.text.trim() !== "") return next.text;
+    }
+  };
+}
+
 interface Session {
   readonly runtime: Runtime;
   readonly renderer: SessionRenderer;
   readonly coordinator: Coordinator;
   readonly events: SessionEvent[];
+  readonly questions: QuestionDesk;
   readonly dispose: () => void;
 }
 
@@ -140,12 +204,17 @@ async function openSession(
   const stopNotices = coordinator.onEvent((event) => {
     if (event.kind === "notice") renderer.render(event);
   });
+  const questions = new QuestionDesk();
+  const prompt = userPromptFor(parsed, renderer, questions);
+  const unbind = prompt === undefined ? () => undefined : runtime.bindUserPrompt(prompt);
   return {
     runtime,
     renderer,
     coordinator,
     events,
+    questions,
     dispose: () => {
+      unbind();
       unsubscribe();
       stopNotices();
     },
@@ -204,6 +273,7 @@ async function steerWhileRunning(
   context: Parameters<typeof handleSlashCommand>[1],
   coordinator: Coordinator,
   notify: (lines: readonly string[]) => void,
+  questions: QuestionDesk,
 ): Promise<boolean> {
   for (;;) {
     let next;
@@ -223,6 +293,10 @@ async function steerWhileRunning(
         return true;
       }
       notify(handled.lines);
+      continue;
+    }
+    if (questions.answer(text)) {
+      notify(["answer sent to the orchestrator"]);
       continue;
     }
     coordinator.steer(text);
@@ -312,7 +386,7 @@ export async function agentCommand(parsed: AgentCommand, io: SessionIO, override
         running.signal,
       );
       const stopReading = new AbortController();
-      const reader = io.stdinIsTTY ? steerWhileRunning(input, stopReading.signal, { runtime, events, sessionId, cancel: () => running.abort() }, coordinator, notify) : Promise.resolve(false);
+      const reader = io.stdinIsTTY ? steerWhileRunning(input, stopReading.signal, { runtime, events, sessionId, cancel: () => running.abort() }, coordinator, notify, opened.questions) : Promise.resolve(false);
       const outcome = await pending;
       stopReading.abort();
       const ended = await reader;

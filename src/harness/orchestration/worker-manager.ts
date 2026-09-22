@@ -8,6 +8,7 @@ import {
   findStaleSources,
   HarnessError,
   packetDigest,
+  ProviderFailure,
   REPORT_TOOL_NAMES,
   reviewPacketSchema,
   sha256,
@@ -29,6 +30,7 @@ import {
   type ReviewOutcome,
   type RunId,
   type SandboxReport,
+  type SessionEvent,
   type SessionId,
   type SessionStore,
   type TaskContextPacket,
@@ -105,6 +107,29 @@ export interface AttemptRecord {
   log: AttemptLog | undefined;
   completion: CompletionPacket | undefined;
   outcome: TurnOutcome | undefined;
+  /** Why the attempt's turn failed, when the cause is the provider or a tool (exit code 4). */
+  failure: AttemptFailure | undefined;
+}
+
+export type AttemptFailure = "provider_failed" | "tool_failed";
+
+/**
+ * Classifies a failed turn from its own log: a provider error (a non-cancelled
+ * `model/response_failed`, or a `ProviderFailure` thrown by credential resolution) or a tool whose
+ * execution broke the turn. A turn that ended normally, or was cancelled, has no failure cause.
+ */
+export function classifyAttemptFailure(outcome: TurnOutcome | undefined, error: unknown, events: readonly SessionEvent[]): AttemptFailure | undefined {
+  if (error === undefined && outcome?.outcome !== "failed") return undefined;
+  if (error instanceof ProviderFailure) return error.error.code === "cancelled" ? undefined : "provider_failed";
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event === undefined) continue;
+    if (event.type === "model/response_failed") return event.data.error.code === "cancelled" ? undefined : "provider_failed";
+    if (event.type === "tool/execution_started" || event.type === "tool/interrupted") return error === undefined ? undefined : "tool_failed";
+    if (event.type === "tool/result_recorded") return error !== undefined ? "tool_failed" : undefined;
+    if (event.type === "model/response_settled") return undefined;
+  }
+  return undefined;
 }
 
 /** The contract `WorkerManager` plus the coordinator's own verification and integration steps. */
@@ -300,6 +325,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       log: undefined,
       completion: undefined,
       outcome: undefined,
+      failure: undefined,
     };
     records.set(attemptId, record);
     const controller = linkSignals(signal);
@@ -340,13 +366,15 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     } finally {
       clearTimeout(timer);
     }
-    const log = await buildAttemptLog(record.sessionId, await readEvents(events), deps.blobs);
+    const recorded = await readEvents(events);
+    const log = await buildAttemptLog(record.sessionId, recorded, deps.blobs);
     await events.close().catch(() => undefined);
     pendingStores.delete(record.attemptId);
     controllers.delete(record.attemptId);
     deps.budget?.recordToolCalls(log.toolCalls.size);
     record.log = log;
     record.outcome = outcome;
+    record.failure = classifyAttemptFailure(outcome, error, recorded);
     return { outcome, error, log };
   };
 

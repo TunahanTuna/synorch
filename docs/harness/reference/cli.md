@@ -1,6 +1,6 @@
 # CLI başvurusu: runtime komutları, renderer'lar ve JSONL
 
-> Durum: I5 Aşama A (paralel) teslimi 2026-09-22; Aşama B (runtime entegrasyonu, composition root, uçtan uca komutlar) 2026-09-23. Sözleşme: [CLI ve JSONL](../contracts/cli-and-jsonl.md). Kararlar: [ADR-01](../decisions/ADR-01-package-boundary.md), [ADR-04](../decisions/ADR-04-terminal-renderer.md), [ADR-15](../decisions/ADR-15-headless.md). Kod: `src/cli.ts`, `src/harness/cli/`, `src/harness/tui/`.
+> Durum: I5 Aşama A (paralel) teslimi 2026-09-22; Aşama B (runtime entegrasyonu, composition root, uçtan uca komutlar) 2026-09-23; Dalga 3 boşluk kapatma (kanonik `.ai/` → runtime, `ask_user`/`task_spawn`/`task_status`, exit 4/5 ayrımı, steer ve yüksek risk e2e) 2026-09-23. Sözleşme: [CLI ve JSONL](../contracts/cli-and-jsonl.md). Kararlar: [ADR-01](../decisions/ADR-01-package-boundary.md), [ADR-04](../decisions/ADR-04-terminal-renderer.md), [ADR-15](../decisions/ADR-15-headless.md). Kod: `src/cli.ts`, `src/harness/cli/`, `src/harness/tui/`.
 
 Bu belge Aşama A'da kesinleşen davranışı (argüman ayrıştırma, yardım metinleri, exit code'lar, renderer ve renk seçimi, üç renderer, terminal yaşam döngüsü, §1–§9) ve Aşama B'de eklenen runtime bağlantısını (§10–§16) anlatır: `createRuntime()` composition root'u, yapılandırma katmanları ve her runtime komutunun gerçek implementasyonlarla uçtan uca davranışı.
 
@@ -43,6 +43,8 @@ Ayrıştırma katıdır: bilinmeyen seçenek, eksik değer veya fazla konumsal a
 | 8 | oturum kilitli | `session_locked` |
 | 9 | bütçe | `budget_exceeded` |
 | 130 | iptal | `cancelled` |
+
+Başarısız bir run'ın kodu coordinator'da `failedRunExitCode` ile seçilir: tamamlanmayan görevlerin kayıtlı nedenlerinden bir doğrulama hatası (`verification_failed`, `review_blocked`, `stale_packet`) varsa 5; yoksa ilk kayıtlı neden (`provider_failed`/`tool_failed` → 4, `sandbox_insufficient` → 6, ...); nedeni olmayan görev (örn. bağımlılığı düştüğü için iptal) 5 sayılır. Neden, attempt'in kendi günlüğünden okunur (`classifyAttemptFailure`: iptal olmayan `model/response_failed` veya `ProviderFailure` → provider; turu kıran araç yürütmesi → tool). Plan üretilemezse: planlama turu provider'da düştüyse 4, orchestrator `ask_user` ile sorup cevap alamadıysa (`approval_unavailable`) 3, aksi halde 5. JSONL'de 4 ve 6 `error` frame'idir (görev tablosu olan 0/5/9 `result`).
 
 `src/harness/cli/outcome.ts`: `failureInfo(error)` her hatayı hata standardına çevirir (`HarnessError` olduğu gibi, `AbortError` → `cancelled`/130, `ProviderFailure` → auth veya provider, bilinmeyen → `internal`, `retry_safe: false`). `approvalFailure(decision)` broker kararlarını çevirir: `unavailable`/`expired` → `approval_unavailable` (3), `rejected` → `approval_rejected` (3), `cancelled` → 130.
 
@@ -148,11 +150,28 @@ Yeni tur veya istek başlayınca iptal yeniden silahlanır. TUI'de ek olarak: bo
 | Store | `createSessionStore(home)`, `createBlobStore(home)`; oturum deposu sarılır: her yeni/forklanmış oturuma `session/opened` yazılır, her eklenen olay renderer'a akar, açık yazıcılar ContextBuilder (okuma) ve compactor (`writerFor`) ile paylaşılır |
 | Auth | `createCredentialStore(home)` tembel açılır (keychain yoklaması süreç başlatabilir); route'un `(provider_id, auth_method, profile)` üçlüsü `authProviderFor(...).resolve`'a bağlanır (`CredentialResolver`, başka kimliğe düşmez); çözülen credential'ların `redactionValues()` birleşimi gateway'e verilir. `scripted` test sağlayıcısı secret'sız bir credential alır |
 | Router | `createModelRouter({ rules }, adapters)`; adapter'lar yapılandırmadan (`openai-chatgpt`, `openai-responses`, `anthropic-messages`, `claude-code`, `scripted`) veya testte enjekte edilir. `adapterFor` sarılır: her stream olayı renderer'a `stream` olarak gider ve `quota_exhausted` hatası `router.reportFailure` ile route'u bloklar. `claude-code` adapter'ı yalnız `claude-bridge-experimental` bildirimi onaylanmışsa `experimental: true` ile kurulur |
-| Tools/policy | `createPolicyEngine()`, `probeSandbox()` + `createSandboxRunner`, `createToolRegistry({ classifyCommand, control: { memoryPropose } })`; `memory_propose` öneriyi `memoryProposalSchema` ile doğrulayıp kuyruğa yazar |
+| Kanonik `.ai/` | `loadCanonicalStructure(workspaceRoot)` (`canonical.ts`, §10.1) → ContextBuilder'a `instructions` + rol kapsamlı `skills`, policy'ye rol tanımları, başlık/doctor'a model profili ipuçları |
+| Tools/policy | `withRoleDefinitions(createPolicyEngine(), canonical.roles)` (`role-policy.ts`: manifest yalnız daraltır), `probeSandbox()` + `createSandboxRunner`, `createToolRegistry({ classifyCommand, control: { askUser, taskSpawn, taskStatus, memoryPropose } })`; `memory_propose` öneriyi `memoryProposalSchema` ile doğrulayıp kuyruğa yazar; `ask_user` oturumun `bindUserPrompt` bağlamasına gider (yoksa `approval_unavailable`); `task_spawn`/`task_status` `createDelegationSlot()` üzerinden etkin run'ın coordinator'ına gider |
 | Onay | `brokerFor`: `ask` modunda ve renderer'ın broker'ı etkileşimliyse o; aksi halde `createHeadlessApprovalBroker({ mode })` |
 | Hafıza | `createMemoryStore(<home>/memory/<project-id>)` (kullanıcı `memory.root` verdiyse `resolveMemoryRoot`), ContextBuilder'a proje/branch ile recall olarak |
 | Orkestrasyon | `createContextBuilder` (+ `createCompactor`, `createBudgetGateSlot`), `createAgentDriver` (attempt başına gateway), `createModelPlanner`, `createWorkerFactory({ worktreesRoot: <home>/worktrees })`, `createCoordinator` |
 | Recovery | `recover(sessionId)`: oturumu `recoverSession` ile kapatır, sonra `attempt/started.session_id` ile başlattığı ve temiz bitmemiş her attempt oturumunu da kurtarır; hiçbir araç yeniden çalışmaz |
+
+### 10.1 Kanonik `.ai/` yapısı runtime girdisi olarak
+
+Hedef deponun Synorch yapısı (`syn init`/`syn sync` çıktısı) oturumun her model isteğine ve policy'sine girer; ayrıştırma üreticinin kendi şemalarıyla yapılır (`src/domain/canonical-contracts.ts` `agentManifestSchema`/`skillContractSchema`, `src/domain/generated-skill.ts`), kopya şema yoktur.
+
+| Kaynak | Runtime'daki karşılığı |
+| --- | --- |
+| `.ai/constitution.md` | `constitution` bloğu, `project` güveni, harness bloğundan hemen sonra |
+| `.ai/protocols/registry.yaml` + `core/*.md` | `mandatory: true` protokoller öncelik sırasıyla (`constitutional` → `core` → diğer, eşitlikte kayıt sırası), frontmatter'sız gövde; zorunlu olmayanlar her adıma yüklenmez |
+| `.ai/agents/<rol>/AGENT.md` | Rol bloğu (gövde) + `RoleDefinition` (`model_tier`, `writes_product_files`, `control_plane_write_scope`, `allowed/forbidden_skills`, `reports`). Orchestrator bloğuna worker rollerinin özeti eklenir |
+| `.ai/skills/*/SKILL.md`, `.ai/skills/project/*/SKILL.md` (`status: active`) | Katalog (ad + açıklama); tam gövde yalnız adı görev metninde geçince ve rolün `allowed_skills`'i izin veriyorsa yüklenir (`technology:*` baz olmayan skill'leri kapsar, `forbidden_skills` her zaman gizler) |
+| `.ai/manifest.yaml` → `model_profiles` | Tier başına model **ipucu** (route değil): başlıkta ve `doctor --runtime`'da gösterilir, orchestrator route'u yoksa hata mesajı önerir. Depo metni ücretli bir route seçemez |
+
+Güven kuralı: depo metni `project` güvenindedir; tarif eder ve daraltır, asla yetki vermez. `writes_product_files: false` bir worker'ın yazma kapsamını ve `workspace-write` etkisini kaldırır; orchestrator için `.ai/tasks/` altındaki daha dar bir `control_plane_write_scope` `.ai/tasks/**`'ın yerini alır; explorer/reviewer/orchestrator için `writes_product_files: true` veya `.ai/tasks/` dışı kapsam **yok sayılır** ve tanılamaya yazılır. Manifest ek bir `role` katmanı olarak policy'ye girer (`source: .ai/agents/<rol>/AGENT.md`), dolayısıyla yürürlükteki manifest bir policy kaynağıdır ve hiçbir araç onu yazamaz (`policy-self-modification`). `assertNotWider` daraltmanın hiçbir etkiyi veya yazma desenini genişletmediğini her hesaplamada doğrular.
+
+Geri dönüş: depoda `.ai/` yoksa `src/templates/structure-templates.ts`'in (`syn init`'in yazacağı) içeriği bellekte kullanılır; `.ai/` varsa eksik veya geçersiz her parça (anayasa, kayıt, tek bir manifest) tek tek yerleşik karşılığıyla tamamlanır ve tanılamaya yazılır. Oturum başlığı (`notice: canonical .ai: …`) ve `doctor --runtime` (`canonical` sonucu; depo yapısı tanısız ise `ok`, yerleşik geri dönüş veya tanı varsa `warn`) hangisinin kullanıldığını söyler. Boundary testi yalnız `cli` modülünün bu tek şablon dosyasını import etmesine izin verir.
 
 ## 11. Yapılandırma
 
@@ -187,10 +206,10 @@ budget: { max_wall_time_seconds: 1800, max_cost_usd: 5 }                    # ka
 | Komut | Davranış |
 | --- | --- |
 | `syn run "<hedef>"` | Tek coordinator run'ı: plan (`plan_propose`) → `autonomous`'ta orchestrator'ın denetlenen öz-onayı / `ask`'ta insan → DAG → worker attempt'leri (kendi oturumlarında) → doğrulama → `trivial` dışı bağımsız review → integrate → görev başına rapor. Run ve attempt oturumlarının tüm olayları ile model stream'i renderer'a akar. JSONL: `hello` `run/created` gelince yazılır (gerçek run/session kimliği); başarı ve görev tablosu olan bitişler (exit 0/5/9) `result`, onay/iptal/kilit/config/iç hata `error` frame'idir. İnsan modunda özet stdout'a, hata standardı stderr'e. `syn run -` hedefi stdin'den okur. SIGINT (JSONL/plain) etkin run'ı iptal eder → 130 |
-| `syn agent` | Aynı akış, her kullanıcı mesajı bir run; run'lar tek oturumda birikir. TTY'de run sürerken yazılan mesaj `steer` olarak kuyruğa girer, `/cancel` çalışır. `--resume <ses>` önce recovery yapar ve kurtarılanları bildirir; `--fork <ses>[@seq]` yeni oturum açar (`session/opened.parent`). Çıkışta `Session saved: <ses>` stderr'e yazılır |
+| `syn agent` | Aynı akış, her kullanıcı mesajı bir run; run'lar tek oturumda birikir. TTY'de run sürerken yazılan mesaj `steer` olarak kuyruğa girer (bekleyen bir `ask_user` sorusu varsa önce onu yanıtlar), `/cancel` çalışır. Steer bir sonraki güvenli sınırda (yeni dispatch'ten önce; çalışan attempt değişmez) uygulanır: orchestrator bir kez danışılır (`task_status`, `task_spawn`), plan steer'i `assumptions`'a ekleyen yeni bir sürümle (yeni `plan_id`, `version` n+1) önerilir ve modun kuralıyla onaylanır; eski plan yalnız revizyon onaylanınca `superseded` olur, reddedilen revizyonda run eski planla sürer. `--resume <ses>` önce recovery yapar ve kurtarılanları bildirir; `--fork <ses>[@seq]` yeni oturum açar (`session/opened.parent`). Çıkışta `Session saved: <ses>` stderr'e yazılır |
 | `syn runs [--json]` | Bu projenin oturumlarındaki run'lar (attempt oturumları gizli): zaman, kimlik, durum, görev sayısı, canlı kilit |
 | `syn show <run\|ses> [--json]` | Plan, görevler, attempt'ler (rol, route, izolasyon, oturum, durum), onaylar (run + araç), kanıt (completion blob'larından kriter → kanıt, komutlar), review'lar, route kararları, usage (kaynak etiketiyle). Lease almaz |
-| `syn doctor --runtime [--probe-model] [--json]` | Ayrı sonuçlar: `node`, `terminal`, `config`, `sandbox`, `store` (home'a dayanıklı yazma denemesi + oturum sayısı), `auth` (`AuthStatus[]`, secret yok), `capabilities` (adapter keşfi + statik health, eksik tier). Ağ isteği yok (`network_requests: "none"`); `--probe-model` her route'a bir küçük istek gönderir. Exit: `fail` varsa 1, yoksa 0 (`partial` sandbox `warn`) |
+| `syn doctor --runtime [--probe-model] [--json]` | Ayrı sonuçlar: `node`, `terminal`, `config`, `canonical` (kanonik `.ai/` kaynağı, protokoller, roller, skill'ler, profil ipuçları, tanılar; §10.1), `sandbox`, `store` (home'a dayanıklı yazma denemesi + oturum sayısı), `auth` (`AuthStatus[]`, secret yok), `capabilities` (adapter keşfi + statik health, eksik tier). Ağ isteği yok (`network_requests: "none"`); `--probe-model` her route'a bir küçük istek gönderir. Exit: `fail` varsa 1, yoksa 0 (`partial` sandbox `warn`) |
 | `syn login/logout/auth status` | I2 `authCommand`; `CommandIO.renderer` = stdin TTY ise etkileşimli plain renderer (`LineAuthInteraction`: gizli giriş, `claude-bridge-experimental` bildiriminin tek seferlik onayı), değilse headless (`syn login` exit 7). Ortak bayraklar komuta aktarılmadan ayıklanır |
 | `syn memory …` | I6 `memoryCommand`; vault kökü `<home>/memory/<project-id>` (veya kullanıcı `memory.root`). `accept`/`reject` kararının `memory/proposal_decided` ve `memory/persisted` yükleri projenin `syn memory decisions` oturumuna eklenir |
 
@@ -211,6 +230,10 @@ Hepsi gerçek store, policy, gateway, araçlar, izolasyon, context ve coordinato
 | Provider timeout/rate limit (sessiz fallback yok) | `harness-e2e-provider` › "rate limit and exhausted quota: failed attempts on the same route, no silent fallback" |
 | Headless onay bekleme → exit 3; iptal → 130; kilitli oturum → 8 | `harness-e2e-headless` (üç test) |
 | JSONL stdout yalnız geçerli frame | her JSONL testi `parseFrames` ile `validateFrameSequence`, LF-only ve kaçış dizisi yokluğunu doğrular |
+| Yüksek riskli değişiklik (zorunlu worktree, ayrı reviewer, kriter başına açık kanıt; `ask`'ta plan ve her etkili eylem insan onaylı; git yoksa daha zayıf izolasyon yerine ret, exit 6) | `harness-e2e-high-risk` (üç test) |
+| Çalışırken kullanıcı düzeltmesi (güvenli sınırda steer, orchestrator danışması, `task_spawn`, yeniden sürümlenen plan) | `harness-e2e-steer` › "steering typed during a run is applied at a safe boundary through a re-versioned plan"; birim: `harness-orchestration-delegation` (ask modunda revizyon onayı ve reddi) |
+| `ask_user` (etkileşimli cevap; headless → exit 3) | `harness-e2e-ask-user` |
+| Kanonik `.ai/` → context ve policy | `harness-cli-canonical` |
 | `syn agent`, oturum içi komutlar, resume/fork | `harness-e2e-agent` |
 | Login/bildirim, auth status, hafıza kararı denetimi | `harness-e2e-auth-memory` |
 | `doctor --runtime` | `harness-e2e-doctor` |
@@ -229,6 +252,8 @@ Kapsanmayanlar: "yüksek riskli değişiklik" ve "çalışırken kullanıcı dü
 ## 16. Bilinen sınırlar (Aşama B)
 
 - TUI (`pi-tui`) ile `syn agent`/`syn run` gerçek TTY'de manuel denenmedi; otomatik testler plain ve JSONL yolunu kullanır. §9 manuel matris açık.
-- `ask_user`, `task_spawn`, `task_status` control araçları bağlanmadı (orchestrator'a görünür, `approval_unavailable`/`execution_failed` döner); skill kataloğu ve repo anayasası ContextBuilder'a verilmiyor.
-- Başarısız run'lar (provider hatası dahil) coordinator'ın kuralıyla exit 5 verir; provider hatasını exit 4'e ayrıştırmak coordinator değişikliği ister.
+- `task_spawn` yalnız orchestrator bir güvenli sınırda (steer sonrası) danışılırken kabul edilir; run'ın başka anında orchestrator turu yoktur. Girdinin `packet` alanı bir **plan görevi** biçimindedir (tam `TaskContextPacket`'i harness derler); `tools.md`'deki "packet şeması" ifadesinin bu yorumu bir sözleşme netleştirme isteğidir.
+- Steer yalnız TTY'deki `syn agent`'ta girilir; çalışan bir attempt'in sürücüsüne iletilmez (bir sonraki dispatch'e kadar bekler). JSONL/stdin RPC steer'i v1 kapsamı dışında.
+- `ask_user` `syn run`'da yalnız etkileşimli (TTY) plain/TUI renderer'da bağlıdır; `syn agent`'ta cevap steer döngüsünden gelir.
+- Kanonik model profilleri yalnız ipucudur; route'a dönüşmez (ücretli sağlayıcı seçimi depo metnine bırakılmaz).
 - Gerçek hesaplarla (ChatGPT OAuth, Anthropic, `claude` köprüsü) uçtan uca çalışma ve `--probe-model` doğrulanmadı; Linux/macOS host'larda koşulmadı.

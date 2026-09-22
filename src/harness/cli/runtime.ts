@@ -47,8 +47,10 @@ import { createMemoryStore, readGitBranch, resolveMemoryRoot } from "../memory/i
 import {
   createBudgetGateSlot,
   createCoordinator,
+  createDelegationSlot,
   createModelPlanner,
   createWorkerFactory,
+  delegationCallbacks,
   type BudgetGateSlot,
   type CoordinatorLimits,
 } from "../orchestration/index.ts";
@@ -65,7 +67,9 @@ import {
 import { createBlobStore, createSessionStore } from "../store/index.ts";
 import { createSandboxRunner, createToolGateway, createToolRegistry, probeSandbox } from "../tools/index.ts";
 import type { RouteOverride } from "./args.ts";
+import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts";
 import { DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
+import { withRoleDefinitions } from "./role-policy.ts";
 import { loadScript } from "./scripted-script.ts";
 
 /**
@@ -101,6 +105,9 @@ export interface RuntimeOptions {
 
 export type RuntimeListener = (event: RenderEvent) => void;
 
+/** Asks the human attached to the session a question (the `ask_user` tool); resolves with the answer. */
+export type UserPrompt = (question: string, options: readonly string[] | undefined, signal: AbortSignal) => Promise<string>;
+
 export interface Runtime {
   readonly home: string;
   readonly workspaceRoot: string;
@@ -108,6 +115,8 @@ export interface Runtime {
   readonly platform: NodeJS.Platform;
   readonly policyMode: PolicyMode;
   readonly config: RuntimeConfig;
+  /** The target repository's canonical `.ai/` structure (or the built-in defaults) fed to context and policy. */
+  readonly canonical: CanonicalStructure;
   readonly sessions: SessionStore;
   readonly blobs: BlobStore;
   readonly router: ModelRouter;
@@ -126,6 +135,11 @@ export interface Runtime {
   authProvider(providerId: string, method: AuthProvider["method"], profile: string): AuthProvider | undefined;
   /** Every session event appended through this runtime (run and attempt sessions) and every model stream event. */
   subscribe(listener: RuntimeListener): () => void;
+  /**
+   * Binds `ask_user` to a human for the lifetime of a session; returns the unbind function. With no
+   * binding (headless, JSONL, piped input) `ask_user` answers `approval_unavailable`.
+   */
+  bindUserPrompt(prompt: UserPrompt): () => void;
   /** The approval broker for a session: the renderer's interactive broker in `ask` mode, the headless one otherwise. */
   brokerFor(interactive: ApprovalBroker | undefined): ApprovalBroker;
   createDriver(broker: ApprovalBroker): (events: EventStore) => AgentDriver;
@@ -376,7 +390,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     return credential;
   };
 
-  const policy = createPolicyEngine();
+  const canonical = await loadCanonicalStructure(workspaceRoot);
+  const policy = withRoleDefinitions(createPolicyEngine(), canonical.roles);
   const sandbox = overrides.sandbox ?? (await probeSandbox({ platform }));
   const runner = createSandboxRunner(sandbox);
   const userConfig = config.userPolicy === undefined ? undefined : { policy: config.userPolicy };
@@ -385,9 +400,29 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const memoryRoot = config.memory?.root !== undefined ? resolveMemoryRoot(config.memory, projectId, os.homedir()) : path.join(home, "memory", projectId);
   const memory = createMemoryStore(memoryRoot, { workspaceRoot });
 
+  const delegation = createDelegationSlot();
+  let userPrompt: UserPrompt | undefined;
   const registry = createToolRegistry({
     classifyCommand: (argv, scope) => classifyCommand(argv, scope),
     control: {
+      ...delegationCallbacks(delegation),
+      async askUser(input, context) {
+        const prompt = userPrompt;
+        if (context.role !== "orchestrator" || prompt === undefined) {
+          return {
+            status: "error",
+            text: "",
+            truncated: false,
+            redactions: 0,
+            error: {
+              code: "approval_unavailable",
+              message: "no human can answer in this session (headless, JSONL or piped input); decide within the approved scope or stop and report what you need",
+            },
+          };
+        }
+        const answer = (await prompt(input.question, input.options, context.signal)).trim();
+        return { status: "ok", text: `The user answered: ${answer === "" ? "(empty answer)" : answer}`.slice(0, 16 * 1024), truncated: false, redactions: 0 };
+      },
       async memoryPropose(input, context) {
         const content = input.content;
         const parsed = memoryProposalSchema.safeParse({
@@ -426,6 +461,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     blobs,
     tools: registry,
     sources: createSourceReader(workspaceRoot),
+    instructions: canonical.instructions,
+    skills: canonical.skills,
     memory: { store: memory, projectId, branch: gitBranch },
     budget: budgetGate,
     compactor: createCompactor({ blobs, writerFor: (sessionId) => writers.get(sessionId) }),
@@ -450,6 +487,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     platform,
     policyMode: options.policyMode,
     config,
+    canonical,
     sessions,
     blobs,
     router,
@@ -468,6 +506,12 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    bindUserPrompt(prompt) {
+      userPrompt = prompt;
+      return () => {
+        if (userPrompt === prompt) userPrompt = undefined;
+      };
     },
     brokerFor(interactive) {
       if (options.policyMode === "ask" && interactive !== undefined && interactive.availability !== "headless") return interactive;
@@ -497,6 +541,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
           platform,
         }),
         budgetGate,
+        delegation,
         userConfig,
         workspaceConfig,
         platform,

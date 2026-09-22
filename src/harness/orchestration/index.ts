@@ -21,10 +21,19 @@ export { createControlPlaneWriter, type ControlPlaneWriter } from "./control-pla
 export {
   createCoordinator,
   DEFAULT_COORDINATOR_LIMITS,
+  failedRunExitCode,
   type CoordinatorDependencies,
   type CoordinatorLimits,
   type WorkerFactory,
 } from "./coordinator.ts";
+export {
+  createDelegationSlot,
+  delegationCallbacks,
+  type DelegationCaller,
+  type DelegationPort,
+  type DelegationResult,
+  type DelegationSlot,
+} from "./delegation.ts";
 export {
   mayComplete,
   resolveEvidence,
@@ -56,7 +65,7 @@ export {
   validatePlan,
   type PlanValidation,
 } from "./plan.ts";
-export { createModelPlanner, renderPlanningPrompt, type Planner, type PlannerInput } from "./planner.ts";
+export { createModelPlanner, renderConsultPrompt, renderPlanningPrompt, type ConsultInput, type Planner, type PlannerInput } from "./planner.ts";
 export { createWorkspaceSourceReader, type SourceDigestReader } from "./recorder.ts";
 export {
   createDagScheduler,
@@ -68,8 +77,10 @@ export {
   type SchedulableTask,
 } from "./scheduler.ts";
 export {
+  classifyAttemptFailure,
   createWorkerManager,
   renderReviewBrief,
+  type AttemptFailure,
   renderWorkerMessage,
   type OrchestrationWorkerManager,
   type RunScope,

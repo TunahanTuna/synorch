@@ -56,10 +56,11 @@ test("rate limit and exhausted quota: failed attempts on the same route, no sile
     const code = await runHarnessCommand(["run", "Edit a", "--mode", "jsonl"], run.io, overridesFor(sandbox, { adapters: [orchestrator, primary, alternative], limits: { maxRetries: 2 } }));
     const { frames, problems } = parseFrames(run.stdout());
     assert.deepEqual(problems, []);
-    assert.equal(code, 5, run.stderr());
+    assert.equal(code, 4, `a provider failure exits 4 (cli-and-jsonl.md §5)\n${run.stderr()}`);
     const last = frames.at(-1);
-    assert.ok(last?.type === "result" && last.data.status === "failed");
-    assert.deepEqual(last.data.tasks.map((task) => task.state), ["blocked"]);
+    assert.ok(last?.type === "error", "a provider failure ends with an error frame");
+    assert.equal(last.data.code, "provider_failed");
+    assert.match(last.data.message, /edit-a \(implementer\): blocked/);
 
     assert.equal(alternative.requests.length, 0, "the other configured route never received a request");
     assert.equal(primary.requests.length, 2, "after the quota was exhausted the blocked route got no further request");

@@ -36,6 +36,8 @@ export interface DagScheduler {
   state(key: string): ScheduledState;
   running(): readonly string[];
   done(): boolean;
+  /** Adds a pending task (an approved plan revision); its dependencies must already be known. */
+  add(task: SchedulableTask): void;
 }
 
 export class SchedulerError extends Error {
@@ -70,7 +72,8 @@ export function findDependencyCycle(tasks: readonly Pick<SchedulableTask, "key" 
   return undefined;
 }
 
-export function createDagScheduler(tasks: readonly SchedulableTask[], limits: ConcurrencyLimits = DEFAULT_CONCURRENCY): DagScheduler {
+export function createDagScheduler(initial: readonly SchedulableTask[], limits: ConcurrencyLimits = DEFAULT_CONCURRENCY): DagScheduler {
+  const tasks: SchedulableTask[] = [...initial];
   if (limits.global < 1 || limits.perProvider < 1 || limits.perWorkspace < 1) {
     throw new SchedulerError("concurrency limits must be at least 1");
   }
@@ -173,6 +176,16 @@ export function createDagScheduler(tasks: readonly SchedulableTask[], limits: Co
         const state = states.get(task.key);
         return state === "completed" || state === "failed" || state === "skipped";
       });
+    },
+    add(task) {
+      if (byKey.has(task.key)) throw new SchedulerError(`duplicate task ${task.key}`);
+      for (const dependency of task.dependsOn) {
+        if (!byKey.has(dependency)) throw new SchedulerError(`${task.key} depends on unknown task ${dependency}`);
+      }
+      const blocked = task.dependsOn.some((dependency) => states.get(dependency) === "failed" || states.get(dependency) === "skipped");
+      byKey.set(task.key, task);
+      tasks.push(task);
+      states.set(task.key, blocked ? "skipped" : "pending");
     },
   };
 }

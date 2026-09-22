@@ -30,9 +30,30 @@ Safety:
   Model fallback is never silent.
 `;
 
+const HARNESS_COMMAND_NAMES: readonly string[] = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory"];
+
+function isHarnessInvocation(argv: readonly string[]): boolean {
+  const [command] = argv;
+  if (HARNESS_COMMAND_NAMES.includes(command ?? "")) {
+    return true;
+  }
+  if (command !== "doctor") {
+    return false;
+  }
+  const terminator = argv.indexOf("--");
+  return (terminator === -1 ? argv : argv.slice(0, terminator)).includes("--runtime");
+}
+
 async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  if (isHarnessInvocation(argv)) {
+    const harness = await import("./harness/cli/index.ts");
+    process.exitCode = await harness.runHarnessCommand(argv);
+    return;
+  }
+
   const { values, positionals } = parseArgs({
-    args: process.argv.slice(2),
+    args: argv,
     allowPositionals: true,
     strict: true,
     options: {

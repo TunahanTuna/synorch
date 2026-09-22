@@ -49,11 +49,13 @@
   },
   "packageManager": "pnpm@11.19.0",
   "dependencies": {
+    "@earendil-works/pi-tui": "0.87.0",
     "yaml": "^2.8.1",
     "zod": "^4.1.11"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
+    "@xterm/headless": "6.0.0",
     "typescript": "^5.9.3"
   }
 }

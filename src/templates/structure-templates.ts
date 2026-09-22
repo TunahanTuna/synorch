@@ -2,7 +2,8 @@ import type { FileDefinition } from "../domain/generation.ts";
 import type { StructureScope } from "../domain/config.ts";
 import { SYNORCH_GENERATOR_NAME, SYNORCH_VERSION } from "../domain/product.ts";
 import { stringifyYaml } from "../infrastructure/serialization.ts";
-import { taskConductorSkill } from "./task-conductor-skill.ts";
+import { AGENT_DOCUMENTS } from "./agent-manifests.ts";
+import { BASE_SKILL_DOCUMENTS } from "./base-skills.ts";
 
 export function createStructureFiles(scope: StructureScope): readonly FileDefinition[] {
   return [
@@ -41,19 +42,19 @@ export function createStructureFiles(scope: StructureScope): readonly FileDefini
     file(".ai/protocols/core/verification.md", verificationProtocol, "protocol"),
     file(".ai/protocols/core/failure-recovery.md", failureRecoveryProtocol, "protocol"),
     file(".ai/protocols/core/user-communication.md", userCommunicationProtocol, "protocol"),
-    file(".ai/agents/orchestrator/AGENT.md", orchestratorAgent, "agent"),
-    file(".ai/agents/explorer/AGENT.md", explorerAgent, "agent"),
-    file(".ai/agents/implementer/AGENT.md", implementerAgent, "agent"),
-    file(".ai/agents/debugger/AGENT.md", debuggerAgent, "agent"),
-    file(".ai/agents/reviewer/AGENT.md", reviewerAgent, "agent"),
-    file(".ai/skills/planning/SKILL.md", planningSkill, "skill"),
-    file(".ai/skills/project-discovery/SKILL.md", projectDiscoverySkill, "skill"),
-    file(".ai/skills/codebase-exploration/SKILL.md", explorationSkill, "skill"),
-    file(".ai/skills/implementation/SKILL.md", implementationSkill, "skill"),
-    file(".ai/skills/verification/SKILL.md", verificationSkill, "skill"),
-    file(".ai/skills/debugging/SKILL.md", debuggingSkill, "skill"),
-    file(".ai/skills/code-review/SKILL.md", codeReviewSkill, "skill"),
-    file(".ai/skills/task-conductor/SKILL.md", taskConductorSkill, "skill"),
+    ...AGENT_DOCUMENTS.map((agent) =>
+      file(`.ai/agents/${agent.id}/AGENT.md`, agent.manifest, "agent"),
+    ),
+    ...BASE_SKILL_DOCUMENTS.flatMap((skill) => [
+      file(`.ai/skills/${skill.id}/SKILL.md`, skill.skill, "skill"),
+      ...skill.references.map((reference) =>
+        file(
+          `.ai/skills/${skill.id}/references/${reference.fileName}`,
+          reference.content,
+          "reference",
+        ),
+      ),
+    ]),
     file(".ai/model-profiles/openai.yaml", openAiProfile, "canonical"),
     file(".ai/model-profiles/claude.yaml", claudeProfile, "canonical"),
     file(".ai/schemas/context-packet.schema.json", contextPacketSchema, "schema"),
@@ -320,139 +321,6 @@ mandatory: true
 # User Communication
 
 Only the orchestrator speaks to the user. Lead with outcomes and decisions. Ask only for choices that materially affect scope or result. Plans and final reports include model routing and verification evidence without exposing unnecessary internal chatter.
-`;
-
-const orchestratorAgent = `---
-name: orchestrator
-role: control-plane
-writes_product_files: false
-control_plane_write_scope: .ai/tasks/**
----
-
-# Orchestrator
-
-Own requirements, risk classification, decisions, plans, delegation, context packets, monitoring, review synthesis and user communication. Never implement. Use Task Conductor as the central routing discipline for non-trivial briefs, load other skills just in time and keep single-step work plain. Treat worker claims as untrusted until supported by proportionate evidence.
-`;
-
-const explorerAgent = `---
-name: explorer
-role: read-only-evidence
-writes_product_files: false
----
-
-# Explorer
-
-Answer one bounded codebase question with paths, symbols and evidence. Do not modify files. Reuse existing project snapshots and task evidence before searching. Report unknowns and confidence explicitly.
-`;
-
-const implementerAgent = `---
-name: implementer
-role: product-change
-writes_product_files: true
----
-
-# Implementer
-
-Implement only the assigned objective and owned paths. Read the task packet first, preserve concurrent work, run required checks and return a structured completion packet. Escalate scope changes instead of expanding the task.
-`;
-
-const debuggerAgent = `---
-name: debugger
-role: root-cause-and-fix
-writes_product_files: true
----
-
-# Debugger
-
-Reproduce, narrow the search space, form falsifiable hypotheses, identify root cause, implement the smallest justified fix and prove it. Do not patch symptoms without evidence.
-`;
-
-const reviewerAgent = `---
-name: reviewer
-role: independent-review
-writes_product_files: false
----
-
-# Reviewer
-
-Independently compare the approved plan, acceptance criteria, diff and verification evidence. Report actionable findings by severity. Do not approve based only on the implementer's summary and do not modify the implementation.
-`;
-
-const planningSkill = `---
-name: planning
-description: Use for every new user task before implementation begins.
----
-
-# Planning
-
-1. State the goal and non-goals.
-2. Classify the task as trivial, standard or high-risk with evidence.
-3. Separate verified facts, assumptions and decisions; identify material questions.
-4. Build a dependency-aware task graph with ownership.
-5. Select worker tiers and verification.
-6. Present the plan and wait for user approval.
-
-For trivial work, replace the task graph with one compact objective, one fast worker, exact ownership and claim-specific proof.
-`;
-
-const projectDiscoverySkill = `---
-name: project-discovery
-description: Use after manual sync or when a registered project's facts need bounded refresh.
----
-
-# Project Discovery
-
-Read existing AI instructions first. Inspect manifests, lockfiles, README, CI and configuration before source code. Record only evidence-backed languages, frameworks, commands and boundaries. Mark uncertain interpretations as hypotheses. Never invent architecture for an empty project.
-`;
-
-const explorationSkill = `---
-name: codebase-exploration
-description: Use to answer a specific codebase question before planning or delegation.
----
-
-# Codebase Exploration
-
-Start from the project snapshot and existing evidence. Search by symbol and path, not by reading the entire repository. Return relevant files, relationships, conventions, risks and unanswered questions with provenance.
-`;
-
-const implementationSkill = `---
-name: implementation
-description: Use by a worker after an approved plan and task packet exist.
----
-
-# Implementation
-
-Confirm objective, ownership and constraints. Inspect the latest target files, make the smallest coherent change, preserve unrelated work, verify incrementally and return a completion packet. Stop and escalate when scope or assumptions change.
-`;
-
-const verificationSkill = `---
-name: verification
-description: Use before any implementation is reported complete.
----
-
-# Verification
-
-Map each acceptance criterion to the cheapest sufficient evidence and stop when the claim is proven. Trivial work uses exact diff or targeted static proof without broad checks or review. Standard work uses focused tests and only the relevant lint/typecheck/build. High-risk work adds broad checks and independent review. A headed browser is opt-in and requires a user request or approval for a named unresolved criterion. Record passed, failed, skipped and not-run checks.
-`;
-
-const debuggingSkill = `---
-name: debugging
-description: Use for defects, flaky behavior and unexplained failures.
----
-
-# Debugging
-
-Reproduce first. Establish a minimal failing case, rank hypotheses, gather evidence that can disprove each one, locate root cause, add a regression test, implement the smallest fix and rerun relevant verification.
-`;
-
-const codeReviewSkill = `---
-name: code-review
-description: Use for independent review after implementation.
----
-
-# Code Review
-
-Review against the approved task, not personal preference. Inspect the actual diff and surrounding code. Prioritize correctness, regressions, security, concurrency and missing tests. Report precise locations and consequences; state explicitly when no actionable finding exists.
 `;
 
 const openAiProfile = `schema_version: 1

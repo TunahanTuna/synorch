@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
@@ -13,6 +13,7 @@ const temporaryDirectories: string[] = [];
 const SOURCE_PATH = "src/app.ts";
 const SOURCE_CONTENT = "export const app = true;\n";
 const SOURCE_DIGEST = digestOf(SOURCE_CONTENT);
+const SKILL_DIRECTORY = path.join(".ai", "skills", "project", "api-test-execution");
 
 afterEach(async () => {
   await Promise.all(
@@ -221,6 +222,8 @@ interface FixtureOptions {
   readonly padding?: string;
   readonly skill?: string;
   readonly ledger?: string | null;
+  /** Files written under the skill's own `references/` directory before diagnosis. */
+  readonly referenceFiles?: Readonly<Record<string, string>>;
 }
 
 async function createFixture(options: FixtureOptions): Promise<string> {
@@ -240,6 +243,11 @@ async function createFixture(options: FixtureOptions): Promise<string> {
     "api-test-execution",
     options.skill ?? skillFile(options.frontmatter ?? {}, options.body, options.padding),
   );
+  for (const [name, content] of Object.entries(options.referenceFiles ?? {})) {
+    const absolutePath = path.join(directory, SKILL_DIRECTORY, name);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, content, "utf8");
+  }
   return directory;
 }
 
@@ -352,4 +360,172 @@ async function createTempDirectory(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synorch-generated-"));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+test("a declared reference that exists beside the skill is accepted", async () => {
+  const directory = await createFixture({
+    frontmatter: { references: ["references/runbook.md"] },
+    referenceFiles: { "references/runbook.md": "# Runbook\n" },
+  });
+
+  assert.deepEqual(await codes(directory), []);
+});
+
+test("an unsafe reference path is reported once, as generated.unsafe-reference-path", async () => {
+  for (const reference of [
+    String.raw`\\server\share\evil.md`,
+    "//server/share/evil.md",
+    "/etc/passwd",
+    String.raw`C:\Windows\win.ini`,
+    "C:/Windows/win.ini",
+    "../../escape.md",
+    "references/../../escape.md",
+  ]) {
+    const directory = await createFixture({ frontmatter: { references: [reference] } });
+
+    const diagnostics = await diagnose(directory);
+    assert.deepEqual(
+      diagnostics.map((diagnostic) => [diagnostic.severity, diagnostic.code]),
+      [["error", "generated.unsafe-reference-path"]],
+      reference,
+    );
+    assert.equal(diagnostics[0]?.message.includes(reference), true, reference);
+  }
+});
+
+test("a declared reference with no file is reported as generated.missing-reference-file", async () => {
+  const directory = await createFixture({
+    frontmatter: { references: ["references/absent.md"] },
+  });
+
+  assert.deepEqual(await codes(directory), ["generated.missing-reference-file"]);
+});
+
+test("a reference over the 15000-byte ceiling is reported as generated.reference-size", async () => {
+  const directory = await createFixture({
+    frontmatter: { references: ["references/huge.md"] },
+    referenceFiles: { "references/huge.md": "x".repeat(15_001) },
+  });
+
+  const diagnostics = await diagnose(directory);
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => [diagnostic.severity, diagnostic.code]),
+    [["error", "generated.reference-size"]],
+  );
+});
+
+test("a reference escaping through a symbolic link is rejected", async () => {
+  const directory = await createFixture({
+    frontmatter: { references: ["references/leak.md"] },
+  });
+  const outside = await createTempDirectory();
+  await writeFile(path.join(outside, "leak.md"), "# Leaked\n", "utf8");
+  const referenceDirectory = path.join(directory, SKILL_DIRECTORY, "references");
+  await mkdir(referenceDirectory, { recursive: true });
+  const linkPath = path.join(referenceDirectory, "leak.md");
+
+  let fileSystem: NodeFileSystem = new NodeFileSystem();
+  try {
+    await symlink(path.join(outside, "leak.md"), linkPath, "file");
+  } catch (error: unknown) {
+    if (!isLinkCapabilityError(error)) throw error;
+    await writeFile(linkPath, "# Leaked\n", "utf8");
+    fileSystem = new RejectReferencePathFileSystem();
+  }
+
+  const diagnostics = await diagnoseGeneratedSkills(fileSystem, directory);
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["generated.unsafe-reference-path"],
+  );
+});
+
+test("a priority ceiling breach is reported exactly once, not also as contract-invalid", async () => {
+  const directory = await createFixture({ frontmatter: { priority: "constitutional" } });
+
+  assert.deepEqual(await codes(directory), ["generated.priority-ceiling"]);
+});
+
+test("empty evidence is reported exactly once, not also as contract-invalid", async () => {
+  const directory = await createFixture({ frontmatter: { evidence: [] } });
+
+  assert.deepEqual(await codes(directory), ["generated.missing-evidence"]);
+});
+
+test("a defect with no dedicated code still reports contract-invalid", async () => {
+  const directory = await createFixture({
+    frontmatter: { priority: "constitutional", version: "not-a-version" },
+  });
+
+  assert.deepEqual(await codes(directory), [
+    "generated.priority-ceiling",
+    "generated.contract-invalid",
+  ]);
+});
+
+test("a contract failure reads as one line of path and reason, not raw JSON", async () => {
+  const directory = await createFixture({
+    frontmatter: { confirmations: 2, confirmed_by: ["task-1", "task-2"] },
+  });
+
+  const diagnostic = (await diagnose(directory)).find(
+    (candidate) => candidate.code === "generated.contract-invalid",
+  );
+
+  assert.ok(diagnostic);
+  assert.equal(diagnostic.message.includes("\n"), false);
+  assert.equal(diagnostic.message.includes("{"), false);
+  assert.match(diagnostic.message, /^Generated skill frontmatter is invalid: confirmations: /);
+});
+
+test("an invalid ledger reads as one line of path and reason, not raw JSON", async () => {
+  const directory = await createFixture({ ledger: stringifyYaml({ schema_version: 2 }) });
+
+  const diagnostic = (await diagnose(directory)).find(
+    (candidate) => candidate.code === "generated.ledger-invalid",
+  );
+
+  assert.ok(diagnostic);
+  assert.equal(diagnostic.message.includes("\n"), false);
+  assert.match(diagnostic.message, /^Observation ledger is invalid: schema_version: /);
+});
+
+test("a short recorded digest never counts as a match", async () => {
+  const directory = await createFixture({
+    frontmatter: {
+      evidence: [
+        { claim: "A claim", source: SOURCE_PATH, digest: SOURCE_DIGEST.slice(0, "sha256:".length + 16) },
+      ],
+    },
+  });
+
+  // The schema floor rejects it outright, so the defect is reported rather than silently passing.
+  assert.deepEqual(await codes(directory), ["generated.contract-invalid"]);
+});
+
+test("an activation heading inside a fenced example does not satisfy shape.no-trigger", async () => {
+  const directory = await createFixture({
+    body: "## Procedure\n\n1. Run the tests.\n\n```markdown\n## When this applies\n```\n",
+  });
+
+  assert.ok((await codes(directory)).includes("shape.no-trigger"));
+});
+
+class RejectReferencePathFileSystem extends NodeFileSystem {
+  public override async assertPathWithinRoot(
+    rootPath: string,
+    targetPath: string,
+  ): Promise<void> {
+    if (path.normalize(targetPath).endsWith(`${path.sep}references${path.sep}leak.md`)) {
+      throw new Error("simulated reference symbolic-link escape");
+    }
+    await super.assertPathWithinRoot(rootPath, targetPath);
+  }
+}
+
+function isLinkCapabilityError(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error)) return false;
+  return ["EACCES", "EPERM", "UNKNOWN"].includes(String(error.code));
 }

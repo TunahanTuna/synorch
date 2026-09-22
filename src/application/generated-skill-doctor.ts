@@ -8,14 +8,24 @@ import {
   type GeneratedSkillFrontmatter,
 } from "../domain/generated-skill.ts";
 import {
+  DIGEST_MIN_LENGTH,
   OBSERVATION_LEDGER_PATH,
   observationLedgerSchema,
   type ObservationLedger,
 } from "../domain/observation-ledger.ts";
+import { CANONICAL_SIZE_CEILINGS } from "../domain/canonical-contracts.ts";
+import { isSafeDescendantPath } from "../domain/relative-path.ts";
+import { formatZodIssues, partitionZodIssues } from "../domain/zod-issues.ts";
 import type { FileSystem } from "../infrastructure/file-system.ts";
-import { parseFrontmatter, type ParsedFrontmatter } from "../infrastructure/frontmatter.ts";
+import {
+  parseFrontmatter,
+  splitMarkdownSections,
+  normalizeSectionName,
+  type ParsedFrontmatter,
+} from "../infrastructure/frontmatter.ts";
 import { parseYaml } from "../infrastructure/serialization.ts";
 import type { Diagnostic } from "./doctor-service.ts";
+import { resolveSafeRelativePath } from "./safe-path.ts";
 
 /**
  * Validate the generated project-skill namespace: the ledger itself, the frontmatter contract of
@@ -60,6 +70,7 @@ export async function diagnoseGeneratedSkills(
 
     if (parsed.status === "active") activeSkills += 1;
     await validateEvidence(fileSystem, root, parsed, relativePath, diagnostics);
+    await validateReferences(fileSystem, root, skillId, parsed, relativePath, diagnostics);
     if (ledger !== undefined) {
       reportUnknownConfirmations(parsed, knownTaskIds, relativePath, diagnostics);
     }
@@ -136,7 +147,7 @@ async function readLedger(
     diagnostics.push({
       severity: "error",
       code: "generated.ledger-invalid",
-      message: result.error.message,
+      message: `Observation ledger is invalid: ${formatZodIssues(result.error)}`,
       path: OBSERVATION_LEDGER_PATH,
     });
     return undefined;
@@ -185,16 +196,21 @@ function readSkillDocument(
 }
 
 /**
- * Dedicated codes come first so that the priority ceiling and the evidence requirement are
- * reported as themselves rather than as a generic schema failure.
+ * Dedicated codes come first so that the priority ceiling, the evidence requirement and an
+ * unsafe reference path are reported as themselves rather than as a generic schema failure.
+ * Each field that got a dedicated diagnostic is then excluded from `generated.contract-invalid`,
+ * so one defect is never reported twice, and the generic code is skipped when nothing is left.
  */
 function validateFrontmatter(
   frontmatter: Record<string, unknown>,
   relativePath: string,
   diagnostics: Diagnostic[],
 ): GeneratedSkillFrontmatter | undefined {
+  const reportedFields: string[] = [];
+
   const priority = frontmatter["priority"];
   if (priority !== "skill") {
+    reportedFields.push("priority");
     diagnostics.push({
       severity: "error",
       code: "generated.priority-ceiling",
@@ -205,6 +221,7 @@ function validateFrontmatter(
     });
   }
   if (!hasCompleteEvidence(frontmatter["evidence"])) {
+    reportedFields.push("evidence");
     diagnostics.push({
       severity: "error",
       code: "generated.missing-evidence",
@@ -214,18 +231,104 @@ function validateFrontmatter(
       path: relativePath,
     });
   }
+  for (const reference of unsafeReferencePaths(frontmatter["references"])) {
+    reportedFields.push("references");
+    diagnostics.push({
+      severity: "error",
+      code: "generated.unsafe-reference-path",
+      message:
+        "A reference must be a relative path inside the skill's own directory; an absolute " +
+        `path, a drive letter, a UNC root or a '..' segment is rejected: ${reference}`,
+      path: relativePath,
+    });
+  }
 
   const result = generatedSkillFrontmatterSchema.safeParse(frontmatter);
   if (!result.success) {
-    diagnostics.push({
-      severity: "error",
-      code: "generated.contract-invalid",
-      message: result.error.message,
-      path: relativePath,
-    });
+    const { remaining } = partitionZodIssues(result.error, reportedFields);
+    if (remaining.length > 0) {
+      diagnostics.push({
+        severity: "error",
+        code: "generated.contract-invalid",
+        message: `Generated skill frontmatter is invalid: ${formatZodIssues({ issues: remaining })}`,
+        path: relativePath,
+      });
+    }
     return undefined;
   }
   return result.data;
+}
+
+/** Reference entries the lexical rule rejects, reported before the schema sees them. */
+function unsafeReferencePaths(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (entry): entry is string => typeof entry === "string" && !isSafeDescendantPath(entry),
+  );
+}
+
+/**
+ * The reference half of the contract, mirroring the canonical check in `doctor-service`: a
+ * declared reference must exist, stay inside the skill's own directory both lexically and after
+ * symbolic links are canonicalized, and respect the reference byte ceiling. The lexical rule
+ * already ran in `validateFrontmatter`, so anything reaching here is lexically safe.
+ */
+async function validateReferences(
+  fileSystem: FileSystem,
+  root: string,
+  skillId: string,
+  frontmatter: GeneratedSkillFrontmatter,
+  relativePath: string,
+  diagnostics: Diagnostic[],
+): Promise<void> {
+  const skillDirectory = path.join(root, GENERATED_SKILL_DIRECTORY, skillId);
+  for (const reference of frontmatter.references ?? []) {
+    const resolved = resolveSafeRelativePath(skillDirectory, reference);
+    if (resolved === undefined) {
+      diagnostics.push({
+        severity: "error",
+        code: "generated.unsafe-reference-path",
+        message: `Reference escapes the skill directory: ${reference}`,
+        path: relativePath,
+      });
+      continue;
+    }
+    if (
+      !(await fileSystem.exists(resolved.absolute)) ||
+      (await fileSystem.isDirectory(resolved.absolute))
+    ) {
+      diagnostics.push({
+        severity: "error",
+        code: "generated.missing-reference-file",
+        message: `Declared reference is not an existing file: ${reference}`,
+        path: relativePath,
+      });
+      continue;
+    }
+    if (
+      !(await isPathWithinRoot(fileSystem, skillDirectory, resolved.absolute)) ||
+      !(await isPathWithinRoot(fileSystem, root, resolved.absolute))
+    ) {
+      diagnostics.push({
+        severity: "error",
+        code: "generated.unsafe-reference-path",
+        message: `Reference escapes the skill directory through a link: ${reference}`,
+        path: relativePath,
+      });
+      continue;
+    }
+    const size = Buffer.byteLength(await fileSystem.readText(resolved.absolute), "utf8");
+    if (size > CANONICAL_SIZE_CEILINGS.skillReference) {
+      diagnostics.push({
+        severity: "error",
+        code: "generated.reference-size",
+        message:
+          `Reference '${reference}' is ${size} bytes, above the ` +
+          `${CANONICAL_SIZE_CEILINGS.skillReference}-byte ceiling for a reference file.`,
+        path: relativePath,
+      });
+    }
+  }
 }
 
 function hasCompleteEvidence(value: unknown): boolean {
@@ -249,7 +352,7 @@ async function validateEvidence(
   diagnostics: Diagnostic[],
 ): Promise<void> {
   for (const evidence of frontmatter.evidence) {
-    const resolved = resolveSafeRelativePath(root, evidence.source);
+    const resolved = resolveSafeRelativePath(root, evidence.source)?.absolute;
     if (resolved === undefined || !(await isPathWithinRoot(fileSystem, root, resolved))) {
       diagnostics.push({
         severity: "error",
@@ -308,6 +411,9 @@ const TASK_REFERENCE = /\btask-\d+\b/i;
 const DATE_REFERENCE = /\b\d{4}-\d{2}-\d{2}\b/;
 const PATH_LIKE_CODE_SPAN = /`([^`\n]+)`/g;
 
+/** The section that states when the skill applies; fenced examples of it do not count. */
+const ACTIVATION_SECTION = "When this applies";
+
 /** Taste-level signals from design §7. They warn; they never block. */
 function reportShapeHeuristics(
   body: string,
@@ -315,7 +421,7 @@ function reportShapeHeuristics(
   relativePath: string,
   diagnostics: Diagnostic[],
 ): void {
-  if (!/^##\s+When this applies\s*$/m.test(body)) {
+  if (!splitMarkdownSections(body).has(normalizeSectionName(ACTIVATION_SECTION))) {
     diagnostics.push({
       severity: "warning",
       code: "shape.no-trigger",
@@ -366,9 +472,13 @@ function digestOf(content: string): string {
   return `sha256:${createHash("sha256").update(content.replaceAll("\r\n", "\n"), "utf8").digest("hex")}`;
 }
 
-/** A recorded digest may be truncated, so a prefix of the current digest is a match. */
+/**
+ * A recorded digest may be truncated, so a prefix of the current digest is a match — but only a
+ * prefix long enough to mean something. Anything shorter than the schema floor is treated as no
+ * match, so a deliberately short digest cannot silence the staleness check.
+ */
 function matchesRecordedDigest(recorded: string, current: string): boolean {
-  return current.startsWith(recorded);
+  return recorded.length >= DIGEST_MIN_LENGTH && current.startsWith(recorded);
 }
 
 function describeValue(value: unknown): string {
@@ -398,25 +508,4 @@ async function isPathWithinRoot(
   } catch {
     return false;
   }
-}
-
-/** Lexical containment check; `assertPathWithinRoot` adds the realpath half. */
-function resolveSafeRelativePath(root: string, candidate: string): string | undefined {
-  if (candidate.includes("\0") || path.win32.parse(candidate).root !== "") return undefined;
-  const normalized = candidate.trim().replaceAll("\\", "/").replace(/\/+/g, "/");
-  if (normalized.length === 0 || path.posix.isAbsolute(normalized)) return undefined;
-  const segments = normalized.split("/");
-  if (segments.some((segment) => segment === "..")) return undefined;
-
-  const absolute = path.resolve(root, ...segments);
-  const relative = path.relative(root, absolute);
-  if (
-    relative === ".." ||
-    relative.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relative) ||
-    relative === ""
-  ) {
-    return undefined;
-  }
-  return absolute;
 }

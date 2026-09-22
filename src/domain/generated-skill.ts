@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { skillContractSchema } from "./canonical-contracts.ts";
-import { OBSERVATION_PROMOTION_THRESHOLD } from "./observation-ledger.ts";
+import {
+  OBSERVATION_PROMOTION_THRESHOLD,
+  digestSchema,
+} from "./observation-ledger.ts";
+import { isSafeDescendantPath } from "./relative-path.ts";
 
 /** Generated project skills live in their own namespace and are never touched by `sync`. */
 export const GENERATED_SKILL_DIRECTORY = ".ai/skills/project";
@@ -15,21 +19,15 @@ const isoDateSchema = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "must be an ISO calendar date (YYYY-MM-DD)");
 
-const digestSchema = z
-  .string()
-  .regex(/^sha256:[0-9a-f]{16,64}$/, "must be sha256:<hex>, at least 16 hex characters");
-
-/** A reference must stay inside the skill's own directory. */
+/**
+ * A reference must stay inside the skill's own directory. The lexical rule is shared with the
+ * doctors (`isSafeRelativePath`), so a UNC root, a drive letter, a leading separator in either
+ * separator style and any `..` segment are rejected here rather than only at the file system.
+ */
 const referencePathSchema = z
   .string()
   .min(1)
-  .refine(
-    (value) =>
-      !value.startsWith("/") &&
-      !/^[A-Za-z]:/.test(value) &&
-      !value.replaceAll("\\", "/").split("/").includes(".."),
-    "must be a relative path inside the skill directory",
-  );
+  .refine(isSafeDescendantPath, "must be a relative path inside the skill directory");
 
 export const generatedSkillEvidenceSchema = z.object({
   claim: z.string().min(1),

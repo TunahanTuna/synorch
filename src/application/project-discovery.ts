@@ -14,6 +14,7 @@ import {
   observationLedgerSchema,
   pruneExpiredObservations,
 } from "../domain/observation-ledger.ts";
+import { formatZodIssues } from "../domain/zod-issues.ts";
 import type { FileSystem } from "../infrastructure/file-system.ts";
 import { loadBundledSkillPool } from "../infrastructure/bundled-skill-library.ts";
 import { parseYaml, stringifyYaml } from "../infrastructure/serialization.ts";
@@ -312,7 +313,7 @@ export class ProjectDiscoveryService {
     const ledger = observationLedgerSchema.safeParse(parsed);
     if (!ledger.success) {
       throw new CliError(
-        `Invalid observation ledger at ${OBSERVATION_LEDGER_PATH}: ${ledger.error.message}`,
+        `Invalid observation ledger at ${OBSERVATION_LEDGER_PATH}: ${formatZodIssues(ledger.error)}`,
         2,
       );
     }
@@ -997,7 +998,11 @@ function assertUniqueModuleIdentifiers(
   }
 }
 
-function resolveWithinRoot(root: string, relativePath: string): string {
+/**
+ * Resolve a sync-generated path inside the root. Exported so the protected-namespace guard can
+ * be asserted directly rather than only through a full `sync`.
+ */
+export function resolveWithinRoot(root: string, relativePath: string): string {
   if (path.isAbsolute(relativePath)) {
     throw new CliError(`Generated path must be relative: ${relativePath}`, 2);
   }

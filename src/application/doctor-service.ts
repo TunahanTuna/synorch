@@ -26,8 +26,14 @@ import {
   parseFrontmatter,
   splitMarkdownSections,
 } from "../infrastructure/frontmatter.ts";
+import { formatZodIssues } from "../domain/zod-issues.ts";
 import { parseYaml } from "../infrastructure/serialization.ts";
 import { diagnoseGeneratedSkills } from "./generated-skill-doctor.ts";
+import {
+  isStrictDescendant,
+  normalizeForComparison,
+  resolveSafeRelativePath,
+} from "./safe-path.ts";
 
 export type DiagnosticSeverity = "error" | "warning" | "info";
 
@@ -696,7 +702,7 @@ export class DoctorService {
       diagnostics.push({
         severity: "error",
         code: "contract.invalid-frontmatter",
-        message: `Agent manifest frontmatter is invalid: ${parsed.error.message}`,
+        message: `Agent manifest frontmatter is invalid: ${formatZodIssues(parsed.error)}`,
         path: relativePath,
       });
     } else {
@@ -753,7 +759,7 @@ export class DoctorService {
       diagnostics.push({
         severity: "error",
         code: "contract.invalid-frontmatter",
-        message: `Skill frontmatter is invalid: ${parsed.error.message}`,
+        message: `Skill frontmatter is invalid: ${formatZodIssues(parsed.error)}`,
         path: skill.relativePath,
       });
     } else {
@@ -1025,68 +1031,12 @@ function checkByteCeiling(
   });
 }
 
-interface SafeRelativePath {
-  readonly relative: string;
-  readonly absolute: string;
-  readonly comparison: string;
-}
-
-function resolveSafeRelativePath(
-  root: string,
-  candidate: string,
-  requiredPrefix?: string,
-): SafeRelativePath | undefined {
-  if (candidate.includes("\0") || path.win32.parse(candidate).root !== "") return undefined;
-
-  const normalized = normalizeRelativePath(candidate);
-  if (path.posix.isAbsolute(normalized)) return undefined;
-  const segments = normalized.split("/");
-  if (segments.some((segment) => segment === "..")) return undefined;
-
-  const absolute = path.resolve(root, ...segments);
-  const relativeToRoot = path.relative(root, absolute);
-  if (
-    relativeToRoot === ".." ||
-    relativeToRoot.startsWith(".." + path.sep) ||
-    path.isAbsolute(relativeToRoot)
-  ) {
-    return undefined;
-  }
-
-  const comparison = normalizeForComparison(normalized);
-  if (
-    requiredPrefix !== undefined &&
-    !isStrictDescendant(comparison, normalizeForComparison(requiredPrefix))
-  ) {
-    return undefined;
-  }
-  return { relative: normalized, absolute, comparison };
-}
-
-function isStrictDescendant(candidate: string, directory: string): boolean {
-  return candidate.startsWith(directory + "/");
-}
-
 function isPathWithin(root: string, target: string): boolean {
   const relative = path.relative(root, target);
   return (
     relative === "" ||
     (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative))
   );
-}
-
-function normalizeRelativePath(value: string): string {
-  const normalized = value
-    .trim()
-    .replaceAll("\\", "/")
-    .replace(/\/+/g, "/")
-    .replace(/^(?:\.\/)+/, "")
-    .replace(/\/$/, "");
-  return normalized || ".";
-}
-
-function normalizeForComparison(value: string): string {
-  return normalizeRelativePath(value).toLowerCase();
 }
 
 function reportDuplicates(

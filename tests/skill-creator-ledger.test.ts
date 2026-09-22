@@ -9,7 +9,7 @@ import {
   type ObservationLedger,
 } from "../src/domain/observation-ledger.ts";
 
-const DIGEST = "sha256:9f2c1d3b4a5e6f70";
+const DIGEST = "sha256:9f2c1d3b4a5e6f708192a3b4c5d6e7f8";
 
 test("an empty ledger is valid and carries both counters", () => {
   const ledger = createEmptyLedger();
@@ -170,3 +170,44 @@ function observation(overrides: Record<string, unknown>): Observation {
 function ledgerOf(tasksSeen: number, observations: readonly Observation[]): ObservationLedger {
   return { schema_version: 1, tasks_seen: tasksSeen, observations: [...observations] };
 }
+
+test("a promotion records the skill it became, and the link is optional", () => {
+  const promoted = observationSchema.safeParse(
+    observation({ status: "promoted", promoted_to: "api-test-execution" }),
+  );
+  assert.equal(promoted.success, true);
+  assert.equal(
+    promoted.success ? promoted.data.promoted_to : undefined,
+    "api-test-execution",
+  );
+
+  // Ledgers written before the promotion link existed must keep validating.
+  const withoutLink = observationSchema.safeParse(observation({ status: "promoted" }));
+  assert.equal(withoutLink.success, true);
+  assert.equal(withoutLink.success ? withoutLink.data.promoted_to : "unset", undefined);
+});
+
+test("a promotion link must be a skill id, not a path or a registry entry", () => {
+  for (const value of ["../escape", ".ai/skills/project/x", "Not Kebab", ""]) {
+    assert.equal(
+      observationSchema.safeParse(observation({ promoted_to: value })).success,
+      false,
+      value,
+    );
+  }
+});
+
+test("a digest prefix shorter than 32 hex characters is rejected", () => {
+  assert.equal(
+    observationSchema.safeParse(
+      observation({ sources: [{ path: "package.json", digest: "sha256:9f2c1d3b4a5e6f70" }] }),
+    ).success,
+    false,
+  );
+  assert.equal(
+    observationSchema.safeParse(
+      observation({ sources: [{ path: "package.json", digest: DIGEST }] }),
+    ).success,
+    true,
+  );
+});

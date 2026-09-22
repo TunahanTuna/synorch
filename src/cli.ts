@@ -77,7 +77,13 @@ async function main(): Promise<void> {
         console.log(JSON.stringify({ scope: plan.scope, target: plan.targetDirectory, ...result }, null, 2));
       } else {
         console.log(`Initialized ${plan.scope} structure at ${plan.targetDirectory}`);
-        console.log(`Created: ${result.created.length}, updated: ${result.updated.length}, unchanged: ${result.unchanged.length}`);
+        console.log(
+          `Created: ${result.created.length}, updated: ${result.updated.length}, ` +
+            `unchanged: ${result.unchanged.length}, preserved: ${result.preserved.length}`,
+        );
+        if (result.preserved.length > 0) {
+          console.log(`Preserved (never overwritten): ${result.preserved.join(", ")}`);
+        }
         console.log("Next: run `syn sync`, then `syn doctor`.");
       }
       return;
@@ -157,6 +163,8 @@ function statusSymbol(status: GenerationPlan["files"][number]["status"]): string
     case "update":
       return "~";
     case "unchanged":
+      return "=";
+    case "preserved":
       return "=";
     case "conflict":
       return "!";

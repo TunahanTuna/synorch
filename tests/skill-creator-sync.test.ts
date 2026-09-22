@@ -3,15 +3,43 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { ProjectDiscoveryService } from "../src/application/project-discovery.ts";
+import {
+  ProjectDiscoveryService,
+  resolveWithinRoot,
+} from "../src/application/project-discovery.ts";
 import { StructureService } from "../src/application/structure-service.ts";
-import { OBSERVATION_LEDGER_PATH } from "../src/domain/observation-ledger.ts";
+import { CliError } from "../src/domain/errors.ts";
+import {
+  OBSERVATION_LEDGER_PATH,
+  createEmptyLedger,
+} from "../src/domain/observation-ledger.ts";
 import { NodeFileSystem } from "../src/infrastructure/file-system.ts";
 import { parseYaml, stringifyYaml } from "../src/infrastructure/serialization.ts";
 
 const temporaryDirectories: string[] = [];
 const PROJECT_SKILL_PATH = ".ai/skills/project/api-test-execution/SKILL.md";
 const PROJECT_SKILL_CONTENT = "---\nname: api-test-execution\n---\n\nHand-authored, never synced.\n";
+
+/** A ledger only the user and the orchestrator could have produced: `init` must never touch it. */
+const POPULATED_LEDGER = [
+  "schema_version: 1",
+  "tasks_seen: 174",
+  "observations:",
+  "  - id: api-test-execution",
+  "    claim: API tests must run from the module root.",
+  "    kind: command-behavior",
+  "    sources:",
+  "      - path: package.json",
+  "        digest: sha256:9f2c1d3b4a5e6f708192a3b4c5d6e7f8",
+  "    confirmed_by: [task-141, task-156, task-173]",
+  "    count: 3",
+  "    origin: worker-discovery",
+  "    first_seen_at: 2026-09-14",
+  "    last_seen_at: 2026-09-22",
+  "    last_seen_task_index: 173",
+  "    status: declined",
+  "",
+].join("\n");
 
 afterEach(async () => {
   await Promise.all(
@@ -109,12 +137,79 @@ test("sync refuses to continue with an invalid observation ledger", async () => 
   );
 });
 
+test("init --force leaves a populated observation ledger byte-identical", async () => {
+  const directory = await createInitializedProject();
+  await writeFile(path.join(directory, OBSERVATION_LEDGER_PATH), POPULATED_LEDGER, "utf8");
+  const before = await readFile(path.join(directory, OBSERVATION_LEDGER_PATH));
+
+  const structure = new StructureService(new NodeFileSystem());
+  const result = await structure.initialize(
+    await structure.createPlan(directory, "repository", true),
+  );
+
+  const after = await readFile(path.join(directory, OBSERVATION_LEDGER_PATH));
+  assert.equal(before.equals(after), true, "the ledger must survive --force untouched");
+  assert.ok(result.preserved.includes(OBSERVATION_LEDGER_PATH));
+  assert.equal(result.updated.includes(OBSERVATION_LEDGER_PATH), false);
+  assert.equal(result.unchanged.includes(OBSERVATION_LEDGER_PATH), false);
+  assert.equal(result.created.includes(OBSERVATION_LEDGER_PATH), false);
+});
+
+test("inspect reports a populated ledger as preserved rather than a conflict", async () => {
+  const directory = await createInitializedProject();
+  await writeFile(path.join(directory, OBSERVATION_LEDGER_PATH), POPULATED_LEDGER, "utf8");
+
+  const structure = new StructureService(new NodeFileSystem());
+  const plan = await structure.createPlan(directory, "repository");
+
+  const ledgerFile = plan.files.find((file) => file.relativePath === OBSERVATION_LEDGER_PATH);
+  assert.ok(ledgerFile);
+  assert.equal(ledgerFile.status, "preserved");
+  assert.deepEqual(
+    plan.files.filter((file) => file.status === "conflict").map((file) => file.relativePath),
+    [],
+  );
+
+  // An init without --force must therefore succeed, and still not touch the ledger.
+  const before = await readFile(path.join(directory, OBSERVATION_LEDGER_PATH));
+  await structure.initialize(plan);
+  assert.equal(before.equals(await readFile(path.join(directory, OBSERVATION_LEDGER_PATH))), true);
+});
+
+test("init --force still refreshes the canonical task gitignore beside the ledger", async () => {
+  const directory = await createInitializedProject();
+  const ignorePath = path.join(directory, ".ai", "tasks", ".gitignore");
+  await writeFile(ignorePath, "# hand edited\n", "utf8");
+
+  const structure = new StructureService(new NodeFileSystem());
+  const result = await structure.initialize(
+    await structure.createPlan(directory, "repository", true),
+  );
+
+  assert.ok(result.updated.includes(".ai/tasks/.gitignore"));
+  assert.match(await readFile(ignorePath, "utf8"), /^!observations\.yaml$/m);
+});
+
+test("a ledger absent at init time is seeded once", async () => {
+  const directory = await createInitializedProject();
+  await rm(path.join(directory, OBSERVATION_LEDGER_PATH));
+
+  const structure = new StructureService(new NodeFileSystem());
+  const result = await structure.initialize(await structure.createPlan(directory, "repository"));
+
+  assert.ok(result.created.includes(OBSERVATION_LEDGER_PATH));
+  assert.equal(
+    await readFile(path.join(directory, OBSERVATION_LEDGER_PATH), "utf8"),
+    stringifyYaml(createEmptyLedger()),
+  );
+});
+
 function observation(overrides: Record<string, unknown>): Record<string, unknown> {
   return {
     id: "api-test-execution",
     claim: "API tests must run from the module root.",
     kind: "command-behavior",
-    sources: [{ path: "package.json", digest: "sha256:9f2c1d3b4a5e6f70" }],
+    sources: [{ path: "package.json", digest: "sha256:9f2c1d3b4a5e6f708192a3b4c5d6e7f8" }],
     confirmed_by: ["task-1"],
     count: 1,
     origin: "worker-discovery",
@@ -153,3 +248,29 @@ async function createInitializedProject(): Promise<string> {
 async function exists(targetPath: string): Promise<boolean> {
   return new NodeFileSystem().exists(targetPath);
 }
+
+test("resolveWithinRoot refuses the generated skill namespace outright", () => {
+  const root = path.resolve(os.tmpdir(), "synorch-guard");
+
+  for (const relativePath of [
+    ".ai/skills/project/x/SKILL.md",
+    ".ai/skills/project",
+    String.raw`.ai\skills\project\x\SKILL.md`,
+    ".ai/skills/Project/x/SKILL.md",
+    "./.ai/skills/project/x/SKILL.md",
+  ]) {
+    assert.throws(
+      () => resolveWithinRoot(root, relativePath),
+      (error: unknown) =>
+        error instanceof CliError &&
+        error.exitCode === 2 &&
+        /never write inside the generated skill namespace/.test(error.message),
+      relativePath,
+    );
+  }
+
+  assert.equal(
+    resolveWithinRoot(root, ".ai/skills/task-conductor/SKILL.md"),
+    path.join(root, ".ai", "skills", "task-conductor", "SKILL.md"),
+  );
+});

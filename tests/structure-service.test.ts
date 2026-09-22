@@ -9,6 +9,7 @@ import { ProjectDiscoveryService } from "../src/application/project-discovery.ts
 import { StructureService } from "../src/application/structure-service.ts";
 import { manifestSchema, skillRegistrySchema } from "../src/domain/config.ts";
 import { CliError } from "../src/domain/errors.ts";
+import { OBSERVATION_LEDGER_PATH } from "../src/domain/observation-ledger.ts";
 import { BASE_SKILLS } from "../src/domain/skill-packs.ts";
 import { NodeFileSystem } from "../src/infrastructure/file-system.ts";
 import { createStructureFiles } from "../src/templates/structure-templates.ts";
@@ -100,7 +101,19 @@ test("init is idempotent and doctor accepts the generated structure", async () =
   const secondPlan = await service.createPlan(directory, "workspace");
   const diagnostics = await new DoctorService(fileSystem).diagnose(directory);
 
-  assert.ok(secondPlan.files.every((file) => file.status === "unchanged"));
+  assert.ok(
+    secondPlan.files.every(
+      (file) => file.status === "unchanged" || file.status === "preserved",
+    ),
+    secondPlan.files
+      .filter((file) => file.status !== "unchanged" && file.status !== "preserved")
+      .map((file) => `${file.status} ${file.relativePath}`)
+      .join(", "),
+  );
+  assert.deepEqual(
+    secondPlan.files.filter((file) => file.status === "preserved").map((file) => file.relativePath),
+    [OBSERVATION_LEDGER_PATH],
+  );
   assert.deepEqual(
     diagnostics.map((diagnostic) => diagnostic.code),
     ["healthy"],
@@ -751,7 +764,6 @@ function isLinkCapabilityError(error: unknown): boolean {
   if (!(error instanceof Error) || !("code" in error)) return false;
   return ["EACCES", "EPERM", "UNKNOWN"].includes(String(error.code));
 }
-
 
 async function createTempDirectory(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synorch-test-"));

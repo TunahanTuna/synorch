@@ -56,6 +56,11 @@ export class StructureService {
         continue;
       }
 
+      if (definition.writePolicy === "create-only") {
+        files.push({ ...definition, status: "preserved" });
+        continue;
+      }
+
       const currentContent = await this.fileSystem.readText(absolutePath);
       files.push({
         ...definition,
@@ -92,10 +97,15 @@ export class StructureService {
     const created: string[] = [];
     const updated: string[] = [];
     const unchanged: string[] = [];
+    const preserved: string[] = [];
 
     for (const file of plan.files) {
       if (file.status === "unchanged") {
         unchanged.push(file.relativePath);
+        continue;
+      }
+      if (file.status === "preserved") {
+        preserved.push(file.relativePath);
         continue;
       }
 
@@ -116,7 +126,7 @@ export class StructureService {
       }
     }
 
-    return { created, updated, unchanged };
+    return { created, updated, unchanged, preserved };
   }
 
   private async detectScope(targetDirectory: string): Promise<StructureScope> {

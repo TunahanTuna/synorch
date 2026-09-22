@@ -60,6 +60,8 @@ observations:
 
 `status` is one of `collecting`, `ready-to-propose`, `proposed`, `promoted`, `declined`, `expired`. A promoted observation additionally carries `promoted_to`, the id of the skill it became; together with `status: active` in that skill's frontmatter it is the whole record of activation.
 
+`doctor` enforces that link in one direction only: a `promoted` observation whose `promoted_to` names no skill under `.ai/skills/project/` is `generated.broken-promotion-link`, an error. The reverse is not enforced, because it would require an observation id and a skill id to be the same string — which this design never states — and would reject a project skill a user placed by hand. A generated skill is already tied back to the ledger through `confirmed_by`.
+
 `kind` exists to make deduplication tractable; the initial set is `command-behavior`, `convention`, `ordering-constraint`, `pitfall`, `boundary`.
 
 ### Rules

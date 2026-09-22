@@ -31,7 +31,7 @@ export function headerFor(runtime: Runtime, notices: readonly string[] = []): Se
     policyMode: runtime.policyMode,
     routes,
     sandboxEnforcement: runtime.sandbox.enforcement,
-    notices: [...sandboxNotes, ...notices],
+    notices: [...runtime.config.warnings.map((warning) => warning.message), ...sandboxNotes, ...notices],
   };
 }
 

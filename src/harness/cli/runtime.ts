@@ -49,6 +49,7 @@ import {
   createCoordinator,
   createModelPlanner,
   createWorkerFactory,
+  pruneOrphanedAttempts,
   type BudgetGateSlot,
   type CoordinatorLimits,
 } from "../orchestration/index.ts";
@@ -65,7 +66,7 @@ import {
 import { createBlobStore, createSessionStore } from "../store/index.ts";
 import { createSandboxRunner, createToolGateway, createToolRegistry, probeSandbox } from "../tools/index.ts";
 import type { RouteOverride } from "./args.ts";
-import { DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
+import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
 import { loadScript } from "./scripted-script.ts";
 
 /**
@@ -150,6 +151,11 @@ async function bridgeEnabled(home: string): Promise<boolean> {
 }
 
 async function buildAdapter(entry: ConfiguredAdapter, fetch: FetchLike | undefined, env: Env, home: string): Promise<AnyModelAdapter> {
+  if (entry.source !== "user") throw configError(`adapter ${entry.id} comes from the ${entry.source} layer; only the user configuration declares adapters`);
+  if (entry.baseUrl !== undefined && entry.kind === "openai-chatgpt") {
+    const refused = checkEndpoint(entry.kind, entry.baseUrl, false);
+    if (refused !== undefined) throw configError(`adapter ${entry.id}: ${refused}`);
+  }
   const common = { ...(fetch === undefined ? {} : { fetch }), ...(entry.baseUrl === undefined ? {} : { baseUrl: entry.baseUrl }) };
   switch (entry.kind) {
     case "openai-chatgpt":
@@ -159,7 +165,7 @@ async function buildAdapter(entry: ConfiguredAdapter, fetch: FetchLike | undefin
     case "anthropic-messages":
       return withId(createAnthropicMessagesAdapter(common), entry.id);
     case "claude-code":
-      return createClaudeCodeAdapter({ experimental: await bridgeEnabled(home), env });
+      return createClaudeCodeAdapter({ experimental: await bridgeEnabled(home), env, allowNonSubscriptionAuth: entry.allowNonSubscriptionAuth === true });
     case "scripted":
       return createScriptedAdapter(await loadScript(entry.script ?? ""), {
         adapterId: entry.id,
@@ -278,6 +284,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     writers.set(store.sessionId, observed);
     return observed;
   };
+  const configIgnored = config.warnings.slice(0, 32).map((warning) => ({ layer: warning.layer, path: warning.path, key: warning.key }));
   const opened = async (store: EventStore, parent: { session_id: SessionId; up_to_seq: number } | undefined, root: string): Promise<EventStore> => {
     const observed = wrap(store);
     await observed.append({
@@ -293,6 +300,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         git: gitBranch === undefined ? null : { branch: gitBranch },
         policy_mode: options.policyMode,
         ...(parent === undefined ? {} : { parent }),
+        ...(configIgnored.length === 0 ? {} : { config_ignored: configIgnored }),
       },
     } as SessionEventDraft);
     return observed;
@@ -531,6 +539,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
           await events.close();
         }
       }
+      // SEC-M3: crashed attempts leave worktrees and scoped-dir writes behind; only orphans whose owner process is gone are touched.
+      await pruneOrphanedAttempts({ worktreesRoot: path.join(home, "worktrees"), projectId, workspaceRoot, platform }).catch(() => undefined);
       return reports;
     },
   };

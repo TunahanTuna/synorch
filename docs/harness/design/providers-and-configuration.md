@@ -28,7 +28,7 @@ Alanlar **taslak**; değerler örnektir, hiçbir gerçek model iddiası değildi
 
 ## Konfigürasyon önceliği
 
-Önerilen sıra: session override → proje ayarı → workspace ayarı → kullanıcı ayarı → provider varsayılanı. Her ayar için `value`, `source`, `scope` ve `persisted` bilgisi CLI'da gösterilir. Ortam değişkeni gizli bilgi içerebilir; kullanıcıya ham değer değil kaynak adı gösterilir. Geçici model seçimi “varsayılan olarak kaydet” açıkça istenmedikçe diske yazılmaz. Repo içindeki `.ai/` politika dosyaları güven sınırını platform veya kullanıcı izninin üstüne çıkaramaz.
+Önerilen sıra: session override → proje ayarı → workspace ayarı → kullanıcı ayarı → provider varsayılanı. **Güven sınırı (uygulandı, SEC-C1):** proje ve workspace ayarları repo içeriğidir; yalnız daraltabilirler (daha sıkı policy, daha küçük bütçe). Sağlayıcı, adapter, endpoint (`base_url`), route, profil ve kimlik bilgisiyle ilgili her ayar yalnız kullanıcı ayarından ve açık oturum bayrağından gelir; repo katmanındaki böyle bir anahtar görünür uyarı ve denetim olayıyla yok sayılır. Endpoint'ler sağlayıcının resmi origin'ine sabitlenir; özel endpoint kullanıcı ayarında açık opt-in ister, abonelik OAuth token'ı resmi olmayan host'a hiç gönderilmez ([CLI referansı §11](../reference/cli.md)). Her ayar için `value`, `source`, `scope` ve `persisted` bilgisi CLI'da gösterilir. Ortam değişkeni gizli bilgi içerebilir; kullanıcıya ham değer değil kaynak adı gösterilir. Geçici model seçimi “varsayılan olarak kaydet” açıkça istenmedikçe diske yazılmaz. Repo içindeki `.ai/` politika dosyaları güven sınırını platform veya kullanıcı izninin üstüne çıkaramaz.
 
 ## Auth ilkeleri
 

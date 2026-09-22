@@ -110,6 +110,12 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
       git: z.strictObject({ branch: z.string().optional(), head: z.string().optional() }).nullable(),
       policy_mode: policyModeSchema,
       parent: z.strictObject({ session_id: sessionIdSchema, up_to_seq: z.int().min(1) }).optional(),
+      /** v2: repository-layer configuration keys the runtime ignored (trust layering, SEC-C1). */
+      config_ignored: z
+        .array(z.strictObject({ layer: z.enum(["workspace", "project"]), path: z.string().min(1), key: z.string().min(1).max(64) }))
+        .min(1)
+        .max(32)
+        .optional(),
     }),
   ),
   eventOf(
@@ -356,6 +362,7 @@ export type SessionEventOf<T extends SessionEventType> = Extract<SessionEvent, {
  * event that carries a newer field is `invalid` (it cannot have been written by that version).
  */
 export const EVENT_FIELD_VERSIONS = {
+  "session/opened": { config_ignored: 2 },
   "session/resumed": { torn_tail: 2 },
   "attempt/started": { session_id: 2 },
   "tool/policy_decided": { "action.escapes": 2 },

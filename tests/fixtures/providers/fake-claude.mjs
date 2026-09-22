@@ -18,6 +18,7 @@ const report = {
   hasAnthropicKey: Object.keys(process.env).some((key) => key.toUpperCase() === "ANTHROPIC_API_KEY"),
   hasAuthToken: Object.keys(process.env).some((key) => key.toUpperCase() === "ANTHROPIC_AUTH_TOKEN"),
   hasOpenAiKey: Object.keys(process.env).some((key) => key.toUpperCase() === "OPENAI_API_KEY"),
+  billingEnv: Object.keys(process.env).filter((key) => /^(ANTHROPIC_|CLAUDE_CODE_USE_|CLAUDE_CODE_OAUTH_TOKEN$|AWS_BEARER_TOKEN_BEDROCK$)/i.test(key)),
   mcp: [],
   turns: 0,
 };
@@ -96,7 +97,7 @@ async function sendInit() {
     model,
     tools: scenario === "builtin" ? ["Bash", "Read", ...tools] : tools,
     mcp_servers: [{ name: "synorch", status: "connected" }],
-    apiKeySource: process.env.ANTHROPIC_API_KEY ? "ANTHROPIC_API_KEY" : "oauth",
+    apiKeySource: process.env.FAKE_CLAUDE_API_KEY_SOURCE ?? (process.env.ANTHROPIC_API_KEY ? "ANTHROPIC_API_KEY" : "oauth"),
   });
 }
 

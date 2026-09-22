@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import type { Socket } from "node:net";
 import os from "node:os";
+import { PassThrough } from "node:stream";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -27,7 +29,7 @@ import {
   createCodexAppServerAdapter,
   type ExecutableSpec,
 } from "../src/harness/providers/index.ts";
-import { McpToolServer } from "../src/harness/providers/claude-code/mcp-server.ts";
+import { McpToolServer, serveMcpConnection } from "../src/harness/providers/claude-code/mcp-server.ts";
 import { quoteForCmd } from "../src/harness/providers/claude-code/process.ts";
 
 const FAKE_CLAUDE = fileURLToPath(new URL("./fixtures/providers/fake-claude.mjs", import.meta.url));
@@ -69,6 +71,7 @@ async function withSession(
     readonly bridge: ReturnType<typeof recordingBridge>;
   }) => Promise<void>,
   executable: ExecutableSpec = { command: process.execPath, args: [FAKE_CLAUDE] },
+  extra: { readonly env?: Readonly<Record<string, string>>; readonly allowNonSubscriptionAuth?: boolean } = {},
 ): Promise<void> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synorch-bridge-test-"));
   const reportPath = path.join(directory, "report.json");
@@ -77,6 +80,7 @@ async function withSession(
     executable,
     interruptGraceMs: 2_000,
     tempRoot: directory,
+    ...(extra.allowNonSubscriptionAuth === undefined ? {} : { allowNonSubscriptionAuth: extra.allowNonSubscriptionAuth }),
   });
   const options: BackendSessionOptions = {
     cwd: directory,
@@ -91,6 +95,7 @@ async function withSession(
       OPENAI_API_KEY: "sk-openai-should-never-reach-the-child",
       FAKE_CLAUDE_SCENARIO: scenario,
       FAKE_CLAUDE_REPORT: reportPath,
+      ...(extra.env ?? {}),
     },
   };
   const session = await adapter.startSession(options, new AbortController().signal);
@@ -138,8 +143,8 @@ test("claude args disable built-ins, load only the Synorch MCP server and never 
 test("bridge environment strips every BRIDGE_STRIPPED_ENV name, case-insensitively on Windows", () => {
   const env = bridgeEnvironment({ PATH: "/bin", ANTHROPIC_API_KEY: "a", openai_api_key: "b", CODEX_API_KEY: "c", ANTHROPIC_AUTH_TOKEN: "d" }, {}, "win32");
   assert.deepEqual(env, { PATH: "/bin" });
-  const posix = bridgeEnvironment({ PATH: "/bin", ANTHROPIC_API_KEY: "a", Anthropic_Api_Key: "kept-on-posix" }, {}, "linux");
-  assert.deepEqual(posix, { PATH: "/bin", Anthropic_Api_Key: "kept-on-posix" });
+  const posix = bridgeEnvironment({ PATH: "/bin", ANTHROPIC_API_KEY: "a", Anthropic_Api_Key: "stripped-on-posix-too" }, {}, "linux");
+  assert.deepEqual(posix, { PATH: "/bin" });
   for (const name of BRIDGE_STRIPPED_ENV) assert.equal(bridgeEnvironment({ [name]: "x" }, {}, "linux")[name], undefined);
 });
 
@@ -246,6 +251,70 @@ test("the bridge refuses to start without the experimental opt-in or without cla
   assert.ok(providerCapabilitiesSchema.safeParse(capabilities).success);
   assert.equal(capabilities.tool_channel, "mcp");
   assert.equal(capabilities.policy_status, "unclear");
+});
+
+test("SEC-M2 bridge env strips Bedrock, Vertex, base-url, OAuth-token and every ANTHROPIC_* / CLAUDE_CODE_USE_* name", async () => {
+  const billing = {
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    CLAUDE_CODE_USE_VERTEX: "1",
+    CLAUDE_CODE_USE_FOUNDRY: "1",
+    AWS_BEARER_TOKEN_BEDROCK: "bedrock-token",
+    ANTHROPIC_BASE_URL: "http://127.0.0.1:1",
+    ANTHROPIC_AUTH_TOKEN: "t",
+    ANTHROPIC_API_KEY: "k",
+    ANTHROPIC_MODEL: "m",
+    CLAUDE_CODE_OAUTH_TOKEN: "oauth-token",
+  };
+  for (const platform of ["linux", "win32"] as const) {
+    assert.deepEqual(bridgeEnvironment({ PATH: "/bin", ...billing }, {}, platform), { PATH: "/bin" });
+    assert.deepEqual(bridgeEnvironment({ PATH: "/bin" }, billing, platform), { PATH: "/bin" }, "extra variables are stripped too");
+  }
+  for (const name of ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]) {
+    assert.ok((BRIDGE_STRIPPED_ENV as readonly string[]).includes(name), `${name} is in BRIDGE_STRIPPED_ENV`);
+  }
+  const contracts = (await import("../src/harness/contracts/index.ts")) as Record<string, unknown>;
+  const stripped = contracts.isBridgeStrippedEnvName as ((name: string) => boolean) | undefined;
+  assert.ok(stripped !== undefined && stripped("anthropic_custom_headers") && stripped("CLAUDE_CODE_USE_ANYTHING") && !stripped("PATH"));
+  await withSession("tool", async ({ run, report }) => {
+    await run("hi");
+    assert.deepEqual((await report()).billingEnv, [], "no billing-affecting variable reaches the child");
+  }, undefined, { env: billing });
+});
+
+test("SEC-M2 bridge refuses a turn whose auth source is not the subscription login unless the user opted in", async () => {
+  for (const source of ["ANTHROPIC_API_KEY", "apiKeyHelper", "/login managed key", "none"]) {
+    await withSession("tool", async ({ run, bridge }) => {
+      const events = await run("please read src/a.ts");
+      const last = events.at(-1);
+      assert.ok(last?.type === "error", `${source}: the turn is refused`);
+      assert.equal(last.error.code, "forbidden");
+      assert.match(last.error.message, /subscription/);
+      assert.ok(!events.some((event) => event.type === "backend_init"));
+      assert.equal(bridge.calls.length, 0, "no tool runs on a refused turn");
+    }, undefined, { env: { FAKE_CLAUDE_API_KEY_SOURCE: source } });
+  }
+  await withSession("tool", async ({ run }) => {
+    const events = await run("please read src/a.ts");
+    const init = events.find((event) => event.type === "backend_init");
+    assert.ok(init?.type === "backend_init" && init.auth_source === "api-key", "the opt-in accepts and still reports the source");
+    assert.equal(events.at(-1)?.type, "done");
+  }, undefined, { env: { FAKE_CLAUDE_API_KEY_SOURCE: "apiKeyHelper" }, allowNonSubscriptionAuth: true });
+});
+
+test("SEC-L3 MCP bridge drops a connection whose pre-auth line exceeds the cap", async () => {
+  const server = new McpToolServer({ list: () => [], call: async () => ({ isError: false, text: "" }), permission: async () => ({ allow: false, reason: "no" }) }, "0.0.0");
+  const socket = new PassThrough();
+  let destroyed = false;
+  Object.assign(socket, {
+    destroy: () => {
+      destroyed = true;
+      return socket;
+    },
+  });
+  serveMcpConnection(socket as unknown as Socket, server, "a".repeat(64), new AbortController().signal);
+  const chunk = "x".repeat(4096);
+  for (let index = 0; index < 64 && !destroyed; index += 1) socket.emit("data", chunk);
+  assert.equal(destroyed, true, "an unauthenticated peer cannot grow the buffer without bound");
 });
 
 test("MCP server answers initialize, tools/list, tools/call and rejects unknown or malformed input", async () => {

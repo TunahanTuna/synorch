@@ -11,6 +11,7 @@ import {
   type SandboxReport,
 } from "../contracts/index.ts";
 import { createAuthProviders, createCredentialStore, ProfileStateStore, type SynorchCredentialStore } from "../auth/index.ts";
+import { pruneOrphanedAttempts } from "../orchestration/index.ts";
 import { createSessionStore } from "../store/index.ts";
 import { probeSandbox } from "../tools/index.ts";
 import { resolveHome } from "./config.ts";
@@ -84,7 +85,7 @@ function sandboxCheck(report: SandboxReport): DoctorCheck {
   };
 }
 
-async function storeCheck(home: string, projectId: string): Promise<DoctorCheck> {
+async function storeCheck(home: string, projectId: string, workspaceRoot: string): Promise<DoctorCheck> {
   const probe = path.join(home, "tmp", `doctor-${randomBytes(6).toString("hex")}`);
   try {
     await mkdir(path.dirname(probe), { recursive: true, mode: 0o700 });
@@ -95,11 +96,15 @@ async function storeCheck(home: string, projectId: string): Promise<DoctorCheck>
     await rm(probe, { force: true });
     const sessions = await createSessionStore(home).list(projectId as never);
     const locked = sessions.filter((session) => session.locked).length;
+    // SEC-M3: attempt workspaces a crashed process left behind (never one whose owner is alive).
+    const pruned = await pruneOrphanedAttempts({ worktreesRoot: path.join(home, "worktrees"), projectId: projectId as never, workspaceRoot }).catch(() => undefined);
+    const orphans = (pruned?.removedWorktrees.length ?? 0) + (pruned?.revertedScoped.length ?? 0);
+    const leftInPlace = pruned?.revertedScoped.flatMap((entry) => [...entry.leftInPlace, ...entry.unrestorable]) ?? [];
     return {
       id: "store",
-      status: "ok",
-      summary: `${home} is writable with durable flushes; ${sessions.length} session(s) for this project${locked > 0 ? `, ${locked} live` : ""}`,
-      details: [{ home, sessions: sessions.length, live: locked }],
+      status: leftInPlace.length > 0 ? "warn" : "ok",
+      summary: `${home} is writable with durable flushes; ${sessions.length} session(s) for this project${locked > 0 ? `, ${locked} live` : ""}${orphans > 0 ? `; pruned ${orphans} orphaned attempt workspace(s)` : ""}${leftInPlace.length > 0 ? `; a crashed attempt changed ${leftInPlace.slice(0, 5).join(", ")} outside what could be reverted` : ""}`,
+      details: [{ home, sessions: sessions.length, live: locked, ...(pruned === undefined ? {} : { orphans: pruned }) }],
     };
   } catch (error) {
     await rm(probe, { force: true }).catch(() => undefined);
@@ -216,17 +221,19 @@ export async function doctorRuntime(io: DoctorIO, target: string | undefined, pr
   let runtime: Runtime | undefined;
   try {
     runtime = await createRuntime({ workspaceRoot, env: io.env, policyMode: "autonomous", overrides: { ...overrides, home } });
+    const files = runtime.config.files.length === 0 ? "no configuration files; defaults apply" : runtime.config.files.map((file) => `${file.layer}: ${file.path}`).join("; ");
+    const warnings = runtime.config.warnings;
     checks.push({
       id: "config",
-      status: "ok",
-      summary: runtime.config.files.length === 0 ? "no configuration files; defaults apply" : runtime.config.files.map((file) => `${file.layer}: ${file.path}`).join("; "),
-      details: runtime.config.files,
+      status: warnings.length === 0 ? "ok" : "warn",
+      summary: warnings.length === 0 ? files : `${files}; ${warnings.map((warning) => warning.message).join("; ")}`,
+      details: [...runtime.config.files, ...warnings],
     });
   } catch (error) {
     checks.push({ id: "config", status: "fail", summary: failureInfo(error).message, details: [] });
   }
   checks.push(sandboxCheck(runtime?.sandbox ?? overrides.sandbox ?? (await probeSandbox({ platform: io.platform }))));
-  checks.push(await storeCheck(home, runtime?.projectId ?? deriveProjectId(workspaceRoot, io.platform)));
+  checks.push(await storeCheck(home, runtime?.projectId ?? deriveProjectId(workspaceRoot, io.platform), workspaceRoot));
   checks.push(await authCheck(home, io, overrides, controller.signal));
   if (runtime !== undefined) checks.push(await capabilitiesCheck(runtime, controller.signal));
   if (probeModel && runtime !== undefined) checks.push(await probeModels(runtime, controller.signal));

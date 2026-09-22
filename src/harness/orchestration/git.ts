@@ -91,3 +91,27 @@ export async function gitShowHead(git: GitRunner, cwd: string, relative: string)
     return undefined;
   }
 }
+
+/**
+ * Ignored, untracked entries (files, or whole directories collapsed with a trailing `/`), POSIX
+ * separators. Used to see which ignored paths a changed `.gitignore` would expose.
+ */
+export async function gitIgnoredEntries(git: GitRunner, cwd: string, signal?: AbortSignal): Promise<string[]> {
+  const output = (await git(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], cwd, signal)).stdout.toString("utf8");
+  return output.split("\0").filter((entry) => entry.length > 0);
+}
+
+/** The subset of `paths` the ignore rules under `cwd` match (`--no-index`: the paths need not be tracked or exist). */
+export async function gitCheckIgnored(git: GitRunner, cwd: string, paths: readonly string[], signal?: AbortSignal): Promise<Set<string>> {
+  if (paths.length === 0) return new Set();
+  try {
+    // `-z` needs --stdin, which the runner does not offer; a path git has to quote simply does not
+    // match, so it counts as "not ignored" (the caller then treats it as exposed: fail closed).
+    const output = (await git(["-c", "core.quotePath=false", "check-ignore", "--no-index", "--", ...paths], cwd, signal)).stdout.toString("utf8");
+    return new Set(output.split(/\r?\n/).filter((entry) => entry.length > 0));
+  } catch (error: unknown) {
+    // Exit code 1 means that none of the paths is ignored.
+    if (error instanceof GitCommandError && error.exitCode === 1) return new Set();
+    throw error;
+  }
+}

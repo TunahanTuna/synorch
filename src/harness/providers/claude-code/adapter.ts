@@ -41,6 +41,12 @@ export interface ClaudeCodeAdapterOptions {
   /** Environment used to locate and probe `claude`; stripped of `BRIDGE_STRIPPED_ENV` before use. */
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly interruptGraceMs?: number;
+  /**
+   * SEC-M2: a turn is refused unless `system/init` reports the subscription login
+   * (`auth_source: subscription`). Only an explicit user-config opt-in
+   * (`allow_non_subscription_auth: true` on the `claude-code` adapter) accepts other sources.
+   */
+  readonly allowNonSubscriptionAuth?: boolean;
   readonly now?: () => Date;
   readonly platform?: NodeJS.Platform;
   readonly tempRoot?: string;
@@ -170,6 +176,7 @@ export function createClaudeCodeAdapter(options: ClaudeCodeAdapterOptions): Agen
       return ClaudeCodeSession.start(executable, sessionOptions, {
         platform,
         interruptGraceMs: options.interruptGraceMs ?? 5_000,
+        allowNonSubscriptionAuth: options.allowNonSubscriptionAuth === true,
         tempRoot: options.tempRoot ?? os.tmpdir(),
       });
     },
@@ -219,6 +226,7 @@ interface SessionConfig {
   readonly platform: NodeJS.Platform;
   readonly interruptGraceMs: number;
   readonly tempRoot: string;
+  readonly allowNonSubscriptionAuth: boolean;
 }
 
 class ClaudeCodeSession implements BackendSession {
@@ -396,11 +404,22 @@ class ClaudeCodeSession implements BackendSession {
             await this.stopChild();
             return;
           }
+          const authSource = authSourceOf(stringField(message, "apiKeySource"));
+          if (authSource !== "subscription" && !this.config.allowNonSubscriptionAuth) {
+            yield fail(
+              providerError(
+                "forbidden",
+                `claude reported auth source ${authSource} (apiKeySource ${stringField(message, "apiKeySource") ?? "missing"}), not the subscription login; the turn was refused. ${CLAUDE_LOGIN_HINT} To accept other sources set allow_non_subscription_auth: true on the claude-code adapter in the user configuration.`,
+              ),
+            );
+            await this.stopChild();
+            return;
+          }
           const init = modelStreamEventSchema.safeParse({
             type: "backend_init",
             backend_session_id: stringField(message, "session_id") ?? this.backendSessionId,
             model_id: stringField(message, "model") ?? this.options.modelId,
-            auth_source: authSourceOf(stringField(message, "apiKeySource")),
+            auth_source: authSource,
             tools,
           });
           if (!init.success) {

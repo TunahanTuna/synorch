@@ -35,7 +35,7 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 
 | Tip | `data` alanları | Model | Üreten |
 | --- | --- | --- | --- |
-| `session/opened` | `writer`, `project_id`, `workspace_root`, `cwd`, `platform`, `git`, `policy_mode`, `parent?` | Hayır | store/cli |
+| `session/opened` (v2) | `writer`, `project_id`, `workspace_root`, `cwd`, `platform`, `git`, `policy_mode`, `parent?`, `config_ignored?[{layer, path, key}]` (v2: repo katmanında yok sayılan yapılandırma anahtarları, SEC-C1) | Hayır | store/cli |
 | `session/resumed` (v2) | `previous_last_seq`, `recovered[]`, `torn_tail?{segment, bytes}` (v2) | Hayır | core |
 | `session/closed` | `reason` | Hayır | cli |
 | `run/created` | `goal`, `policy_mode`, `headless`, `budget` | Hedef metni evet | orchestration |
@@ -81,7 +81,7 @@ Eşleşme invariant'ları: her `tool/call_proposed` bir `tool/result_recorded` v
 
 `parseSessionEvent(raw)` üç sonuç verir: `ok`, `unsupported` (bilinmeyen `type` veya bilinen tipte daha yüksek `event_version`), `invalid` (bilinen tip şemaya uymuyor = bozulma). `unsupported` sessizce atlanmaz; projection "bu session daha yeni bir sürümle yazılmış" hatası verir ve yazma için açmaz. Payload değişikliği: alan eklemek bile `event_version` artırır; okuyucu eski sürümleri desteklemeye devam eder; eski log hiçbir zaman yeniden yazılmaz.
 
-Sürümlü alanlar `EVENT_FIELD_VERSIONS` tablosundadır (tip → alan → alanı getiren sürüm); `EVENT_VERSIONS[type]` bu tablodaki en yüksek sürümdür ve yazıcılar her zaman onu damgalar. Yeni alanlar şemada opsiyoneldir, böylece eski sürüm olaylar aynı şemayla okunur; daha eski sürümle damgalanmış ama yeni alanı taşıyan olay `invalid`'dir (o sürüm yazamazdı). Dalga 2a: `session/resumed` v2 (`torn_tail`), `attempt/started` v2 (`session_id`), `tool/policy_decided` v2 (`action.escapes`); `task/integrated` yeni tip (v1) — onu tanımayan eski okuyucu `unsupported` raporlar.
+Sürümlü alanlar `EVENT_FIELD_VERSIONS` tablosundadır (tip → alan → alanı getiren sürüm); `EVENT_VERSIONS[type]` bu tablodaki en yüksek sürümdür ve yazıcılar her zaman onu damgalar. Yeni alanlar şemada opsiyoneldir, böylece eski sürüm olaylar aynı şemayla okunur; daha eski sürümle damgalanmış ama yeni alanı taşıyan olay `invalid`'dir (o sürüm yazamazdı). Dalga 2a: `session/resumed` v2 (`torn_tail`), `attempt/started` v2 (`session_id`), `tool/policy_decided` v2 (`action.escapes`); `task/integrated` yeni tip (v1) — onu tanımayan eski okuyucu `unsupported` raporlar. Güvenlik düzeltmesi: `session/opened` v2 (`config_ignored`).
 
 ## 5. Disk yerleşimi
 
@@ -260,6 +260,25 @@ Dalga 2a sürümlü olaylar (v2 alanları ve yeni `task/integrated`):
     recovered:
       - { machine: toolCall, id: call_01K5T3Q8Z4X9V2M6N7P0R1S2TE, from: executing, to: interrupted }
     torn_tail: { segment: 1, bytes: 37 }
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V9
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T5
+  seq: 1
+  event_version: 2
+  timestamp: "2026-09-23T09:00:00.000Z"
+  actor: { kind: system }
+  type: session/opened
+  data:
+    writer: { name: synorch, version: "0.4.0" }
+    project_id: synorch-1a2b3c4d
+    workspace_root: /home/dev/synorch
+    cwd: /home/dev/synorch
+    platform: linux
+    git: null
+    policy_mode: autonomous
+    config_ignored:
+      - { layer: project, path: /home/dev/synorch/.synorch/config.yaml, key: adapters }
+      - { layer: project, path: /home/dev/synorch/.synorch/config.yaml, key: routes }
 - schema_version: 1
   event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2V2
   session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4

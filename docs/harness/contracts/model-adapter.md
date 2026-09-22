@@ -59,7 +59,8 @@ interface BackendSession {
 Zorunlu invariant'lar (`claude-code`):
 
 1. Kullanıcının **kendi kurduğu ve giriş yaptığı** `claude` kullanılır (`BackendProbe.executable`); Synorch token görmez, saklamaz, okumaz.
-2. Alt sürecin ortamından `BRIDGE_STRIPPED_ENV` (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`) silinir; aksi halde abonelik yerine sessizce API faturalanır.
+2. Alt sürecin ortamından `BRIDGE_STRIPPED_ENV` (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `AWS_BEARER_TOKEN_BEDROCK`, `OPENAI_API_KEY`, `CODEX_API_KEY`) ve `BRIDGE_STRIPPED_ENV_PREFIXES` (`ANTHROPIC_`, `CLAUDE_CODE_USE_`) ile başlayan her ad büyük/küçük harf duyarsız silinir (`isBridgeStrippedEnvName`); aksi halde abonelik yerine sessizce API key'e, bir bulut hesabına veya yönlendirilmiş bir endpoint'e faturalanır.
+2a. `backend_init.auth_source` `subscription` değilse tur `forbidden` ile reddedilir (`backend_init` yayımlanmaz, alt süreç durdurulur); yalnız kullanıcı yapılandırmasındaki `allow_non_subscription_auth: true` bunu kaldırır.
 3. Yerleşik araçlar kapalıdır (`--tools ""` / `tools: []`), yalnız Synorch MCP sunucusu yüklenir (`--strict-mcp-config`), kullanıcı/proje ayarları ve hook'ları yüklenmez (`--setting-sources` / `settingSources: []`), `--bare` kullanılmaz (abonelik OAuth'unu kapatır).
 4. İlk olay `backend_init`'tir; `tools` listesinde `mcp__synorch__` önekli olmayan tek bir araç varsa oturum `protocol_mismatch` ile hemen kapatılır.
 5. `ApprovalBridge.decide` Synorch köprü aracı olmayan her şeyi reddeder; köprü araçları için karar zaten ToolGateway'dedir.

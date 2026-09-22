@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { test } from "node:test";
 import { runHarnessCommand } from "../src/harness/cli/index.ts";
 import { providerError } from "../src/harness/providers/index.ts";
@@ -33,11 +31,6 @@ test("rate limit and exhausted quota: failed attempts on the same route, no sile
       { tier: "complex_worker", adapter: "alt-script", model: "alt-model" },
       { tier: "fast_worker", adapter: "alt-script", model: "alt-model" },
     ]);
-    await mkdir(path.join(sandbox.workspace, ".synorch"), { recursive: true });
-    await writeFile(
-      path.join(sandbox.workspace, ".synorch", "config.yaml"),
-      "routes:\n  - { tier: complex_worker, provider: scripted, model: primary-model, adapter: primary-script }\n",
-    );
     const orchestrator = createScriptedAdapter(
       [call("plan_propose", () => planArguments("Edit a", [{ key: "edit-a", risk: "trivial", owned: ["src/a.txt"], read: ["src/a.txt"] }])), text("planned")],
       { adapterId: "plan-script" },
@@ -53,7 +46,7 @@ test("rate limit and exhausted quota: failed attempts on the same route, no sile
     const alternative = createScriptedAdapter([text("must never be requested: no silent fallback")], { adapterId: "alt-script" });
 
     const run = capture({ cwd: sandbox.workspace });
-    const code = await runHarnessCommand(["run", "Edit a", "--mode", "jsonl"], run.io, overridesFor(sandbox, { adapters: [orchestrator, primary, alternative], limits: { maxRetries: 2 } }));
+    const code = await runHarnessCommand(["run", "Edit a", "--mode", "jsonl", "--profile", "complex_worker=scripted/primary-model@primary-script"], run.io, overridesFor(sandbox, { adapters: [orchestrator, primary, alternative], limits: { maxRetries: 2 } }));
     const { frames, problems } = parseFrames(run.stdout());
     assert.deepEqual(problems, []);
     assert.equal(code, 5, run.stderr());
@@ -69,7 +62,7 @@ test("rate limit and exhausted quota: failed attempts on the same route, no sile
     const runLog = await readSession(sandbox.home, hello.data.session_id);
     const workerRoutes = eventsOf(runLog, "route/decided").map((event) => event.data.decision).filter((decision) => decision.tier === "complex_worker");
     assert.ok(workerRoutes.length >= 2);
-    assert.ok(workerRoutes.every((decision) => decision.route.model_id === "primary-model" && decision.source === "project" && !decision.fallback.used), "the decided route is visible and never a fallback");
+    assert.ok(workerRoutes.every((decision) => decision.route.model_id === "primary-model" && decision.source === "session" && !decision.fallback.used), "the decided route is visible and never a fallback");
 
     const attempts = eventsOf(runLog, "attempt/started");
     assert.equal(attempts.length, 2, "each retry is a new attempt");

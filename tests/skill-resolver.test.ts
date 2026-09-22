@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { resolveSkillPacks } from "../src/application/skill-resolver.ts";
+import { BASE_SKILLS } from "../src/domain/skill-packs.ts";
 import type { ModuleStackFacts, StackFact } from "../src/domain/skill-packs.ts";
 
 test("selects React and TypeScript skills from explicit module evidence", () => {
@@ -17,8 +18,9 @@ test("selects React and TypeScript skills from explicit module evidence", () => 
     "react-modern",
     "frontend-craft",
   ]);
-  assert.equal(resolution.baseSkills.length, 8);
+  assert.equal(resolution.baseSkills.length, BASE_SKILLS.length);
   assert.ok(resolution.baseSkills.some((skill) => skill.id === "task-conductor"));
+  assert.ok(resolution.baseSkills.some((skill) => skill.id === "skill-creator"));
   assert.ok(resolution.baseSkills.every((skill) => skill.category === "base"));
   assert.match(resolution.technologySkills[0]?.reasons[0] ?? "", /frontend.*tsconfig\.json/);
   assert.match(resolution.technologySkills[1]?.content ?? "", /name: react-patterns/);

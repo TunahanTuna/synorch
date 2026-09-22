@@ -9,7 +9,9 @@ import { ProjectDiscoveryService } from "../src/application/project-discovery.ts
 import { StructureService } from "../src/application/structure-service.ts";
 import { manifestSchema, skillRegistrySchema } from "../src/domain/config.ts";
 import { CliError } from "../src/domain/errors.ts";
+import { BASE_SKILLS } from "../src/domain/skill-packs.ts";
 import { NodeFileSystem } from "../src/infrastructure/file-system.ts";
+import { skillCreatorStructureFiles } from "../src/templates/skill-creator-skill.ts";
 import { parseYaml } from "../src/infrastructure/serialization.ts";
 
 const temporaryDirectories: string[] = [];
@@ -122,6 +124,7 @@ test("repository sync recursively discovers deterministic frontend and backend m
   const fileSystem = new NodeFileSystem();
   const structure = new StructureService(fileSystem);
   await structure.initialize(await structure.createPlan(directory, "repository"));
+  await materializeSkillCreatorFiles(directory);
   await mkdir(path.join(directory, "frontend"), { recursive: true });
   await mkdir(path.join(directory, "backend"), { recursive: true });
   await mkdir(path.join(directory, "node_modules", "ignored"), { recursive: true });
@@ -207,7 +210,7 @@ test("repository sync recursively discovers deterministic frontend and backend m
   const recordPath = path.join(directory, `.ai/projects/${project.id}.yaml`);
   const firstRecordContent = await readFile(recordPath, "utf8");
   const registry = skillRegistrySchema.parse(parseYaml(firstRegistryContent));
-  assert.equal(registry.base_skills.length, 8);
+  assert.equal(registry.base_skills.length, BASE_SKILLS.length);
   assert.ok(registry.base_skills.some((skill) => skill.id === "task-conductor"));
   assert.deepEqual(
     registry.technology_skills.map((skill) => skill.id),
@@ -508,7 +511,7 @@ test("sync does not materialize technology skills for an unrelated stack", async
     parseYaml(await readFile(path.join(directory, project.skill_registry), "utf8")),
   );
 
-  assert.equal(registry.base_skills.length, 8);
+  assert.equal(registry.base_skills.length, BASE_SKILLS.length);
   assert.deepEqual(registry.technology_skills, []);
   assert.deepEqual(registry.selected_packs, []);
   assert.equal(
@@ -726,6 +729,18 @@ class FailingWriteFileSystem extends NodeFileSystem {
 function isLinkCapabilityError(error: unknown): boolean {
   if (!(error instanceof Error) || !("code" in error)) return false;
   return ["EACCES", "EPERM", "UNKNOWN"].includes(String(error.code));
+}
+
+/**
+ * The skill-creator base skill is canonical, but `createStructureFiles` does not emit it yet.
+ * Integration removes this helper once `skillCreatorStructureFiles` is spread into the plan.
+ */
+async function materializeSkillCreatorFiles(directory: string): Promise<void> {
+  for (const file of skillCreatorStructureFiles) {
+    const absolutePath = path.join(directory, file.relativePath);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, file.content, "utf8");
+  }
 }
 
 async function createTempDirectory(): Promise<string> {

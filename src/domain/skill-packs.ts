@@ -54,6 +54,7 @@ export const BASE_SKILLS: readonly SkillDefinition[] = [
   baseSkill("debugging"),
   baseSkill("code-review"),
   baseSkill("task-conductor"),
+  baseSkill("skill-creator"),
 ];
 
 /**

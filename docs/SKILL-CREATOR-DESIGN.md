@@ -1,6 +1,6 @@
 # Synorch Skill Creator — Design Decisions
 
-> Status: Design decided, not implemented
+> Status: First slice implemented — observation ledger, generated-skill contract and its doctor checks, the `skill-creator` base skill and the `sync` protections. Wiring into `doctor-service.ts` and `createStructureFiles` is pending integration.
 > Decided: 2026-09-22
 > Related: [Architecture](./AI-ORCHESTRATION-ARCHITECTURE.md), [Hermes research](./research/HERMES-SKILL-SYSTEM.md), [Harness vision](./FUTURE-MULTI-PROVIDER-HARNESS.md) §22 Phase 0
 > Purpose: Let the system improve itself by turning repeatedly confirmed project knowledge into durable skills, without accumulating context debt.

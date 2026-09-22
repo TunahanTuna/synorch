@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Canonical Agent Manifest v1 and Canonical Skill Contract v1: machine-checkable frontmatter for every generated agent and skill, validated by `doctor` alongside the required body sections and a numbered `Procedure`.
+- Per-layer byte ceilings enforced by `doctor` — entrypoint 2 500, constitution 1 500, core protocol 2 000, agent manifest 3 000, base skill 6 000, reference file 15 000 — with depth moved into `references/` files that load only when a procedure step needs them.
+- `skill-creator`, the ninth canonical base skill: it distills repeatedly confirmed project knowledge into a generated project skill after three confirmations from distinct tasks, or immediately on a user correction.
+- A Git-tracked observation ledger at `.ai/tasks/observations.yaml`, seeded by `init`, plus a `.ai/tasks/.gitignore` that keeps per-task working records local.
+- A generated-skill contract for `.ai/skills/project/**` enforced by `doctor`: evidence with existing in-root sources and matching digests, a `priority: skill` ceiling, a 15KB size limit, a twelve active-skill budget, confirming task ids that must exist in the ledger, and shape warnings for incident-log narration, missing triggers and unsourced claims.
+- `sync` prunes expired observations and reports how many it removed.
+
+### Changed
+
+- Agent manifests and base skills were rewritten to contract depth, with `not_for`, `inputs`, `tools`, `outputs`, `allowed_skills` and `reports` promoted from prose into frontmatter.
+- `sync` never creates, overwrites or deletes anything under `.ai/skills/project/**`, with or without `--force`.
+- Existing 0.2.x structures must be regenerated with `syn init --force` followed by `syn sync --force` to pick up the canonical contracts, the ninth base skill and the observation ledger.
+- Hand-written agent directories under `.ai/agents/` are now held to the Canonical Agent Manifest contract: `doctor` reports a missing `AGENT.md`, invalid frontmatter, a name that does not match its directory, an unknown skill reference or a missing required section as an error.
+
 ## [0.2.0] - 2026-09-21
 ### Added
 

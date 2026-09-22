@@ -145,13 +145,23 @@ No background watcher or daemon is planned. When a new repository is added, the 
 │   │   ├── SKILL.md
 │   │   └── references/severity-rubric.md
 │   ├── task-conductor/SKILL.md
+│   ├── skill-creator/
+│   │   ├── SKILL.md
+│   │   └── references/
+│   │       ├── observation-ledger.md
+│   │       ├── generated-skill-contract.md
+│   │       └── retirement.md
+│   ├── project/
+│   │   └── <generated-skill>/SKILL.md
 │   └── technology/
 │       └── <selected-skill>/SKILL.md
 ├── model-profiles/
 │   ├── openai.yaml
 │   └── claude.yaml
 ├── tasks/
-│   └── .gitkeep
+│   ├── .gitkeep
+│   ├── .gitignore
+│   └── observations.yaml
 └── providers/
     ├── codex.md
     └── claude-code.md
@@ -159,7 +169,7 @@ No background watcher or daemon is planned. When a new repository is added, the 
 
 A `references/` file is loaded only when a step in its own `SKILL.md` calls for it, so depth there costs nothing until a question needs it. Per-layer byte ceilings are enforced by `doctor` and defined in `src/domain/canonical-contracts.ts`: entrypoint 2 500, constitution 1 500, core protocol 2 000, agent manifest 3 000, base skill 6 000, reference file 15 000.
 
-Whether the records under `tasks/` are persistent or temporary, and whether they are included in Git, will be finalized later.
+Under `tasks/`, the observation ledger `observations.yaml` is persistent and Git-tracked; the per-task working records beside it are local state and are excluded by the generated `.gitignore`. `.ai/skills/project/` holds generated project skills and is never written by `sync`, even with `--force`.
 
 ## 6. The Orchestrator Model
 
@@ -691,7 +701,7 @@ test:
   confidence: verified
 ```
 
-Every project registry records the eight canonical base skills:
+Every project registry records the nine canonical base skills:
 
 - `planning`
 - `project-discovery`
@@ -701,6 +711,7 @@ Every project registry records the eight canonical base skills:
 - `debugging`
 - `code-review`
 - `task-conductor`
+- `skill-creator`
 
 Alongside these, a technology pack is selected only for matching verified evidence. The current pack → skill mappings:
 
@@ -741,7 +752,7 @@ writing technology skills, records and the workspace
 activating the skill registry last
 ```
 
-`doctor` validates end to end the workspace entries, the canonical `.ai/projects/<id>.yaml` records, the module directories, the manifest/source paths, the command `cwd` values, the skill registry schema, the canonical set of eight base skills, and the selected technology skill files. The checks cover both lexical traversal/absolute path variants and `realpath`-based symlink/junction escapes; the structure is not reported `healthy` while any missing, broken, duplicate or out-of-root reference exists.
+`doctor` validates end to end the workspace entries, the canonical `.ai/projects/<id>.yaml` records, the module directories, the manifest/source paths, the command `cwd` values, the skill registry schema, the canonical set of nine base skills, and the selected technology skill files. The checks cover both lexical traversal/absolute path variants and `realpath`-based symlink/junction escapes; the structure is not reported `healthy` while any missing, broken, duplicate or out-of-root reference exists.
 
 ## 13. Provider Compatibility and Boundaries
 
@@ -774,7 +785,7 @@ Points still to be finalized:
 1. The exact schema and file format of the canonical definitions.
 2. Whether provider outputs are produced as copies, generated files or references.
 3. How far the orchestrator's write prohibition can technically be enforced on each provider.
-4. Whether task ledger and context packet files will be included in Git.
+4. ~~Whether task ledger and context packet files will be included in Git.~~ Settled: the observation ledger is tracked, per-task working records are not.
 5. Token budgets and compression thresholds for context packets.
 6. The exact limits of the local discovery a worker may do on its own.
 7. Whether the user approval gate applies to every task or only to new top-level work.
@@ -839,13 +850,13 @@ The system should be considered successful if:
 - `init` preserves existing differing files by default; it updates them only with an explicit `--force`.
 - `sync` records repository/project facts with their evidence sources on manual trigger.
 - `doctor` validates the canonical structure, the model profiles, session confirmation and the silent-fallback prohibition.
-- The generated structure includes the constitution, eight core protocols, five agent roles, eight canonical base skills including Task Conductor, a curated skill catalog, OpenAI/Claude model profiles, and the context/completion packet schemas.
+- The generated structure includes the constitution, eight core protocols, five agent roles, nine canonical base skills including Task Conductor and Skill Creator, a curated skill catalog, OpenAI/Claude model profiles, and the context/completion packet schemas.
 
 ### 2026-09-20 — Recursive discovery, the skill registry and path safety
 
 - Manifest-based modules inside the repository are discovered recursively; nested `src`/test source trees are scanned with separate safety limits.
 - Language, framework, package manager, build tool and dependency selections are made only through verified evidence carrying a source path.
-- The eight base skills are kept canonical and complete in every project registry; technology skills are activated only with matching pack evidence.
+- The nine base skills are kept canonical and complete in every project registry; technology skills are activated only with matching pack evidence.
 - `sync` does not overwrite modified generated technology skills without an explicit `--force`, and writes the active skill registry last, after the prerequisite outputs.
 - `doctor` validates reference integrity from the workspace down to the skill file, the canonical base set, module/command paths, and lexical + symlink/junction root containment rules.
 
@@ -904,3 +915,11 @@ The system should be considered successful if:
 - `doctor` treats contract violations as errors and size ceiling overruns as warnings.
 - No new agent roles are introduced; five roles remain sufficient and the work is depth, not breadth.
 - Canonical Agent Manifest v1 and Canonical Skill Contract v1 are shared prerequisites for both this work and the Skill Creator, and are built once before either.
+
+### 2026-09-22 — Integration of Skill Creator and canonical content depth
+
+- Canonical Agent Manifest v1 and Canonical Skill Contract v1 shipped as one shared module, and the generated-skill contract now extends the shared skill schema instead of restating it; the only overrides tighten it, requiring an explicit `priority: skill` and provably relative reference paths.
+- `skill-creator` shipped as the ninth canonical base skill and is emitted by the ordinary base-skill path, with its three reference documents and the seeded `.ai/tasks/observations.yaml` and `.ai/tasks/.gitignore`.
+- `doctor` now runs the generated-skill namespace check after the canonical contract check, so one `syn doctor` run covers contracts, per-layer size ceilings, the evidence and digest chain, the twelve-skill budget and the priority ceiling.
+- Both contracts read frontmatter through the single shared parser in `src/infrastructure/frontmatter.ts`, while keeping their own diagnostic vocabularies (`contract.*` versus `generated.*`).
+- `skill-creator` was added to the orchestrator, implementer and reviewer manifests: the orchestrator records observations and proposes, the implementer authors, the reviewer verifies. The orchestrator manifest remains inside the 3 000-byte ceiling.

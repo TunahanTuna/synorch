@@ -189,9 +189,9 @@ It parses JavaScript/TypeScript manifests plus Maven and Gradle definitions, and
 
 ### Skills load just in time
 
-Every project registry gets the same eight canonical base skills:
+Every project registry gets the same nine canonical base skills:
 
-`planning` · `project-discovery` · `codebase-exploration` · `implementation` · `verification` · `debugging` · `code-review` · `task-conductor`
+`planning` · `project-discovery` · `codebase-exploration` · `implementation` · `verification` · `debugging` · `code-review` · `task-conductor` · `skill-creator`
 
 Technology skills are added **only** when matching verified evidence exists:
 
@@ -274,12 +274,15 @@ syn doctor  [--target <path>] [--json]
 │   ├── <canonical base skills>/SKILL.md      # Canonical Skill Contract v1
 │   │   └── references/*.md                   # depth loaded only when a step needs it
 │   ├── technology/<selected>/SKILL.md
+│   ├── project/<generated>/SKILL.md   # earned project skills; sync never writes here
 │   ├── library/ingenium/**            # bundled, on-demand
 │   └── catalog.yaml                   # provenance, license, activation mode
 ├── model-profiles/
 │   ├── openai.yaml
 │   └── claude.yaml
 ├── tasks/                        # plans, context packets, decision log
+│   ├── observations.yaml         # the Git-tracked observation ledger
+│   └── .gitignore                # per-task working records stay local
 └── providers/
     ├── codex.md
     └── claude-code.md

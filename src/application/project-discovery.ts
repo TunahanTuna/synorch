@@ -9,6 +9,11 @@ import type {
 } from "../domain/config.ts";
 import { workspaceSchema } from "../domain/config.ts";
 import { CliError } from "../domain/errors.ts";
+import {
+  OBSERVATION_LEDGER_PATH,
+  observationLedgerSchema,
+  pruneExpiredObservations,
+} from "../domain/observation-ledger.ts";
 import type { FileSystem } from "../infrastructure/file-system.ts";
 import { loadBundledSkillPool } from "../infrastructure/bundled-skill-library.ts";
 import { parseYaml, stringifyYaml } from "../infrastructure/serialization.ts";
@@ -62,6 +67,20 @@ const MAX_SOURCE_TREE_DIRECTORIES = 2_000;
 export interface SyncResult {
   readonly projects: readonly ProjectRecord[];
   readonly writtenFiles: readonly string[];
+  /** Observations removed from the ledger because they expired; 0 when there is no ledger. */
+  readonly prunedObservations: number;
+}
+
+/**
+ * Paths `sync` must never create, overwrite or delete, with or without `--force`. Generated
+ * project skills are authored by a worker and approved by the user, so they are not generated
+ * output and no regeneration may touch them.
+ */
+const PROTECTED_WRITE_PREFIXES = [".ai/skills/project"] as const;
+
+interface LedgerPruneOutcome {
+  readonly content: string;
+  readonly expired: readonly string[];
 }
 
 export interface SyncOptions {
@@ -193,8 +212,21 @@ export class ProjectDiscoveryService {
     }
     await resolveSafeGeneratedPath(this.fileSystem, root, ".ai/workspace.yaml");
 
+    const ledgerPrune = await this.pruneObservationLedger(root, new Date());
+
     const writtenFiles: string[] = [];
     const writtenFileSet = new Set<string>();
+    if (ledgerPrune !== undefined) {
+      await writeIfChanged(
+        this.fileSystem,
+        root,
+        resolveWithinRoot(root, OBSERVATION_LEDGER_PATH),
+        ledgerPrune.content,
+        OBSERVATION_LEDGER_PATH,
+        writtenFiles,
+        writtenFileSet,
+      );
+    }
     for (const skill of skillWrites) {
       await assertSafeGeneratedPath(
         this.fileSystem,
@@ -248,7 +280,46 @@ export class ProjectDiscoveryService {
         writtenFileSet,
       );
     }
-    return { projects, writtenFiles };
+    return {
+      projects,
+      writtenFiles,
+      prunedObservations: ledgerPrune?.expired.length ?? 0,
+    };
+  }
+
+  /**
+   * Prune expired observations from the ledger. The ledger is optional: a project that has never
+   * recorded one syncs exactly as before. Returns undefined when there is nothing to rewrite.
+   */
+  private async pruneObservationLedger(
+    root: string,
+    now: Date,
+  ): Promise<LedgerPruneOutcome | undefined> {
+    const absolutePath = await resolveSafeGeneratedPath(
+      this.fileSystem,
+      root,
+      OBSERVATION_LEDGER_PATH,
+    );
+    if (!(await this.fileSystem.exists(absolutePath))) return undefined;
+
+    let parsed: unknown;
+    try {
+      parsed = parseYaml(await this.fileSystem.readText(absolutePath));
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new CliError(`Invalid observation ledger at ${OBSERVATION_LEDGER_PATH}: ${detail}`, 2);
+    }
+    const ledger = observationLedgerSchema.safeParse(parsed);
+    if (!ledger.success) {
+      throw new CliError(
+        `Invalid observation ledger at ${OBSERVATION_LEDGER_PATH}: ${ledger.error.message}`,
+        2,
+      );
+    }
+
+    const pruned = pruneExpiredObservations(ledger.data, now);
+    if (pruned.expired.length === 0) return undefined;
+    return { content: stringifyYaml(pruned.ledger), expired: pruned.expired };
   }
 
   private async readPreviousDetectedAt(
@@ -930,12 +1001,34 @@ function resolveWithinRoot(root: string, relativePath: string): string {
   if (path.isAbsolute(relativePath)) {
     throw new CliError(`Generated path must be relative: ${relativePath}`, 2);
   }
+  assertWritablePath(relativePath);
   const resolved = path.resolve(root, relativePath);
   const boundary = path.relative(root, resolved);
   if (boundary === ".." || boundary.startsWith(`..${path.sep}`) || path.isAbsolute(boundary)) {
     throw new CliError(`Generated path escapes the target directory: ${relativePath}`, 2);
   }
   return resolved;
+}
+
+/**
+ * The single choke point for the generated-skill namespace: every sync write resolves its path
+ * here, so no regeneration path — including `--force` — can reach `.ai/skills/project/**`.
+ */
+function assertWritablePath(relativePath: string): void {
+  const normalized = relativePath
+    .replaceAll("\\", "/")
+    .replace(/\/+/g, "/")
+    .replace(/^(?:\.\/)+/, "")
+    .replace(/\/$/, "")
+    .toLowerCase();
+  for (const prefix of PROTECTED_WRITE_PREFIXES) {
+    if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
+      throw new CliError(
+        `Sync must never write inside the generated skill namespace: ${relativePath}`,
+        2,
+      );
+    }
+  }
 }
 
 async function resolveSafeGeneratedPath(

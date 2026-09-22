@@ -19,6 +19,8 @@ Bu dizin, Synorch'un gelecekte kendi CLI agent harness'ını geliştirmek için 
 
 Kaynak incelemeleri: [Oh My Pi](./research/oh-my-pi.md), [DeepSeek Harness](./research/deepseek-harness.md), [Claude Code](./research/claude-code.md).
 
+Hafıza ve kullanıcı odaklı bilgi haritası araştırması: [Obsidian ile yerel hafıza](./obsidian/README.md). Bu belge, oturum olay günlüğü ve orkestrasyon bağlamına bağlanan ayrı bir tasarım önerisidir.
+
 ## Bilgi statüsü
 
 - **Doğrulanmış mevcut durum:** Bu deponun dosyaları ve komutlarıyla kanıtlanır.

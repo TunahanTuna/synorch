@@ -240,7 +240,27 @@ budget: { max_wall_time_seconds: 1800, max_cost_usd: 5 }                    # ka
 
 ## 13. Oturum içi komutlar (`syn agent`)
 
-`/plan` (son plan, digest, onay), `/tasks` (DAG, durum, sahiplik), `/context` (son isteğin blokları ve token tahmini, son compaction), `/permissions` (rol başına etkin policy, onay sayısı), `/model` (yapılandırılmış ve karar verilmiş route'lar), `/diff` (bu oturumda integrate edilen dosyalar), `/evidence` (attempt başına kriter → kanıt, review kararları), `/cancel`, `/memory` (vault, bekleyen öneri), `/help`, `/exit`. Hepsi yalnız kayıtlı olayları okur; durum değiştiren tek komut `/cancel`'dır.
+**Konuşma (`syn agent`, ADR-21, K1-U2).** Tek kayıt `src/harness/cli/slash-commands.ts` (`CONVERSATION_COMMANDS`: ad, açıklama, argüman ipucu, `whileBusy`, handler); `/help` ve TUI paleti (`controls.setCommands`, `/mouse` ve `/exit` renderer'da kalır) buradan beslenir.
+
+| Komut | Davranış |
+| --- | --- |
+| `/plan [hedef]` | Plan modu (Shift+Tab/Alt+M aynı): session policy'si `workspace-write`/`exec`/`external-write` `deny` (katman `task`, kaynak `plan-mode`); yazma/komut araçları modele gösterilmez. Hedef verilirse plan modunda tur açar. "go/evet/başla" veya `/go` modu kapatır. |
+| `/go [workers]` | Planı burada doğrudan ya da `orchestrate` aracıyla worker'larla uygular. |
+| `/workers <hedef>` | Ana ajandan `orchestrate` çağırmasını ister. |
+| `/model [tier] [--save]` | TUI'da model seçici (`openModelPicker`); argümanla bu konuşmanın route'unu değiştirir; `--save` yalnız onayla `<home>/session-model.json`'a yazar. |
+| `/review [odak]` | Commit'lenmemiş diff'i taze bağlamlı ayrı bir oturumda salt okuma reviewer'a verir (reviewer/complex_worker route'u); "advisory, not harness-verified" etiketli. |
+| `/commit [mesaj]` | Değişiklik özeti + önerilen mesaj (model, yoksa sezgisel) + eylem kartı; yalnız insan onayıyla `git add -A && git commit`. |
+| `/undo`, `/allow`, `/trust` | K0 davranışı. |
+| `/usage`, `/cost` | Oturum/gün istek, girdi/çıktı/cache token, sağlayıcı/model/tier, kota % (header varsa), API key için `~$` tahmini; günlük toplam `<home>/usage/usage.json` (90 gün). `/usage` U3 `UsageView`'dir. |
+| `/evidence`, `/why [araç]`, `/graph` | U3 `EvidenceView` / `WhyView` / plan grafiği (worker run'ları, son policy kararı ve onu değiştiren komutlar). |
+| `/compact [odak]`, `/context`, `/diff`, `/tasks`, `/permissions`, `/memory`, `/log` | Elle compaction (summary-v1), okuma raporları. |
+| `/clear`, `/resume [n\|id]` | Yeni konuşma / son konuşmalar listesi ve geçiş; resume ve `--continue` 3 satırlık "where we were / since then / next" kartı basar. |
+
+Çalışırken yazılan mesaj: worker'lar sürüyorsa `Coordinator.steer`, tur sürüyorsa `driver.steer` (sonraki adım sınırında okunur; tur bitmişse `drainSteers` ile yeni tura taşınır). Esc turu keser; worker'lar sürerken ilk Esc uyarır, ikincisi durdurur. `@yol` ve renderer eklentileri (U1 `Attachment`) digest'li ve boyut sınırlı (dosya 64 KiB, toplam 192 KiB) mesaja eklenir; görüntüler metin kanalı nedeniyle henüz gönderilmez (net uyarı).
+
+**`orchestrate` aracı** (yalnız `session`, `cli/orchestrate-tool.ts`): `{goal, reason, brief?}`; mevcut coordinator'ı turun içinde çalıştırır, plan bloğu ve canlı pano (`setBoard`, `OrchestrationView`) gösterir, ≤ 4 KiB sonuç bloğu döner. Plan modunda reddedilir.
+
+**Legacy (`syn agent --legacy`).** `/plan` (son plan, digest, onay), `/tasks`, `/context`, `/permissions`, `/model`, `/diff`, `/evidence`, `/cancel`, `/memory`, `/help`, `/exit`; yalnız kayıtlı olayları okur.
 
 ## 14. Uçtan uca senaryolar (verification.md Seviye 3)
 

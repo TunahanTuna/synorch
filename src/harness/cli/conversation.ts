@@ -2,20 +2,28 @@ import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import {
+  completionPacketSchema,
   createId,
+  digestOf,
+  effectivePolicySchema,
   EVENT_VERSIONS,
   EXIT_CODES,
   exitCodeFor,
   HarnessError,
+  MODEL_TIERS,
   WORKSPACE_UNTRUSTED_CODE,
   workspaceDigest,
   type AgentDriver,
+  type Attachment,
   type BlobRef,
+  type CompletionPacket,
   type Coordinator,
   type Digest,
   type EffectivePolicy,
   type EventStore,
   type HarnessErrorInfo,
+  type ModelRequest,
+  type ModelTier,
   type RenderEvent,
   type RouteDecision,
   type RouteRule,
@@ -24,32 +32,57 @@ import {
   type SessionEventOf,
   type SessionHeaderView,
   type SessionId,
+  type ModelPickerEntry,
   type ToolCallRequest,
+  type ToolExecutionContext,
   type ToolGateway,
+  type ToolResult,
   type TurnId,
 } from "../contracts/index.ts";
+import type { CriterionView, EvidenceView, WhyView } from "../contracts/views.ts";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
-import { DEFAULT_CONTEXT_WINDOW } from "../context/index.ts";
+import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageTokens, reconstructHistory } from "../context/index.ts";
 import { evaluateExecAllowlist } from "../policy/index.ts";
 import { describeEvent, formatHarnessError, GLYPH_SETS, patchPaths, selectGlyphs, type GlyphSet } from "../tui/index.ts";
 import type { ParsedCommand } from "./args.ts";
+import { mayContainImage, resolveAttachments } from "./attachments.ts";
 import { profileHintsFor } from "./canonical.ts";
 import { createCommandGrantStore, normalizeGrant, type CommandGrantStore } from "./command-grants.ts";
+import type { OrchestrateInput } from "./orchestrate-tool.ts";
+import { OrchestrationTracker } from "./orchestration-view.ts";
 import { failureInfo } from "./outcome.ts";
 import { createSessionRenderer, type SessionRenderer } from "./renderers.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
 import type { SessionIO } from "./session.ts";
-import { handleSlashCommand } from "./slash-commands.ts";
+import { commitAll, commitsSince, uncommittedChanges, uncommittedDiff } from "./session-git.ts";
+import {
+  contextReport,
+  conversationPaletteEntries,
+  evidenceReport,
+  findConversationCommand,
+  memoryReport,
+  permissionsReport,
+  tasksReport,
+  type ConversationCommandHost,
+} from "./slash-commands.ts";
 import { resolveTerminalSettings, streamHasColors } from "./terminal.ts";
 import { promptTrustForCommand } from "./trust.ts";
+import { UsageLedger } from "./usage-stats.ts";
 
 /**
  * `syn agent`: the conversation-first main agent (ADR-21). Every user message is one turn of the
  * `session` role on the existing `AgentDriver`: no pre-flight model call, no plan, no run. The
  * agent answers, reads, edits the main tree and runs commands through the same tool gateway and
  * rails as every role; each edit leaves a checkpoint (`/undo`), workspace trust is asked at the
- * first command that runs repository code, and `/allow` extends the exec allowlist. `/plan <goal>`
- * hands a large goal to the existing coordinator (plan → workers → independent review).
+ * first command that runs repository code, and `/allow` extends the exec allowlist.
+ *
+ * K1 session features: a message typed while the agent works steers the current turn at its next
+ * step boundary (and the coordinator while workers run); Esc interrupts (twice stops workers);
+ * plan mode (`/plan`, Shift+Tab) narrows the policy to reading; the `orchestrate` tool runs the
+ * existing coordinator inside the turn and projects a live worker board; one command registry
+ * (`slash-commands.ts`) feeds `/help` and the renderer's palette; usage is aggregated for `/usage`,
+ * `/cost` and the footer; `@path` and renderer attachments are inlined; resume shows where the
+ * conversation was and what changed since.
  */
 
 type AgentCommand = Extract<ParsedCommand, { kind: "agent" }>;
@@ -58,21 +91,11 @@ const MAX_STEPS = 50;
 const CONVERSATION_TITLE = "chat: ";
 const WRITE_TOOLS = new Set(["apply_patch", "write_file"]);
 const REPLAY_EXCHANGES = 3;
-
-const HELP_LINES = [
-  "/undo            revert the last edit Synorch made (files only; command side effects stay)",
-  "/allow <prefix>  let Synorch run commands starting with <prefix> here (/allow lists them)",
-  "/trust           trust this folder so build/test commands may run",
-  "/plan <goal>     plan a large goal with parallel workers and independent review",
-  "/diff            files changed by Synorch in this conversation",
-  "/context         what the model saw in its last request",
-  "/permissions     what Synorch may do here",
-  "/model           which model each role uses",
-  "/log [n]         raw event log of this conversation (debug)",
-  "/cancel          stop the current work (the conversation stays resumable)",
-  "/help            this list · Esc interrupts · Ctrl+O tool details · Ctrl+C twice exits",
-  "/exit            leave (resume with syn agent --continue)",
-];
+const REVIEW_DIFF_LIMIT = 48 * 1024;
+const ESC_ARM_MS = 3_000;
+const GO_WORDS = /^(go|go ahead|do it|proceed|yes|ok|okay|ship it|start|evet|başla|basla|yap|devam|tamam)[.! ]*$/iu;
+const SESSION_MODEL_FILE = "session-model.json";
+const ORCHESTRATION_SESSION = /session (ses_[0-9A-HJKMNP-TV-Z]{26})/g;
 
 function linked(outer: AbortSignal): AbortController {
   const controller = new AbortController();
@@ -94,9 +117,19 @@ function strings(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? (value as string[]) : undefined;
 }
 
-function sessionRouteRule(runtime: Runtime): RouteRule | undefined {
+function snippet(text: string, length: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= length ? flat : `${flat.slice(0, length - 1)}…`;
+}
+
+function sessionRouteRule(runtime: Runtime, preferred?: ModelTier): RouteRule | undefined {
   const rules = runtime.config.router.rules;
-  return rules.find((rule) => rule.tier === "session" && (rule.role === undefined || rule.role === "session")) ?? rules.find((rule) => rule.tier === "orchestrator" && (rule.role === undefined || rule.role === "session"));
+  const fits = (rule: RouteRule, tier: ModelTier): boolean => rule.tier === tier && (rule.role === undefined || rule.role === "session");
+  if (preferred !== undefined) {
+    const chosen = rules.find((rule) => fits(rule, preferred));
+    if (chosen !== undefined) return chosen;
+  }
+  return rules.find((rule) => fits(rule, "session")) ?? rules.find((rule) => fits(rule, "orchestrator"));
 }
 
 function missingRoute(runtime: Runtime): HarnessError {
@@ -110,9 +143,32 @@ function missingRoute(runtime: Runtime): HarnessError {
   });
 }
 
+/** The conversation model the user saved with `/model <tier> --save` (a preference, not a route). */
+async function savedSessionTier(home: string): Promise<ModelTier | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(path.join(home, SESSION_MODEL_FILE), "utf8")) as { tier?: unknown };
+    return (MODEL_TIERS as readonly string[]).includes(String(parsed.tier)) ? (parsed.tier as ModelTier) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Plan mode (ADR-21 D2): the session policy with workspace writes, commands and external writes denied. */
+export function planModePolicy(base: EffectivePolicy): EffectivePolicy {
+  return effectivePolicySchema.parse({
+    ...base,
+    effects: { ...base.effects, "workspace-write": "deny", exec: "deny", "external-write": "deny" },
+    layers: [...base.layers, { layer: "task", source: "plan-mode", digest: digestOf({ plan_mode: true }) }],
+  });
+}
+
 /** `ask_user` while the TUI reads input concurrently: the next typed message answers the question. */
 class QuestionDesk {
   private pending: ((answer: string) => void) | undefined;
+
+  public get waiting(): boolean {
+    return this.pending !== undefined;
+  }
 
   public ask(signal: AbortSignal): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -147,11 +203,23 @@ interface CapturedFile {
   readonly before: Buffer | undefined;
 }
 
+interface ActiveOrchestration {
+  readonly tracker: OrchestrationTracker;
+  readonly coordinator: Coordinator;
+  readonly controller: AbortController;
+  disarm: NodeJS.Timeout | undefined;
+}
+
+interface QueuedMessage {
+  readonly text: string;
+  readonly attachments: readonly Attachment[];
+}
+
 export async function conversationCommand(parsed: AgentCommand, io: SessionIO, overrides: RuntimeOverrides): Promise<number> {
   return new Conversation(parsed, io, overrides).run();
 }
 
-class Conversation {
+class Conversation implements ConversationCommandHost {
   private readonly parsed: AgentCommand;
   private readonly io: SessionIO;
   private readonly overrides: RuntimeOverrides;
@@ -159,19 +227,29 @@ class Conversation {
   private readonly desk = new QuestionDesk();
   private readonly requests = new Set<string>();
   private readonly pendingNotes: string[] = [];
+  private readonly queued: QueuedMessage[] = [];
   private runtime!: Runtime;
   private renderer!: SessionRenderer;
+  private usageLedger: UsageLedger | undefined;
   private glyphs: GlyphSet = GLYPH_SETS.ascii;
   private grants: CommandGrantStore | undefined;
   private grantList: readonly string[] = [];
   private routePromise: Promise<RouteDecision> | undefined;
   private routeRecorded = false;
+  private sessionTier: ModelTier | undefined;
+  private currentModel: string | undefined;
   private sessionId: SessionId | undefined;
   private log: EventStore | undefined;
   private driver: AgentDriver | undefined;
   private coordinator: Coordinator | undefined;
   private policyCache: EffectivePolicy | undefined;
   private active: AbortController | undefined;
+  private turnRunning = false;
+  private orchestration: ActiveOrchestration | undefined;
+  private readonly orchestratedSessions: SessionId[] = [];
+  private planOn = false;
+  private startedAt = Date.now();
+  private lastTracker: OrchestrationTracker | undefined;
   private turnId: TurnId | undefined;
   private trustAsked = false;
   private exiting = false;
@@ -222,10 +300,11 @@ class Conversation {
       wantsInput: true,
       interactive: io.stdinIsTTY,
       fallbackSessionId: undefined,
-      onInterrupt: () => this.active?.abort(),
+      onInterrupt: () => this.interrupt(),
       onExit: () => {
         this.exiting = true;
         this.active?.abort();
+        this.orchestration?.controller.abort();
         this.outer.abort();
       },
       view: "conversation",
@@ -234,20 +313,35 @@ class Conversation {
     });
     if (runtime === undefined || failure !== undefined) return this.fail(failure ?? failureInfo(new Error("runtime unavailable")));
     this.runtime = runtime;
-    const rule = sessionRouteRule(runtime);
+    this.sessionTier = await savedSessionTier(runtime.home);
+    const rule = sessionRouteRule(runtime, this.sessionTier);
     if (rule === undefined) return this.fail(failureInfo(missingRoute(runtime)));
+    this.sessionTier = rule.tier;
+    this.currentModel = rule.route.model_id;
     // Resolving the route may probe the provider's capabilities: it runs while the user types.
     this.routePromise = runtime.router.resolve({ tier: rule.tier, role: "session" }, this.outer.signal);
     this.routePromise.catch(() => undefined);
 
-    const unsubscribe = runtime.subscribe((event) => this.forward(event));
+    const ledger = new UsageLedger(runtime.home);
+    this.usageLedger = ledger;
+    const unsubscribe = runtime.subscribe((event) => {
+      if (event.kind === "session-event") ledger.observe(event.event);
+      this.forward(event);
+    });
     const unbind = io.stdinIsTTY && this.renderer.input !== undefined ? runtime.bindUserPrompt((question, options, signal) => this.askUser(question, options, signal)) : () => undefined;
+    runtime.orchestrate.set((input, context) => this.runOrchestration(input, context));
+    let unbindControls: () => void = () => undefined;
+    this.startedAt = Date.now();
     try {
       this.grants = createCommandGrantStore(runtime.home, runtime.trust.state().root);
       this.grantList = await this.grants.list();
       const resumed = await this.openResumed();
       await this.renderer.start(this.header(rule));
-      if (resumed !== undefined) this.showResumed(resumed);
+      const controls = this.renderer.controls;
+      controls?.setCommands(conversationPaletteEntries());
+      // Shift+Tab / Alt+M in the renderer; the session applies the policy narrowing (ADR-21 D2).
+      unbindControls = controls?.onPlanModeChange((on) => this.setPlanMode(on)) ?? (() => undefined);
+      if (resumed !== undefined) await this.showResumed(resumed);
       if (this.debug) this.note("info", `harness: runtime ready in ${runtimeMs} ms`);
       // Credential pre-resolution (keychain, token refresh) happens in the background, never before the editor.
       void this.routePromise.then((decision) => runtime.credentials(decision.route, this.outer.signal)).catch(() => undefined);
@@ -264,8 +358,11 @@ class Conversation {
     } catch (error) {
       return await this.fail(failureInfo(error));
     } finally {
+      unbindControls();
+      runtime.orchestrate.set(undefined);
       unbind();
       unsubscribe();
+      await ledger.flush().catch(() => undefined);
       await this.log?.close().catch(() => undefined);
     }
   }
@@ -296,10 +393,19 @@ class Conversation {
     this.renderer.render({ kind: "notice", level, message });
   }
 
-  /** Only this conversation's events and model streams reach the view; worker and coordinator traffic stays out (K1 adds the board). */
+  public print(lines: readonly string[]): void {
+    for (const line of lines) this.note("info", line);
+  }
+
+  /** Only this conversation's events and model streams reach the view; worker and coordinator traffic feeds the board instead. */
   private forward(event: RenderEvent): void {
     if (event.kind === "session-event") {
       const recorded = event.event;
+      const orchestration = this.orchestration;
+      if (orchestration !== undefined && recorded.session_id !== this.sessionId) {
+        this.observeOrchestration(orchestration, recorded);
+        return;
+      }
       if (recorded.session_id !== this.sessionId) return;
       if (recorded.type === "turn/started") this.turnId = recorded.data.turn_id;
       if (recorded.type === "model/request_prepared") {
@@ -316,20 +422,22 @@ class Conversation {
       if (this.requests.has(event.requestId)) this.renderer.render(event);
       return;
     }
+    // Coordinator notices while workers run stay on the board; everything else is shown.
+    if (event.kind === "notice" && this.orchestration !== undefined && event.level === "info") return;
     this.renderer.render(event);
   }
 
   // ---- sessions -------------------------------------------------------------------------------
 
-  private async latestConversation(): Promise<SessionId | undefined> {
+  private async conversations(): Promise<{ readonly sessionId: SessionId; readonly title: string; readonly at: string }[]> {
     const summaries = await this.runtime.sessions.list(this.runtime.projectId);
-    const chats = summaries
+    return summaries
       .filter((summary) => summary.manifest.title?.startsWith(CONVERSATION_TITLE) === true && !summary.locked)
-      .sort((left, right) => (right.lastEventAt ?? right.manifest.created_at).localeCompare(left.lastEventAt ?? left.manifest.created_at));
-    return chats[0]?.manifest.session_id;
+      .sort((left, right) => (right.lastEventAt ?? right.manifest.created_at).localeCompare(left.lastEventAt ?? left.manifest.created_at))
+      .map((summary) => ({ sessionId: summary.manifest.session_id, title: (summary.manifest.title ?? "").slice(CONVERSATION_TITLE.length), at: summary.lastEventAt ?? summary.manifest.created_at }));
   }
 
-  private async openResumed(): Promise<{ readonly events: readonly SessionEvent[]; readonly createdAt: string | undefined } | undefined> {
+  private async openResumed(): Promise<readonly SessionEvent[] | undefined> {
     let sessionId = this.parsed.resume;
     if (sessionId === undefined && this.parsed.fork !== undefined) {
       const source = this.parsed.fork.sessionId;
@@ -342,29 +450,72 @@ class Conversation {
       sessionId = forked.sessionId;
       await forked.close();
     }
-    if (sessionId === undefined && this.parsed.continue) {
-      sessionId = await this.latestConversation();
-      if (sessionId === undefined) this.pendingNotes.length = 0;
-    }
+    if (sessionId === undefined && this.parsed.continue) sessionId = (await this.conversations())[0]?.sessionId;
     if (sessionId === undefined) return undefined;
+    return this.openSession(sessionId);
+  }
+
+  private async openSession(sessionId: SessionId): Promise<readonly SessionEvent[]> {
     this.sessionId = sessionId;
     await this.runtime.recover(sessionId);
     this.log = await this.runtime.sessions.openForWrite(sessionId);
+    this.driver = undefined;
     const events: SessionEvent[] = [];
     for await (const item of this.log.read()) if (item.status === "ok") events.push(item.event);
-    this.routeRecorded = events.some((event) => event.type === "route/decided");
-    return { events, createdAt: events[0]?.timestamp };
+    this.routeRecorded = false;
+    return events;
   }
 
-  private showResumed(resumed: { readonly events: readonly SessionEvent[]; readonly createdAt: string | undefined }): void {
-    const events = resumed.events;
+  /** The resume card (UX-06): the replayed tail, then where we were, what changed since, and the next step. */
+  private async showResumed(events: readonly SessionEvent[]): Promise<void> {
+    const g = this.glyphs;
     const users = events.flatMap((event, index) => (event.type === "message/recorded" && event.data.role === "user" ? [index] : []));
     const last = events.at(-1);
-    const ago = last === undefined ? "" : ` ${this.glyphs.sep} ${relativeTime(Date.parse(last.timestamp))}`;
+    const ago = last === undefined ? "" : ` ${g.sep} ${relativeTime(Date.parse(last.timestamp))}`;
     const firstShown = users.length > REPLAY_EXCHANGES ? (users[users.length - REPLAY_EXCHANGES] ?? 0) : 0;
     const folded = users.length > REPLAY_EXCHANGES ? users.length - REPLAY_EXCHANGES : 0;
-    this.note("info", `${this.glyphs.resume} Resumed${ago} ${this.glyphs.sep} ${users.length} message${users.length === 1 ? "" : "s"}${folded === 0 ? "" : ` ${this.glyphs.sep} ${folded} earlier not shown`}`);
+    this.note("info", `${g.resume} Resumed${ago} ${g.sep} ${users.length} message${users.length === 1 ? "" : "s"}${folded === 0 ? "" : ` ${g.sep} ${folded} earlier not shown`}`);
     this.renderer.replay?.(events.slice(firstShown));
+    for (const line of await this.continuity(events)) this.note("info", line);
+  }
+
+  private async continuity(events: readonly SessionEvent[]): Promise<string[]> {
+    const texts = (role: "user" | "assistant"): string[] =>
+      events.flatMap((event) => {
+        if (event.type !== "message/recorded" || event.data.role !== role || event.data.message === undefined) return [];
+        const text = event.data.message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(" ");
+        return text.trim() === "" ? [] : [text.replace(/^\[Synorch note:[^\]]*\]\s*/u, "").split("<synorch-attachments>")[0] ?? ""];
+      });
+    const lastUser = texts("user").at(-1);
+    const lastAnswer = texts("assistant").at(-1);
+    const where = lastUser === undefined ? "nothing asked yet" : `"${snippet(lastUser, 70)}"${lastAnswer === undefined ? "" : ` → ${snippet(lastAnswer, 80)}`}`;
+
+    const changes: string[] = [];
+    const restored = new Set(events.flatMap((event) => (event.type === "checkpoint/restored" ? [event.data.checkpoint_seq] : [])));
+    const latestAfter = new Map<string, Digest | null>();
+    for (const event of events) if (event.type === "checkpoint/recorded" && !restored.has(event.seq)) for (const file of event.data.files) latestAfter.set(file.path, file.after);
+    const touched: string[] = [];
+    for (const [file, after] of latestAfter) {
+      const place = this.inside(file);
+      if (place === undefined) continue;
+      const current = await readOptional(place.absolute).catch(() => undefined);
+      const digest = current === undefined ? null : workspaceDigest(new Uint8Array(current));
+      if (digest !== after) touched.push(file);
+    }
+    if (touched.length > 0) changes.push(`${touched.slice(0, 3).join(", ")}${touched.length > 3 ? ` +${touched.length - 3}` : ""} changed outside Synorch`);
+    const lastAt = events.at(-1)?.timestamp;
+    if (lastAt !== undefined) {
+      const commits = await commitsSince(this.runtime.workspaceRoot, lastAt).catch(() => []);
+      if (commits.length > 0) changes.push(`${commits.length} commit${commits.length === 1 ? "" : "s"} (latest: ${snippet(commits[0] ?? "", 50)})`);
+    }
+    const lastTurn = [...events].reverse().find((event): event is SessionEventOf<"turn/ended"> => event.type === "turn/ended");
+    const next =
+      lastTurn === undefined || lastTurn.data.outcome === "completed"
+        ? "continue where we left off, or ask something new"
+        : `the last turn ended ${lastTurn.data.outcome.replaceAll("_", " ")}; say "continue" to pick it up`;
+    if (lastTurn !== undefined && lastTurn.data.outcome !== "completed") this.pendingNotes.push(`the previous turn ended ${lastTurn.data.outcome}; the conversation was resumed.`);
+    if (touched.length > 0) this.pendingNotes.push(`since the last turn, ${touched.join(", ")} changed outside Synorch (re-read before editing).`);
+    return [`  Where we were   ${where}`, `  Since then      ${changes.length === 0 ? "no changes to files Synorch edited, no new commits" : changes.join(" · ")}`, `  Next            ${next}`];
   }
 
   private async ensureLog(firstMessage: string): Promise<EventStore> {
@@ -402,9 +553,13 @@ class Conversation {
 
   // ---- policy, trust, checkpoints --------------------------------------------------------------
 
-  private policy(): EffectivePolicy {
+  private basePolicy(): EffectivePolicy {
     this.policyCache ??= this.runtime.sessionPolicy(this.grantList);
     return this.policyCache;
+  }
+
+  private policy(): EffectivePolicy {
+    return this.planOn ? planModePolicy(this.basePolicy()) : this.basePolicy();
   }
 
   private ensureDriver(log: EventStore): AgentDriver {
@@ -414,17 +569,21 @@ class Conversation {
 
   /**
    * The conversation's decorations around the one gateway: the trust question at the first command
-   * that runs repository code, the current policy (a trust or /allow decision applies at once), and
-   * a checkpoint of every successful edit. Policy, rails and audit stay in the gateway.
+   * that runs repository code, the current policy (a trust, /allow or plan-mode change applies at
+   * once), and a checkpoint of every successful edit. Policy, rails and audit stay in the gateway.
    */
   private wrap(inner: ToolGateway): ToolGateway {
     return {
       invoke: async (request, scope, signal) => {
-        if (request.tool_name === "exec") await this.trustGate(request, signal);
-        const captured = WRITE_TOOLS.has(request.tool_name) ? await this.capture(request).catch(() => undefined) : undefined;
+        if (request.tool_name === "exec" && !this.planOn) await this.trustGate(request, signal);
+        const captured = WRITE_TOOLS.has(request.tool_name) && !this.planOn ? await this.capture(request).catch(() => undefined) : undefined;
         const outcome = await inner.invoke(request, { ...scope, policy: this.policy() }, signal);
         if (captured !== undefined && captured.length > 0 && outcome.state === "succeeded") {
           await this.checkpoint(request, captured, outcome.result.changed_paths ?? []).catch(() => undefined);
+        }
+        if (this.planOn && outcome.state === "denied" && outcome.result.error !== undefined && (WRITE_TOOLS.has(request.tool_name) || request.tool_name === "exec")) {
+          const message = `${outcome.result.error.message} (plan mode is on: read, discuss and propose the plan; the user leaves plan mode to carry it out)`.slice(0, 2000);
+          return { ...outcome, result: { ...outcome.result, error: { ...outcome.result.error, message } } };
         }
         return outcome;
       },
@@ -437,7 +596,7 @@ class Conversation {
     if (this.renderer.approvals.availability !== "interactive") return;
     const argv = strings(request.arguments.argv);
     if (argv === undefined || argv.length === 0) return;
-    const policy = this.policy();
+    const policy = this.basePolicy();
     const verdict = evaluateExecAllowlist({
       argv,
       readOnly: false,
@@ -491,13 +650,16 @@ class Conversation {
 
   // ---- the loop ---------------------------------------------------------------------------------
 
+  private enqueue(text: string, attachments: readonly Attachment[] = []): void {
+    this.queued.push({ text, attachments });
+  }
+
   private async loop(input: NonNullable<SessionRenderer["input"]>): Promise<void> {
-    const queued: string[] = [];
     const concurrent = this.renderer.kind === "tui";
     for (;;) {
       if (this.exiting || this.outer.signal.aborted) return;
-      let text = queued.shift();
-      if (text === undefined) {
+      let message = this.queued.shift();
+      if (message === undefined) {
         let next;
         try {
           next = await input.next(this.outer.signal);
@@ -506,27 +668,24 @@ class Conversation {
         }
         if (next.kind === "exit") return;
         if (!("text" in next)) continue;
-        text = next.text.trim();
-        if (text === "") continue;
-        if (next.kind === "command" || text.startsWith("/")) {
-          if (await this.command(text)) return;
-          continue;
-        }
-      } else if (text.startsWith("/")) {
-        if (await this.command(text)) return;
-        continue;
+        const text = next.text.trim();
+        const attachments = next.attachments ?? [];
+        if (text === "" && attachments.length === 0) continue;
+        message = { text, attachments };
+        if (next.kind === "command" && !text.startsWith("/")) message = { text: `/${text}`, attachments };
       }
-      const work = this.turn(text);
-      if (concurrent) await this.alongside(work, input, queued);
-      else await work;
+      const work = message.text.startsWith("/") ? this.command(message.text) : this.turn(message.text, message.attachments);
+      const left = concurrent ? await this.alongside(work, input) : await work;
+      if (left === true) return;
     }
   }
 
   /**
-   * While work runs in the TUI, typed messages queue for the next turn (or answer a pending
-   * question) and slash commands still work; /exit and Ctrl+D leave.
+   * While work runs in the TUI: a typed message answers a pending question, steers the running
+   * workers (coordinator) or the running turn (next step boundary); commands marked `whileBusy` run
+   * at once, other commands wait for the turn to end; /exit and Ctrl+D leave.
    */
-  private async alongside(work: Promise<void>, input: NonNullable<SessionRenderer["input"]>, queued: string[]): Promise<void> {
+  private async alongside<T>(work: Promise<T>, input: NonNullable<SessionRenderer["input"]>): Promise<T> {
     const stop = new AbortController();
     const reader = (async () => {
       for (;;) {
@@ -539,38 +698,80 @@ class Conversation {
         if (next.kind === "exit") {
           this.exiting = true;
           this.active?.abort();
+          this.orchestration?.controller.abort();
           this.outer.abort();
           return;
         }
         if (!("text" in next)) continue;
         const text = next.text.trim();
-        if (text === "") continue;
+        const attachments = next.attachments ?? [];
+        if (text === "" && attachments.length === 0) continue;
         if (next.kind === "command" || text.startsWith("/")) {
-          const command = text.split(/\s+/)[0]?.toLowerCase() ?? "";
-          if (command === "/cancel" || command === "/exit" || command === "/quit" || command === "/help" || command === "/allow" || command === "/log" || command === "/diff") {
+          const command = findConversationCommand(text.split(/\s+/)[0] ?? "");
+          if (command?.whileBusy === true) {
             if (await this.command(text)) {
               this.exiting = true;
               this.active?.abort();
+              this.orchestration?.controller.abort();
               this.outer.abort();
               return;
             }
           } else {
-            queued.push(text);
-            this.note("info", `queued ${this.glyphs.name === "rich" ? "›" : ">"} ${text}`);
+            this.enqueue(text);
+            this.note("info", `queued ${this.glyphs.name === "rich" ? "›" : ">"} ${text} (runs when Synorch is done)`);
           }
           continue;
         }
         if (this.desk.answer(text)) continue;
-        queued.push(text);
-        this.note("info", `queued ${this.glyphs.name === "rich" ? "›" : ">"} ${text}`);
+        this.steer(text, attachments);
       }
     })();
     try {
-      await work;
+      return await work;
     } finally {
       stop.abort();
       await reader;
     }
+  }
+
+  /** Mid-turn steering (ADR-21 D8): to the coordinator while workers run, else to the running turn, else the next turn. */
+  private steer(text: string, attachments: readonly Attachment[]): void {
+    const arrow = this.glyphs.name === "rich" ? "↳" : "->";
+    const orchestration = this.orchestration;
+    if (orchestration !== undefined) {
+      orchestration.coordinator.steer(text);
+      this.note("info", `${arrow} steering the workers: ${snippet(text, 80)} (applied at the next safe point)`);
+      return;
+    }
+    if (this.turnRunning && this.driver !== undefined && attachments.length === 0) {
+      this.driver.steer(text);
+      this.note("info", `${arrow} Synorch reads this at its next step`);
+      return;
+    }
+    this.enqueue(text, attachments);
+    this.note("info", `queued ${this.glyphs.name === "rich" ? "›" : ">"} ${text}`);
+  }
+
+  /** Esc: interrupts the turn; while workers run, the first Esc arms and the second stops them. */
+  private interrupt(): void {
+    const orchestration = this.orchestration;
+    if (orchestration === undefined) {
+      this.active?.abort();
+      return;
+    }
+    if (!orchestration.tracker.stopArmed) {
+      orchestration.tracker.stopArmed = true;
+      this.renderer.views?.setBoard(orchestration.tracker.view());
+      this.note("warning", `Press Esc again to stop the workers ${this.glyphs.sep} messages you type steer them instead`);
+      orchestration.disarm = setTimeout(() => {
+        orchestration.tracker.stopArmed = false;
+        this.renderer.views?.setBoard(orchestration.tracker.view());
+      }, ESC_ARM_MS);
+      orchestration.disarm.unref?.();
+      return;
+    }
+    this.note("warning", "Stopping the workers…");
+    orchestration.controller.abort();
   }
 
   private async askUser(question: string, options: readonly string[] | undefined, signal: AbortSignal): Promise<string> {
@@ -590,35 +791,53 @@ class Conversation {
     }
   }
 
-  private async turn(text: string): Promise<void> {
+  private async currentRoute(): Promise<RouteDecision | undefined> {
+    try {
+      return await (this.routePromise ?? Promise.reject(new Error("no route")));
+    } catch (error) {
+      this.showFailure(failureInfo(error));
+      this.routePromise = this.runtime.router.resolve({ tier: sessionRouteRule(this.runtime, this.sessionTier)?.tier ?? "orchestrator", role: "session" }, this.outer.signal);
+      this.routePromise.catch(() => undefined);
+      return undefined;
+    }
+  }
+
+  private async turn(typed: string, attachments: readonly Attachment[]): Promise<boolean> {
     this.submittedAt = performance.now();
+    let text = typed;
+    if (this.planOn && GO_WORDS.test(text.trim())) {
+      this.setPlanMode(false);
+      text = `${text}\n(The plan is approved: carry it out now.)`;
+    }
     let log: EventStore;
     try {
       log = await this.ensureLog(text);
     } catch (error) {
       this.showFailure(failureInfo(error));
-      return;
+      return false;
     }
     const driver = this.ensureDriver(log);
-    let route: RouteDecision;
-    try {
-      route = await (this.routePromise ?? Promise.reject(new Error("no route")));
-    } catch (error) {
-      this.showFailure(failureInfo(error));
-      this.routePromise = this.runtime.router.resolve({ tier: sessionRouteRule(this.runtime)?.tier ?? "orchestrator", role: "session" }, this.outer.signal);
-      this.routePromise.catch(() => undefined);
-      return;
-    }
+    const route = await this.currentRoute();
+    if (route === undefined) return false;
     if (!this.routeRecorded) {
       this.routeRecorded = true;
       await this.append("route/decided", { decision: route }, "agent").catch(() => undefined);
     }
+    let body = text;
+    if (attachments.length > 0 || /(^|\s)@\S/.test(text)) {
+      const imageInput = mayContainImage(text, attachments) ? await this.imageInput(route) : "unknown";
+      const resolved = await resolveAttachments(text, attachments, { workspaceRoot: this.runtime.workspaceRoot, imageInput, model: route.route.model_id });
+      for (const entry of resolved.notices) this.note(entry.level, entry.text);
+      body = resolved.message;
+    }
     const notes = this.pendingNotes.splice(0);
-    const message = notes.length === 0 ? text : `[Synorch note: ${notes.join(" ")}]\n${text}`;
+    const message = notes.length === 0 ? body : `[Synorch note: ${notes.join(" ").replaceAll("]", ")")}]\n${body}`;
     const active = linked(this.outer.signal);
     this.active = active;
+    this.turnRunning = true;
+    let outcome: Awaited<ReturnType<AgentDriver["runTurn"]>> | undefined;
     try {
-      await driver.runTurn(
+      outcome = await driver.runTurn(
         {
           sessionId: log.sessionId,
           runId: undefined,
@@ -637,8 +856,26 @@ class Conversation {
     } catch (error) {
       if (!active.signal.aborted) this.showFailure(failureInfo(error));
     } finally {
+      this.turnRunning = false;
       if (this.active === active) this.active = undefined;
       this.submittedAt = undefined;
+    }
+    // A message typed while the last step settled could not be delivered in this turn: it starts the next one.
+    const leftover = driver.drainSteers?.() ?? [];
+    if (leftover.length > 0) this.queued.unshift({ text: leftover.join("\n"), attachments: [] });
+    if (this.planOn && outcome?.outcome === "completed" && leftover.length === 0) {
+      this.note("info", `${this.glyphs.bullet} Plan mode ${this.glyphs.sep} /go carries it out here ${this.glyphs.sep} /go workers runs it with workers ${this.glyphs.sep} or keep refining`);
+    }
+    return false;
+  }
+
+  private async imageInput(route: RouteDecision): Promise<"supported" | "degraded" | "unsupported" | "unknown"> {
+    try {
+      const adapter = this.runtime.router.adapterFor(route.route);
+      const capabilities = await adapter.discoverCapabilities(this.outer.signal);
+      return capabilities.models.find((model) => model.id === route.route.model_id)?.image_input ?? "unknown";
+    } catch {
+      return "unknown";
     }
   }
 
@@ -649,69 +886,169 @@ class Conversation {
     if (error.next_command !== undefined) this.note("info", `  Next       ${error.next_command}`);
   }
 
+  // ---- orchestration (the `orchestrate` tool, ADR-21 D4/D5) -----------------------------------
+
+  private observeOrchestration(orchestration: ActiveOrchestration, event: SessionEvent): void {
+    const tracker = orchestration.tracker;
+    const before = tracker.sessionId;
+    if (!tracker.observe(event)) return;
+    const g = this.glyphs;
+    if (event.type === "plan/proposed" && event.session_id === tracker.sessionId) {
+      const plan = event.data.plan;
+      this.note("info", `${g.bullet} Plan ${g.sep} ${plan.tasks.length} task${plan.tasks.length === 1 ? "" : "s"} ${g.sep} risk ${plan.risk}${this.runtime.policyMode === "autonomous" ? ` ${g.sep} starting now ${g.sep} esc to stop` : ""}`);
+      for (const [index, task] of plan.tasks.entries()) this.note("info", `  ${index + 1}. ${task.key} (${task.role}): ${snippet(task.objective, 90)}`);
+    }
+    if (before === undefined && tracker.sessionId !== undefined) this.orchestratedSessions.push(tracker.sessionId);
+    const views = this.renderer.views;
+    if (views !== undefined) {
+      // The TUI board updates in place (and ticks at 1 Hz); the plain board prints only on task changes.
+      if (this.renderer.kind === "tui" || event.type === "task/state_changed" || event.type === "task/created") views.setBoard(tracker.view());
+      return;
+    }
+    if (event.type === "task/state_changed") {
+      const line = tracker.line(event.data.task_id);
+      if (line !== undefined) this.note("info", line);
+    }
+  }
+
+  private async runOrchestration(input: OrchestrateInput, context: ToolExecutionContext): Promise<ToolResult> {
+    const g = this.glyphs;
+    const error = (code: "execution_failed" | "cancelled" | "policy_denied", message: string, text = ""): ToolResult => ({
+      status: "error",
+      text: text.slice(0, 16 * 1024),
+      truncated: false,
+      redactions: 0,
+      error: { code, message: message.slice(0, 2000) },
+    });
+    if (this.planOn) return error("policy_denied", "plan mode is on: present the plan; the user starts workers with /go workers");
+    if (this.orchestration !== undefined) return error("execution_failed", "workers are already running in this conversation; wait for them to finish");
+    const runtime = this.runtime;
+    if (!this.trustAsked && !runtime.trust.state().trusted && runtime.sandbox.enforcement !== "full" && this.renderer.approvals.availability === "interactive") {
+      this.trustAsked = true;
+      if (await promptTrustForCommand(runtime, this.renderer, "the workers' checks", context.signal)) this.policyCache = undefined;
+    }
+    this.coordinator ??= runtime.createCoordinator(runtime.brokerFor(this.renderer.approvals));
+    const goal = input.brief === undefined ? input.goal : `${input.goal}\n\nContext from the conversation:\n${input.brief}`;
+    const tracker = new OrchestrationTracker(goal, input.reason);
+    this.lastTracker = tracker;
+    const controller = linked(context.signal);
+    const orchestration: ActiveOrchestration = { tracker, coordinator: this.coordinator, controller, disarm: undefined };
+    this.orchestration = orchestration;
+    const views = this.renderer.views;
+    this.note("info", `${g.bullet} Starting workers ${g.sep} ${input.reason}`);
+    if (this.renderer.kind === "tui") views?.setBoard(tracker.view());
+    const ticker = views === undefined || this.renderer.kind !== "tui" ? undefined : setInterval(() => views.setBoard(tracker.view()), 1000);
+    ticker?.unref?.();
+    try {
+      const outcome = await this.coordinator.run(
+        {
+          goal,
+          workspaceRoot: runtime.workspaceRoot,
+          policyMode: runtime.policyMode,
+          headless: this.renderer.approvals.availability === "headless",
+          resumeSessionId: undefined,
+          budget: runtime.config.budget,
+        },
+        controller.signal,
+      );
+      if (!this.orchestratedSessions.includes(outcome.sessionId)) this.orchestratedSessions.push(outcome.sessionId);
+      tracker.finish(outcome.status);
+      const block = tracker.resultBlock({ status: outcome.status, summary: outcome.summary, runId: outcome.runId, sessionId: outcome.sessionId });
+      if (ticker !== undefined) clearInterval(ticker);
+      const view = tracker.view();
+      // A done board collapses to its summary, pinned once (U3); the plain renderer prints it.
+      views?.setBoard(view);
+      if (views === undefined) {
+        const seconds = Math.round(((view.endedAtMs ?? Date.now()) - (view.startedAtMs ?? Date.now())) / 1000);
+        const status = outcome.status === "succeeded" ? "done" : outcome.status;
+        this.note(outcome.status === "succeeded" ? "info" : "warning", `${g.bullet} Workers ${g.sep} ${view.tasks.length} task${view.tasks.length === 1 ? "" : "s"} ${g.sep} ${status} in ${seconds}s`);
+        for (const task of view.tasks) {
+          const glyph = task.state === "completed" ? g.ok : task.state === "failed" || task.state === "cancelled" || task.state === "blocked" ? g.fail : g.bullet;
+          this.note("info", `  ${glyph} ${task.key.padEnd(18)} ${task.role.padEnd(12)} ${task.summary ?? task.reason ?? task.state.replaceAll("_", " ")}`);
+        }
+      }
+      for (const line of tracker.resultLines()) this.note("info", `  ${line}`);
+      if (outcome.status === "succeeded") return { status: "ok", text: block, truncated: false, redactions: 0 };
+      return error(outcome.status === "cancelled" ? "cancelled" : "execution_failed", `the orchestration ${outcome.status}: ${snippet(outcome.summary, 400)}`, block);
+    } catch (caught) {
+      tracker.finish(controller.signal.aborted ? "cancelled" : "failed");
+      views?.setBoard(tracker.view());
+      const info = failureInfo(caught);
+      return error(controller.signal.aborted ? "cancelled" : "execution_failed", info.message);
+    } finally {
+      if (ticker !== undefined) clearInterval(ticker);
+      if (orchestration.disarm !== undefined) clearTimeout(orchestration.disarm);
+      this.orchestration = undefined;
+    }
+  }
+
   // ---- slash commands ---------------------------------------------------------------------------
 
   /** Resolves true when the user asked to leave. */
   private async command(text: string): Promise<boolean> {
-    const [name = "", ...rest] = text.split(/\s+/);
+    const [name = ""] = text.split(/\s+/);
     const argument = text.slice(name.length).trim();
-    const lines = (entries: readonly string[]): void => {
-      for (const entry of entries) this.note("info", entry);
-    };
-    switch (name.toLowerCase()) {
-      case "/exit":
-      case "/quit":
-        return true;
-      case "/help":
-        lines(HELP_LINES);
-        return false;
-      case "/cancel":
-        if (this.active === undefined) lines(["Nothing is running."]);
-        else this.active.abort();
-        return false;
-      case "/undo":
-        await this.undo();
-        return false;
-      case "/allow":
-        await this.allow(argument);
-        return false;
-      case "/trust": {
-        this.trustAsked = true;
-        if (this.runtime.trust.state().trusted || this.runtime.sandbox.enforcement === "full") lines(["This folder is already trusted."]);
-        else if (await promptTrustForCommand(this.runtime, this.renderer, "build and test commands", this.outer.signal)) this.policyCache = undefined;
-        return false;
-      }
-      case "/plan":
-      case "/workers":
-        await this.orchestrate(argument);
-        return false;
-      case "/diff":
-        lines(await this.diff());
-        return false;
-      case "/log": {
-        const count = Number(rest[0] ?? "20");
-        const events = await this.readEvents();
-        const shown = events.slice(-Math.max(1, Number.isFinite(count) ? count : 20));
-        lines(shown.length === 0 ? ["Nothing recorded yet."] : shown.map((event) => `[event] #${event.seq} ${event.type}${(() => {
-          const line = describeEvent(event);
-          return line === undefined ? "" : ` · ${line.text}`;
-        })()}`));
-        return false;
-      }
-      case "/context":
-      case "/permissions":
-      case "/model": {
-        const result = await handleSlashCommand(name.toLowerCase(), { runtime: this.runtime, events: await this.readEvents(), sessionId: this.sessionId, cancel: () => this.active?.abort() });
-        lines(result.lines);
-        return false;
-      }
-      default:
-        lines([`Unknown command ${name} ${this.glyphs.sep} /help lists the commands`]);
-        return false;
+    const command = findConversationCommand(name);
+    if (command === undefined) {
+      this.print([`Unknown command ${name} ${this.glyphs.sep} /help lists the commands`]);
+      return false;
+    }
+    try {
+      return (await command.run(this, argument)) === true;
+    } catch (error) {
+      if (!this.outer.signal.aborted) this.showFailure(failureInfo(error));
+      return false;
     }
   }
 
-  private async undo(): Promise<void> {
+  public cancel(): void {
+    if (this.orchestration !== undefined) this.orchestration.controller.abort();
+    else if (this.active === undefined) this.print(["Nothing is running."]);
+    else this.active.abort();
+  }
+
+  /** Plan mode on/off from `/plan`, `/go`, a go-word or the renderer (Shift+Tab / Alt+M); idempotent. */
+  private setPlanMode(on: boolean): void {
+    if (this.planOn === on) return;
+    this.planOn = on;
+    const g = this.glyphs;
+    this.renderer.controls?.setPlanMode(on);
+    this.note("info", on ? `${g.bullet} Plan mode on ${g.sep} Synorch reads and plans but does not edit or run commands ${g.sep} Shift+Tab or /plan leaves` : `${g.bullet} Plan mode off ${g.sep} Synorch may edit and run commands again`);
+    this.pendingNotes.push(
+      on
+        ? "plan mode is ON: you may read, search and discuss, but not edit files or run commands. Produce a concrete plan (steps, files, risks, how it will be verified); say whether it is small enough to do directly or big enough for workers."
+        : "plan mode is OFF: you may edit files and run commands again.",
+    );
+  }
+  public async planMode(goal: string): Promise<void> {
+    if (goal === "") {
+      this.setPlanMode(!this.planOn);
+      return;
+    }
+    this.setPlanMode(true);
+    this.enqueue(goal);
+  }
+
+  public async go(mode: string): Promise<void> {
+    const workers = /^(workers?|w|parallel)$/i.test(mode.trim());
+    this.setPlanMode(false);
+    this.enqueue(
+      workers
+        ? "The plan is approved. Carry it out with workers now: call the orchestrate tool with the goal, a one-sentence reason and the plan as the brief."
+        : "The plan is approved. Carry it out here directly now.",
+    );
+  }
+
+  public async workers(goal: string): Promise<void> {
+    if (goal === "") {
+      this.print(["Usage: /workers <goal>  ·  plans the goal, runs parallel workers in their own worktrees and has an independent reviewer check the result"]);
+      return;
+    }
+    this.setPlanMode(false);
+    this.enqueue(`Use workers for this (call the orchestrate tool): ${goal}`);
+  }
+
+  public async undo(): Promise<void> {
     const g = this.glyphs;
     const events = await this.readEvents();
     const restoredSeqs = new Set(events.flatMap((event) => (event.type === "checkpoint/restored" ? [event.data.checkpoint_seq] : [])));
@@ -749,7 +1086,7 @@ class Conversation {
     for (const entry of skipped) this.note("warning", `${g.warn} Kept ${entry.path}: ${entry.reason}`);
   }
 
-  private async allow(argument: string): Promise<void> {
+  public async allow(argument: string): Promise<void> {
     const grants = this.grants;
     if (grants === undefined) return;
     if (argument === "") {
@@ -778,6 +1115,506 @@ class Conversation {
     this.pendingNotes.push(`the user allowed commands starting with "${normalized.prefix}" (/allow); you may run them now.`);
   }
 
+  public async trust(): Promise<void> {
+    this.trustAsked = true;
+    if (this.runtime.trust.state().trusted || this.runtime.sandbox.enforcement === "full") this.print(["This folder is already trusted."]);
+    else if (await promptTrustForCommand(this.runtime, this.renderer, "build and test commands", this.outer.signal)) this.policyCache = undefined;
+  }
+
+  /** Tiers whose route the conversation may use (a rule without a role, or one narrowed to `session`). */
+  private sessionRules(): RouteRule[] {
+    return this.runtime.config.router.rules.filter((rule) => rule.role === undefined || rule.role === "session");
+  }
+
+  private authLabel(rule: RouteRule): string {
+    const method = this.runtime.adapters.find((adapter) => adapter.adapterId === rule.route.adapter_id)?.authMethod;
+    return method === "oauth-subscription" ? "oauth" : method === "cli-bridge" ? "cli" : method === "api-key" ? "api-key" : "unknown";
+  }
+
+  public async model(argument: string): Promise<void> {
+    const g = this.glyphs;
+    const runtime = this.runtime;
+    const rules = runtime.config.router.rules;
+    const [tierArg = "", ...flags] = argument.split(/\s+/).filter((part) => part !== "");
+    if (tierArg === "") {
+      const controls = this.renderer.controls;
+      if (controls !== undefined) {
+        // The K1-U1 picker: rows per tier, the conversation's current one marked; Esc keeps it.
+        const entries: ModelPickerEntry[] = rules.map((rule, index) => ({
+          id: String(index),
+          tier: rule.role === undefined ? rule.tier : `${rule.tier}/${rule.role}`,
+          provider: rule.route.provider_id,
+          model: rule.route.model_id,
+          auth: this.authLabel(rule),
+          current: rule.tier === this.sessionTier && (rule.role === undefined || rule.role === "session"),
+          description: rule.tier === "session" ? "conversation tier" : `${rule.source} route`,
+          ...(rule.role === undefined || rule.role === "session" ? {} : { disabled: `only for the ${rule.role} role` }),
+        }));
+        const chosen = await controls.openModelPicker(entries, this.outer.signal).catch(() => undefined);
+        const rule = chosen === undefined ? undefined : rules[Number(chosen.id)];
+        if (rule === undefined || chosen?.current === true) return;
+        await this.switchModel(rule.tier, false);
+        return;
+      }
+      const lines = [`Conversation model: ${this.currentModel ?? "?"} (${this.sessionTier ?? "?"} tier)${this.planOn ? ` ${g.sep} plan mode` : ""}`];
+      for (const tier of MODEL_TIERS) {
+        const tierRules = rules.filter((rule) => rule.tier === tier);
+        if (tierRules.length === 0) {
+          lines.push(`  ${tier.padEnd(15)} not configured${tier === "session" ? " (the conversation uses the orchestrator route)" : ""}`);
+          continue;
+        }
+        for (const rule of tierRules) {
+          const current = tier === this.sessionTier && (rule.role === undefined || rule.role === "session") ? `  ${g.name === "rich" ? "←" : "<-"} conversation` : "";
+          lines.push(`  ${`${tier}${rule.role === undefined ? "" : `/${rule.role}`}`.padEnd(15)} ${rule.route.provider_id}/${rule.route.model_id} via ${rule.route.adapter_id} (${this.authLabel(rule)}, ${rule.source})${current}`);
+        }
+      }
+      if (!rules.some((rule) => rule.tier === "session") && rules.some((rule) => rule.tier === "fast_worker")) {
+        lines.push("Tip: /model fast_worker makes the conversation answer faster; /model fast_worker --save keeps it for new conversations");
+      }
+      lines.push("Switch: /model <tier> (this conversation) · add --save to make it the default");
+      this.print(lines);
+      return;
+    }
+    const tier = MODEL_TIERS.find((candidate) => candidate === tierArg);
+    if (tier === undefined || !this.sessionRules().some((rule) => rule.tier === tier)) {
+      this.print([`No route for "${tierArg}". Configured tiers: ${[...new Set(this.sessionRules().map((candidate) => candidate.tier))].join(", ") || "none"}`]);
+      return;
+    }
+    await this.switchModel(tier, flags.includes("--save"));
+  }
+
+  /** Switches the conversation's route for this session; `save` persists it as the default only after the human confirms. */
+  private async switchModel(tier: ModelTier, save: boolean): Promise<void> {
+    const g = this.glyphs;
+    const runtime = this.runtime;
+    const rule = this.sessionRules().find((candidate) => candidate.tier === tier);
+    if (rule === undefined) return;
+    const decision = runtime.router.resolve({ tier, role: "session" }, this.outer.signal);
+    try {
+      await decision;
+    } catch (error) {
+      this.showFailure(failureInfo(error));
+      return;
+    }
+    this.routePromise = decision;
+    this.routeRecorded = false;
+    this.sessionTier = tier;
+    this.currentModel = rule.route.model_id;
+    this.print([`${g.ok} Conversation model: ${rule.route.model_id} (${tier}) for this conversation${save ? "" : ` ${g.sep} /model ${tier} --save makes it the default`}`]);
+    if (!save) return;
+    const answer = await this.askUser(`Make ${rule.route.model_id} (${tier}) the default conversation model for new conversations?`, ["Yes", "No"], this.outer.signal).catch(() => "No");
+    if (!/^(1|y|yes|evet|e)$/i.test(answer.trim())) {
+      this.print(["Not saved; the default is unchanged."]);
+      return;
+    }
+    await mkdir(runtime.home, { recursive: true });
+    await writeFile(path.join(runtime.home, SESSION_MODEL_FILE), `${JSON.stringify({ tier }, null, 2)}\n`, "utf8");
+    this.print([`${g.ok} Saved: new conversations use the ${tier} route (${path.join(runtime.home, SESSION_MODEL_FILE)})`]);
+  }
+
+  public async review(focus: string): Promise<void> {
+    const g = this.glyphs;
+    const runtime = this.runtime;
+    const diff = await uncommittedDiff(runtime.workspaceRoot, REVIEW_DIFF_LIMIT, this.outer.signal);
+    if (diff === undefined) {
+      this.print(["/review needs a git repository: the uncommitted diff is what gets reviewed."]);
+      return;
+    }
+    if (diff.text.trim() === "") {
+      this.print(["No uncommitted changes to review."]);
+      return;
+    }
+    const rules = runtime.config.router.rules;
+    const rule = rules.find((candidate) => candidate.role === "reviewer") ?? rules.find((candidate) => candidate.tier === "complex_worker") ?? sessionRouteRule(runtime, this.sessionTier);
+    if (rule === undefined) return;
+    let route: RouteDecision;
+    try {
+      route = await runtime.router.resolve({ tier: rule.tier, role: rule.role }, this.outer.signal);
+    } catch (error) {
+      this.showFailure(failureInfo(error));
+      return;
+    }
+    const files = (diff.text.match(/^diff --git /gm) ?? []).length;
+    this.note("info", `${g.bullet} Reviewing ${files} changed file${files === 1 ? "" : "s"} with ${route.route.model_id} ${g.sep} independent: fresh context, no conversation history ${g.sep} Esc stops`);
+    const reviewLog = await runtime.sessions.create({
+      session_id: createId("session"),
+      project_id: runtime.projectId,
+      workspace_root: runtime.workspaceRoot,
+      created_at: new Date().toISOString(),
+      title: `review: ${focus === "" ? "uncommitted changes" : focus.slice(0, 100)}`,
+    });
+    const driver = runtime.createSessionDriver(runtime.brokerFor(undefined), reviewLog, (gateway) => gateway);
+    const active = linked(this.outer.signal);
+    this.active = active;
+    const prompt = [
+      "You are an independent code reviewer. You did not write these changes and you have no conversation history.",
+      "Review the uncommitted diff below for correctness bugs, security problems, missing tests and risky behaviour changes. You may read files to check context; you cannot edit or run commands.",
+      "Reply with: a one-line verdict (accept / changes requested / block), then findings as a short list with file:line, severity and why. Say plainly when you found nothing important.",
+      ...(focus === "" ? [] : [`Focus: ${focus}`]),
+      "",
+      "```diff",
+      diff.text,
+      "```",
+    ].join("\n");
+    try {
+      await driver.runTurn(
+        {
+          sessionId: reviewLog.sessionId,
+          runId: undefined,
+          taskId: undefined,
+          attemptId: undefined,
+          role: "session",
+          route: route.route,
+          policy: planModePolicy(this.basePolicy()),
+          packet: undefined,
+          userMessage: prompt,
+          trigger: "user",
+          maxSteps: 20,
+        },
+        active.signal,
+      );
+      const events: SessionEvent[] = [];
+      for await (const item of reviewLog.read()) if (item.status === "ok") events.push(item.event);
+      const answer = [...events]
+        .reverse()
+        .flatMap((event) => (event.type === "message/recorded" && event.data.role === "assistant" && event.data.message !== undefined ? [event.data.message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")] : []))
+        .find((entry) => entry.trim() !== "");
+      if (answer === undefined) {
+        this.note("warning", `${g.warn} The reviewer gave no answer${active.signal.aborted ? " (stopped)" : ""}.`);
+        return;
+      }
+      this.note("info", `${g.bullet} Review ${g.sep} independent (fresh context, ${route.route.model_id}) ${g.sep} advisory, not a harness-verified review`);
+      for (const line of answer.trim().split(/\r?\n/)) this.note("info", `  ${line}`);
+      this.pendingNotes.push(`the user ran /review; an independent reviewer (${route.route.model_id}, fresh context) said: ${snippet(answer, 1500)}`);
+    } catch (error) {
+      if (!active.signal.aborted) this.showFailure(failureInfo(error));
+    } finally {
+      if (this.active === active) this.active = undefined;
+      await reviewLog.close().catch(() => undefined);
+    }
+  }
+
+  public async commit(argument: string): Promise<void> {
+    const g = this.glyphs;
+    const root = this.runtime.workspaceRoot;
+    const changes = await uncommittedChanges(root, this.outer.signal);
+    if (changes === undefined) {
+      this.print(["/commit needs a git repository."]);
+      return;
+    }
+    if (changes.files.length === 0) {
+      this.print(["Nothing to commit: the working tree is clean."]);
+      return;
+    }
+    const statTail = changes.stat.split(/\r?\n/).at(-1)?.trim() ?? "";
+    let message = argument.trim() === "" ? await this.proposeCommitMessage(changes.files.map((file) => file.path), changes.stat) : argument.trim();
+    const count = `${changes.files.length} file${changes.files.length === 1 ? "" : "s"}`;
+    const views = this.renderer.views;
+    if (views !== undefined) {
+      // UX-03 action card: what, why, consequence, reversibility — before the human decides.
+      views.showView({
+        kind: "action",
+        title: `Commit ${count}?`,
+        what: `git commit -m "${snippet(message.split(/\r?\n/)[0] ?? message, 90)}"`,
+        why: "you ran /commit",
+        consequence: `stages every uncommitted change (git add -A) and records one commit${statTail === "" ? "" : ` · ${statTail}`}`,
+        effect: "local",
+        reversible: true,
+        paths: changes.files.map((file) => file.path),
+        scope: "this commit once; nothing is pushed",
+      });
+      this.print(["Message:", ...message.split(/\r?\n/).map((line) => `  ${line}`)]);
+    } else {
+      const lines = [`${g.bullet} Commit ${g.sep} ${count}`];
+      for (const file of changes.files.slice(0, 15)) lines.push(`  ${file.status.padEnd(3)}${file.path}`);
+      if (changes.files.length > 15) lines.push(`  … ${changes.files.length - 15} more`);
+      if (statTail !== "") lines.push(`  ${statTail}`);
+      this.print([...lines, "Proposed message:", ...message.split(/\r?\n/).map((line) => `  ${line}`)]);
+    }
+    const answer = await this.askUser(`Commit ${changes.files.length} file${changes.files.length === 1 ? "" : "s"} with this message?`, ["Commit", "Edit the message", "Cancel"], this.outer.signal).catch(() => "Cancel");
+    if (/^(2|e|edit)/i.test(answer.trim())) {
+      message = (await this.askUser("Type the commit message", undefined, this.outer.signal).catch(() => "")).trim();
+      if (message === "") {
+        this.print(["Not committed."]);
+        return;
+      }
+    } else if (!/^(1|y|yes|commit|evet)/i.test(answer.trim())) {
+      this.print(["Not committed."]);
+      return;
+    }
+    const result = await commitAll(root, message, this.outer.signal);
+    if (!result.ok) {
+      this.note("error", `${g.fail} git commit failed: ${snippet(result.stderr || result.stdout, 300)}`);
+      return;
+    }
+    const subject = message.split(/\r?\n/)[0] ?? message;
+    this.print([`${g.ok} Committed ${changes.files.length} file${changes.files.length === 1 ? "" : "s"}: ${subject}`]);
+    this.pendingNotes.push(`the user committed the working tree (/commit) with the message "${snippet(subject, 120)}".`);
+  }
+
+  /** A one-shot request to the conversation model for a commit message; a plain summary when that is not possible. */
+  private async proposeCommitMessage(files: readonly string[], stat: string): Promise<string> {
+    const fallback = `chore: update ${files.slice(0, 3).join(", ")}${files.length > 3 ? ` and ${files.length - 3} more` : ""}`;
+    const route = await this.routePromise?.catch(() => undefined);
+    if (route === undefined) return fallback;
+    const adapter = this.runtime.router.adapterFor(route.route);
+    if (adapter.kind !== "model") return fallback;
+    const goals = (await this.readEvents())
+      .flatMap((event) => (event.type === "message/recorded" && event.data.role === "user" && event.data.message !== undefined ? [event.data.message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(" ")] : []))
+      .map((text) => snippet(text.replace(/^\[Synorch note:[^\]]*\]\s*/u, "").split("<synorch-attachments>")[0] ?? "", 160))
+      .slice(-5);
+    const request: ModelRequest = {
+      request_id: createId("request"),
+      route: route.route,
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Write a git commit message for these changes: a conventional-commit subject line of at most 72 characters, then optionally a blank line and a short body. Reply with the message only.\n\nWhat the user asked for:\n${goals.map((goal) => `- ${goal}`).join("\n") || "- (no conversation yet)"}\n\nDiff stat:\n${stat.slice(0, 4000) || files.join("\n")}`,
+            },
+          ],
+        },
+      ],
+      tools: [],
+      max_output_tokens: 300,
+    };
+    try {
+      const signal = AbortSignal.any([this.outer.signal, AbortSignal.timeout(30_000)]);
+      const credential = await this.runtime.credentials(route.route, signal);
+      let text = "";
+      for await (const event of adapter.stream(request, credential, signal)) {
+        if (event.type === "text_delta") text += event.text;
+        if (event.type === "done" && text === "") text = event.message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+        if (event.type === "error") return fallback;
+      }
+      const cleaned = text.trim().replace(/^```\w*\n?|```$/g, "").trim();
+      return cleaned === "" ? fallback : cleaned.slice(0, 2000);
+    } catch {
+      return fallback;
+    }
+  }
+
+  public async usage(): Promise<void> {
+    const ledger = this.usageLedger;
+    if (ledger === undefined) return;
+    const views = this.renderer.views;
+    if (views !== undefined) views.showView(await ledger.view(Date.now() - this.startedAt));
+    else this.print(await ledger.report());
+  }
+
+  public async cost(): Promise<void> {
+    this.print(this.usageLedger?.cost() ?? ["No usage recorded yet."]);
+  }
+
+  /** Events of this conversation's worker runs (this process, or recorded in orchestrate results when resumed). */
+  private async orchestrationEvents(): Promise<SessionEvent[]> {
+    const ids = new Set<string>(this.orchestratedSessions);
+    for (const event of await this.readEvents()) {
+      if (event.type !== "message/recorded" || event.data.role !== "tool" || event.data.message === undefined) continue;
+      for (const part of event.data.message.content) {
+        if (part.type !== "tool_result") continue;
+        for (const match of part.text.matchAll(ORCHESTRATION_SESSION)) if (match[1] !== undefined) ids.add(match[1]);
+      }
+    }
+    const events: SessionEvent[] = [];
+    for (const id of ids) {
+      try {
+        const reader = await this.runtime.sessions.openForRead(id as SessionId);
+        for await (const item of reader.read()) if (item.status === "ok") events.push(item.event);
+      } catch {
+        continue;
+      }
+    }
+    return events;
+  }
+
+  /** `/evidence` as U3's `EvidenceView`: checks run by Synorch, worker-cited criteria, independent reviews, changed paths. */
+  private async evidenceView(): Promise<EvidenceView> {
+    const events = await this.orchestrationEvents();
+    const conversation = await this.readEvents();
+    const restored = new Set(conversation.flatMap((event) => (event.type === "checkpoint/restored" ? [event.data.checkpoint_seq] : [])));
+    const direct = [...new Set(conversation.flatMap((event) => (event.type === "checkpoint/recorded" && !restored.has(event.seq) ? event.data.files.map((file) => file.path) : [])))];
+    if (events.length === 0) {
+      return {
+        kind: "evidence",
+        title: "This conversation",
+        criteria: [],
+        review: { independent: false },
+        ...(direct.length === 0 ? {} : { changedPaths: direct }),
+        next: direct.length === 0 ? "nothing changed yet" : "direct edits are not independently reviewed: /review runs a reviewer on the uncommitted diff",
+      };
+    }
+    const keys = new Map<string, string>();
+    const states = new Map<string, string>();
+    for (const event of events) {
+      if (event.type === "task/created") keys.set(event.data.task_id, event.data.key);
+      if (event.type === "task/state_changed") states.set(event.data.task_id, event.data.to);
+    }
+    const criteria: CriterionView[] = [];
+    for (const event of events) {
+      if (event.type === "attempt/verification_ran") {
+        criteria.push({
+          text: `${keys.get(event.data.task_id) ?? "task"}: ${event.data.command}`,
+          status: event.data.status === "passed" ? "passed" : event.data.status === "failed" ? "failed" : "not_run",
+          proofs: [{ kind: "command", command: event.data.command, ...(event.data.exit_code === null ? {} : { exitCode: event.data.exit_code }), runBy: "harness", durationMs: event.data.duration_ms }],
+        });
+      }
+      if (event.type === "attempt/completion_recorded") {
+        let completion: CompletionPacket | undefined;
+        try {
+          completion = completionPacketSchema.parse(JSON.parse(new TextDecoder().decode(await this.runtime.blobs.get(event.data.blob.digest))));
+        } catch {
+          completion = undefined;
+        }
+        const task = completion === undefined ? undefined : [...keys.entries()].find(([id]) => events.some((candidate) => candidate.type === "attempt/started" && candidate.data.attempt_id === event.data.attempt_id && candidate.data.task_id === id));
+        for (const entry of completion?.acceptance_evidence ?? []) {
+          criteria.push({
+            text: `${task?.[1] ?? "task"}: ${entry.criterion_id}`,
+            status: task !== undefined && states.get(task[0]) === "completed" ? "passed" : "unverifiable",
+            proofs: entry.evidence.map((ref) => ({ kind: "note" as const, text: `${ref.kind} ${ref.ref} (cited by the ${ref.produced_by})` })),
+          });
+        }
+      }
+    }
+    const reviews = events.filter((event): event is SessionEventOf<"review/recorded"> => event.type === "review/recorded");
+    const lastReview = reviews.at(-1);
+    const integrated = [...new Set(events.flatMap((event) => (event.type === "task/integrated" ? event.data.paths : [])))];
+    return {
+      kind: "evidence",
+      title: "Worker runs in this conversation",
+      criteria,
+      ...(lastReview === undefined
+        ? { review: { independent: false } }
+        : { review: { independent: true, verdict: lastReview.data.decision === "accept" ? "accepted" : lastReview.data.decision === "revise" ? "changes_requested" : "rejected" } }),
+      changedPaths: [...integrated, ...direct.filter((file) => !integrated.includes(file))],
+      ...(direct.length === 0 ? {} : { next: `${direct.length} direct edit${direct.length === 1 ? " is" : "s are"} not independently reviewed: /review` }),
+    };
+  }
+
+  public async evidence(): Promise<void> {
+    const view = await this.evidenceView();
+    const views = this.renderer.views;
+    if (views !== undefined) {
+      views.showView(view);
+      return;
+    }
+    if (view.criteria.length === 0) {
+      this.print([view.next ?? "No evidence recorded yet."]);
+      return;
+    }
+    this.print(view.criteria.map((criterion) => `${criterion.status}: ${criterion.text}`));
+  }
+
+  /** `/why` as U3's `WhyView`: the latest (or the named tool's latest) policy decision, its reasons and what would change it. */
+  public async why(argument: string): Promise<void> {
+    const events = await this.readEvents();
+    const filter = argument.trim().toLowerCase();
+    const decided = [...events].reverse().find((event): event is SessionEventOf<"tool/policy_decided"> => event.type === "tool/policy_decided" && (filter === "" || event.data.action.tool_name.toLowerCase().includes(filter)));
+    if (decided === undefined) {
+      this.print([filter === "" ? "No action recorded yet in this conversation." : `No ${filter} action recorded in this conversation.`]);
+      return;
+    }
+    const action = decided.data.action;
+    const decision = decided.data.decision;
+    const result = events.find((event): event is SessionEventOf<"tool/result_recorded"> => event.type === "tool/result_recorded" && event.data.tool_call_id === decided.data.tool_call_id);
+    const target = action.command !== undefined ? action.command.argv.join(" ") : action.paths.map((entry) => entry.path).join(", ") || "(no path)";
+    const howToChange: { command: string; effect: string }[] = [];
+    const add = (command: string, effect: string): void => {
+      if (!howToChange.some((entry) => entry.command === command)) howToChange.push({ command, effect });
+    };
+    const planDenied = this.planOn && decision.decision === "deny" && decision.reasons.some((reason) => reason.code === "workspace-write-denied" || reason.code === "exec-denied");
+    for (const reason of decision.reasons) {
+      if (reason.code === "exec-not-allowlisted" && action.command !== undefined) add(`/allow ${action.command.argv.slice(0, 2).join(" ")}`, "lets Synorch run commands starting with this prefix here");
+      if (reason.code === WORKSPACE_UNTRUSTED_CODE) add("/trust", "lets build and test commands run in this folder");
+      if (reason.code === "approval-required") add("--policy autonomous", "no per-action questions (hard rails still apply)");
+      if (reason.code === "sandbox-insufficient") add("syn doctor --runtime", "shows why a full sandbox is required and missing");
+    }
+    if (planDenied) add("/plan (or Shift+Tab)", "leaves plan mode so edits and commands are allowed");
+    const subject = `${action.tool_name} ${snippet(target, 100)}${result === undefined ? "" : ` (${result.data.state})`}`;
+    const view: WhyView = {
+      kind: "why",
+      subject,
+      decision: decision.decision,
+      reasons: decision.reasons.map((reason) => ({ layer: reason.layer, code: reason.code, message: reason.message })),
+      howToChange,
+    };
+    const views = this.renderer.views;
+    if (views !== undefined) {
+      views.showView(view);
+      if (result?.data.result.error !== undefined && decision.decision === "allow") this.print([`  result: ${snippet(result.data.result.error.message, 200)}`]);
+      return;
+    }
+    const lines = [`${subject} ${this.glyphs.sep} ${decision.decision}`];
+    for (const reason of view.reasons) lines.push(`  ${reason.layer}: ${reason.message} (${reason.code})`);
+    for (const entry of howToChange) lines.push(`  ${this.glyphs.name === "rich" ? "→" : "->"} ${entry.command}: ${entry.effect}`);
+    this.print(lines);
+  }
+
+  public async compact(focus: string): Promise<void> {
+    const log = this.log;
+    if (log === undefined) {
+      this.print(["Nothing to compact yet."]);
+      return;
+    }
+    const events = await this.readEvents();
+    const history = await reconstructHistory(events, this.runtime.blobs, { role: "session", taskId: undefined, attemptId: undefined });
+    const tokensBefore = history.messages.reduce((sum, entry) => sum + messageTokens(entry.message), 0);
+    const compactor = createCompactor({
+      blobs: this.runtime.blobs,
+      writerFor: (sessionId) => (sessionId === log.sessionId ? log : undefined),
+      keepRecentTokens: 6_000,
+      summarize: async (input, signal) => {
+        const content = await extractiveSummarizer(input, signal);
+        return focus === "" ? content : { ...content, summary: `Focus requested by the user: ${focus}\n${content.summary}` };
+      },
+    });
+    const outcome = await compactor.compact({ sessionId: log.sessionId, events, messages: history.messages, trigger: "manual", tokensBefore }, this.outer.signal);
+    if (outcome.status === "compacted") {
+      const data = outcome.event.type === "context/compacted" ? outcome.event.data : undefined;
+      this.print([`${this.glyphs.ok} Compacted: ~${data?.tokens_before ?? tokensBefore} → ~${data?.tokens_after ?? "?"} tokens ${this.glyphs.sep} older messages are summarized (the log keeps everything)`]);
+    } else if (outcome.status === "nothing-to-compact") this.print(["Nothing to compact: the conversation is still short."]);
+    else if (outcome.status === "thrash") this.print(["Just compacted; try again after a few more steps."]);
+    else this.print(["Compaction is unavailable for this conversation."]);
+  }
+
+  public async report(name: "context" | "permissions" | "tasks" | "memory" | "diff" | "log", argument: string): Promise<void> {
+    switch (name) {
+      case "context":
+        this.print(contextReport(await this.readEvents()));
+        return;
+      case "permissions":
+        this.print([...(this.planOn ? ["plan mode is on: edits and commands are refused until you leave it"] : []), ...permissionsReport(this.runtime, await this.readEvents())]);
+        return;
+      case "tasks": {
+        const events = await this.orchestrationEvents();
+        this.print(events.length === 0 ? ["No worker runs in this conversation yet."] : tasksReport(events));
+        return;
+      }
+      case "memory":
+        this.print(await memoryReport(this.runtime));
+        return;
+      case "diff":
+        this.print(await this.diff());
+        return;
+      case "log": {
+        const count = Number(argument.split(/\s+/)[0] || "20");
+        const events = await this.readEvents();
+        const shown = events.slice(-Math.max(1, Number.isFinite(count) ? count : 20));
+        this.print(
+          shown.length === 0
+            ? ["Nothing recorded yet."]
+            : shown.map((event) => {
+                const line = describeEvent(event);
+                return `[event] #${event.seq} ${event.type}${line === undefined ? "" : ` · ${line.text}`}`;
+              }),
+        );
+      }
+    }
+  }
+
   private async diff(): Promise<string[]> {
     const events = await this.readEvents();
     const restored = new Set(events.flatMap((event) => (event.type === "checkpoint/restored" ? [event.data.checkpoint_seq] : [])));
@@ -786,68 +1623,86 @@ class Conversation {
       if (event.type !== "checkpoint/recorded" || restored.has(event.seq)) continue;
       for (const file of event.data.files) paths.set(file.path, (paths.get(file.path) ?? 0) + 1);
     }
-    if (paths.size === 0) return ["Synorch has not changed any file in this conversation."];
-    return [`Changed by Synorch (not independently reviewed):`, ...[...paths].map(([file, edits]) => `  ${file}${edits > 1 ? ` (${edits} edits)` : ""}`)];
+    const runEvents = await this.orchestrationEvents();
+    const reviewed = new Set(runEvents.flatMap((event) => (event.type === "review/recorded" && event.data.decision === "accept" ? [event.data.task_id] : [])));
+    const integrated = new Map<string, boolean>();
+    for (const event of runEvents) if (event.type === "task/integrated") for (const file of event.data.paths) integrated.set(file, (integrated.get(file) ?? false) || reviewed.has(event.data.task_id));
+    if (paths.size === 0 && integrated.size === 0) return ["Synorch has not changed any file in this conversation."];
+    const lines: string[] = [];
+    if (paths.size > 0) lines.push(`Changed by Synorch (not independently reviewed):`, ...[...paths].map(([file, edits]) => `  ${file}${edits > 1 ? ` (${edits} edits)` : ""}`));
+    if (integrated.size > 0) lines.push("Integrated by workers (checked by Synorch):", ...[...integrated].map(([file, accepted]) => `  ${file}${accepted ? " · independently reviewed" : ""}`));
+    return lines;
   }
 
-  /** `/plan <goal>` (K0): the existing coordinator path, with a compact summary (the live board is K1). */
-  private async orchestrate(goal: string): Promise<void> {
-    const g = this.glyphs;
-    if (goal === "") {
-      this.note("info", "Usage: /plan <goal>  ·  plans the goal, runs parallel workers in their own worktrees and has an independent reviewer check the result");
+  public async clear(): Promise<void> {
+    if (this.turnRunning || this.orchestration !== undefined) {
+      this.print(["Synorch is working; /cancel first."]);
       return;
     }
-    const runtime = this.runtime;
-    if (!this.trustAsked && !runtime.trust.state().trusted && runtime.sandbox.enforcement !== "full" && this.renderer.approvals.availability === "interactive") {
-      this.trustAsked = true;
-      if (await promptTrustForCommand(runtime, this.renderer, "the workers' checks", this.outer.signal)) this.policyCache = undefined;
-    }
-    this.coordinator ??= runtime.createCoordinator(runtime.brokerFor(this.renderer.approvals));
-    const collected: SessionEvent[] = [];
-    const stopCollecting = runtime.subscribe((event) => {
-      if (event.kind === "session-event") collected.push(event.event);
-    });
-    this.note("info", `${g.bullet} Workers ${g.sep} planning "${goal}" ${g.sep} this can take a few minutes ${g.sep} /cancel stops it`);
-    const active = linked(this.outer.signal);
-    this.active = active;
-    const started = performance.now();
-    try {
-      const outcome = await this.coordinator.run(
-        {
-          goal,
-          workspaceRoot: runtime.workspaceRoot,
-          policyMode: runtime.policyMode,
-          headless: this.renderer.approvals.availability === "headless",
-          resumeSessionId: undefined,
-          budget: runtime.config.budget,
-        },
-        active.signal,
+    const previous = this.sessionId;
+    await this.log?.close().catch(() => undefined);
+    this.log = undefined;
+    this.sessionId = undefined;
+    this.driver = undefined;
+    this.turnId = undefined;
+    this.routeRecorded = false;
+    this.orchestratedSessions.length = 0;
+    this.pendingNotes.length = 0;
+    this.requests.clear();
+    this.lastTracker = undefined;
+    this.print([`${this.glyphs.ok} New conversation${previous === undefined ? "" : ` ${this.glyphs.sep} the previous one is saved (/resume)`}`]);
+  }
+
+  public async resume(argument: string): Promise<void> {
+    const list = (await this.conversations()).filter((entry) => entry.sessionId !== this.sessionId).slice(0, 10);
+    if (argument === "") {
+      this.print(
+        list.length === 0
+          ? ["No other conversations in this folder."]
+          : ["Recent conversations (/resume <n>):", ...list.map((entry, index) => `  ${String(index + 1).padStart(2)}. ${snippet(entry.title, 70)} ${this.glyphs.sep} ${relativeTime(Date.parse(entry.at))}`)],
       );
-      const mine = collected.filter((event) => event.run_id === outcome.runId);
-      const tasks = new Map<string, { key: string; role: string; state: string }>();
-      for (const event of mine) {
-        if (event.type === "task/created") tasks.set(event.data.task_id, { key: event.data.key, role: event.data.role, state: "waiting" });
-        if (event.type === "task/state_changed") {
-          const task = tasks.get(event.data.task_id);
-          if (task !== undefined) task.state = event.data.to;
-        }
-      }
-      const elapsed = Math.round((performance.now() - started) / 1000);
-      const status = outcome.status === "succeeded" ? "done" : outcome.status;
-      this.note(outcome.status === "succeeded" ? "info" : "warning", `${g.bullet} Workers ${g.sep} ${tasks.size} task${tasks.size === 1 ? "" : "s"} ${g.sep} ${status} in ${elapsed}s`);
-      for (const task of tasks.values()) {
-        const glyph = task.state === "completed" ? g.ok : task.state === "failed" || task.state === "cancelled" || task.state === "blocked" ? g.fail : g.bullet;
-        this.note("info", `  ${glyph} ${task.key.padEnd(18)} ${task.role.padEnd(12)} ${task.state.replaceAll("_", " ")}`);
-      }
-      const summary = outcome.summary.trim().split("\n").filter((line) => line.trim() !== "").slice(0, 6);
-      for (const line of summary) this.note("info", `  ${line}`);
-      this.pendingNotes.push(`the user ran /plan "${goal}" with workers; the run ${outcome.status}: ${outcome.summary.replace(/\s+/g, " ").slice(0, 600)}`);
-    } catch (error) {
-      this.showFailure(failureInfo(error));
-    } finally {
-      stopCollecting();
-      if (this.active === active) this.active = undefined;
+      return;
     }
+    if (this.turnRunning || this.orchestration !== undefined) {
+      this.print(["Synorch is working; /cancel first."]);
+      return;
+    }
+    const index = Number(argument);
+    const chosen = Number.isInteger(index) && index >= 1 ? list[index - 1]?.sessionId : list.find((entry) => entry.sessionId === argument)?.sessionId;
+    if (chosen === undefined) {
+      this.print([`No conversation "${argument}"; /resume lists them.`]);
+      return;
+    }
+    await this.log?.close().catch(() => undefined);
+    this.log = undefined;
+    this.orchestratedSessions.length = 0;
+    this.pendingNotes.length = 0;
+    this.lastTracker = undefined;
+    await this.showResumed(await this.openSession(chosen));
+  }
+
+  /** `/mouse [on|off]` when it reaches the session (the interactive renderer normally handles it itself). */
+  public async mouse(argument: string): Promise<void> {
+    const controls = this.renderer.controls;
+    if (controls === undefined) {
+      this.print(["Mouse mode needs the interactive terminal view."]);
+      return;
+    }
+    const wanted = /^on$/i.test(argument) ? true : /^off$/i.test(argument) ? false : !controls.mouseMode;
+    controls.setMouseMode(wanted);
+    this.print([`Mouse mode ${wanted ? "on: wheel scrolls, click expands; /select for native text selection" : "off: the terminal selects text"}`]);
+  }
+
+  /** `/graph`: the plan graph of the running or last worker run of this conversation. */
+  public async graph(): Promise<void> {
+    const tracker = this.orchestration?.tracker ?? this.lastTracker;
+    if (tracker === undefined || tracker.view().tasks.length === 0) {
+      this.print(["No worker run in this conversation yet: the graph shows a run's tasks and their dependencies."]);
+      return;
+    }
+    const views = this.renderer.views;
+    if (views !== undefined) views.showGraph(tracker.view());
+    else this.print(tracker.view().tasks.map((task) => `${task.key} (${task.role}) ${task.state.replaceAll("_", " ")}${task.dependsOn === undefined || task.dependsOn.length === 0 ? "" : ` after ${task.dependsOn.join(", ")}`}`));
   }
 }
 

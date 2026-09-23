@@ -85,6 +85,7 @@ import type { RouteOverride } from "./args.ts";
 import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts";
 import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
 import { withRoleDefinitions } from "./role-policy.ts";
+import { createOrchestrateSlot, createOrchestrateTool, type OrchestrateSlot } from "./orchestrate-tool.ts";
 import { loadScript } from "./scripted-script.ts";
 import { recordTrustDecision } from "./trust.ts";
 
@@ -161,6 +162,8 @@ export interface Runtime {
   readonly context: ContextBuilder;
   readonly budgetGate: BudgetGateSlot;
   readonly credentials: CredentialResolver;
+  /** The `orchestrate` tool's handler slot (ADR-21 D4): set by the open conversation, empty otherwise. */
+  readonly orchestrate: OrchestrateSlot;
   /** Lazily opened: probing the OS keychain can spawn a helper process. */
   credentialStore(): SynorchCredentialStore;
   authProvider(providerId: string, method: AuthProvider["method"], profile: string): AuthProvider | undefined;
@@ -529,6 +532,9 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     },
   });
 
+  const orchestrate = createOrchestrateSlot();
+  registry.register(createOrchestrateTool(orchestrate) as never);
+
   const budgetGate = createBudgetGateSlot();
   const context = createContextBuilder({
     readSession: async (sessionId) => writers.get(sessionId) ?? (await rawSessions.openForRead(sessionId)),
@@ -625,6 +631,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     context,
     budgetGate,
     credentials,
+    orchestrate,
     credentialStore,
     authProvider,
     subscribe(listener) {

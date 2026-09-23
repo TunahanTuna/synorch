@@ -93,6 +93,10 @@ class FixedAgentDriver implements AgentDriver {
     this.#steers.push(text);
   }
 
+  public drainSteers(): readonly string[] {
+    return this.#steers.splice(0);
+  }
+
   public async runTurn(input: TurnInput, signal: AbortSignal): Promise<TurnOutcome> {
     if (input.sessionId !== this.#deps.events.sessionId) {
       throw new RangeError(`turn targets ${input.sessionId} but the driver writes ${this.#deps.events.sessionId}`);

@@ -3,6 +3,7 @@ import {
   type ApprovalBroker,
   type AuthInteraction,
   type HarnessErrorInfo,
+  type InteractiveInputControls,
   type PolicyMode,
   type RenderEvent,
   type RunId,
@@ -11,6 +12,7 @@ import {
   type SessionId,
   type TerminalRenderer,
 } from "../contracts/index.ts";
+import type { ViewHost } from "../contracts/views.ts";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import {
   createPiTuiRenderer,
@@ -70,6 +72,8 @@ export interface SessionRenderer extends TerminalRenderer {
   readonly exitCode: number | undefined;
   /** Conversation view: draws the earlier messages of a resumed conversation. */
   replay?(events: readonly SessionEvent[]): void;
+  /** K1-U3 view host (cards, live board, plan graph) of the pi-tui and plain renderers; absent for JSONL. */
+  readonly views?: ViewHost | undefined;
 }
 
 export class DeferredJsonlRenderer implements SessionRenderer {
@@ -153,9 +157,13 @@ class HumanRenderer implements SessionRenderer {
   public readonly exitCode = undefined;
   private readonly inner: TerminalRenderer;
 
+  /** K1-U1 interactive controls (palette, attachments, model picker, plan and mouse modes); interactive renderer only. */
+  public readonly controls?: InteractiveInputControls;
+
   public constructor(inner: TerminalRenderer) {
     this.inner = inner;
     this.kind = inner.kind === "tui" ? "tui" : "plain";
+    if (inner.controls !== undefined) this.controls = inner.controls;
   }
 
   public get input() {
@@ -168,6 +176,12 @@ class HumanRenderer implements SessionRenderer {
 
   public get auth() {
     return this.inner.auth;
+  }
+
+  /** K1-U3 views, when the inner renderer hosts them. */
+  public get views(): ViewHost | undefined {
+    const inner = this.inner as Partial<ViewHost>;
+    return typeof inner.showView === "function" && typeof inner.setBoard === "function" && typeof inner.showGraph === "function" ? (inner as ViewHost) : undefined;
   }
 
   public start(header: SessionHeaderView): Promise<void> {

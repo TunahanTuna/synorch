@@ -127,6 +127,12 @@ export interface AgentDriver {
   runTurn(input: TurnInput, signal: AbortSignal): Promise<TurnOutcome>;
   /** Queues a user message for the next safe boundary (after the current tool batch). */
   steer(text: string): void;
+  /**
+   * Removes and returns the steering messages still queued: typed while the last step finished,
+   * so the turn ended before a boundary could deliver them. The caller starts a follow-up turn
+   * with them instead of losing them (ADR-21 D8 mid-turn steering).
+   */
+  drainSteers?(): readonly string[];
 }
 
 /**

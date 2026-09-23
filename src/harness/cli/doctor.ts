@@ -215,10 +215,18 @@ async function capabilitiesCheck(runtime: Runtime, signal: AbortSignal): Promise
   const tiers = ["orchestrator", "complex_worker", "fast_worker"] as const;
   const missing = tiers.filter((tier) => !runtime.config.router.rules.some((rule) => rule.tier === tier));
   if (missing.length > 0) statuses.push("warn");
+  // The conversation (ADR-21 decision 4) uses the session tier, else the orchestrator route; a fast model keeps chat responsive.
+  const rules = runtime.config.router.rules;
+  const fast = rules.find((rule) => rule.tier === "fast_worker");
+  const sessionHint = rules.some((rule) => rule.tier === "session")
+    ? ""
+    : fast === undefined
+      ? "; the conversation uses the orchestrator route"
+      : `; the conversation uses the orchestrator route (for faster chat: --profile session=${fast.route.provider_id}/${fast.route.model_id} or /model fast_worker --save)`;
   return {
     id: "capabilities",
     status: worst(statuses),
-    summary: `${runtime.adapters.length} adapter(s) configured${missing.length > 0 ? `; no route for ${missing.join(", ")}` : "; every tier has a route"}`,
+    summary: `${runtime.adapters.length} adapter(s) configured${missing.length > 0 ? `; no route for ${missing.join(", ")}` : "; every tier has a route"}${sessionHint}`,
     details: [...details, ...runtime.config.router.rules.map((rule) => ({ route: rule }))],
   };
 }

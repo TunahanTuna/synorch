@@ -37,6 +37,17 @@ export {
   type TerminalGuard,
 } from "./terminal-lifecycle.ts";
 export { ToolCardTracker, type ToolCard, type ToolCardStatus } from "./tool-cards.ts";
+export {
+  AttachmentTray,
+  DEFAULT_COMMAND_PALETTE,
+  filterCommands,
+  InputCompletionProvider,
+  LOCAL_COMMANDS,
+  parseSgrMouse,
+  readClipboardImage,
+  WorkspaceFileIndex,
+  type ClipboardImage,
+} from "./input/index.ts";
 export type { PiTuiLifecycle, PiTuiRenderer, PiTuiRendererOptions } from "./pi-tui-renderer.ts";
 
 /** Loads the pi-tui adapter on demand; call only when `selectRendererKind` returned `tui`. */

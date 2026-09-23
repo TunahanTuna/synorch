@@ -112,6 +112,20 @@ renk: --color > config > NO_COLOR (boş değil) > FORCE_COLOR > stream.hasColors
 
 Yeni tur veya istek başlayınca iptal yeniden silahlanır. TUI'de ek olarak: boştayken editörde taslak varsa ilk Ctrl+C taslağı temizler; boş editörde Ctrl+D çıkış; Enter gönderir, Shift+Enter yeni satır. Raw modda Ctrl+C SIGINT üretmediği için TUI tuşu girdi olarak alır; plain ve JSONL modlarında aynı kurallar SIGINT'e bağlanır.
 
+### 6.1 Girdi ve etkileşim (K1-U1, yalnız TUI; kod `src/harness/tui/input/**`)
+
+| Girdi | Davranış |
+| --- | --- |
+| `/` (mesaj başında) | Komut paleti: ad + tek satır açıklama + argüman ipucu (`/plan <goal>`), yazdıkça süzülür; ↑/↓ seçer, Tab/Enter tamamlar. `<zorunlu>` argümanlı komutta Enter yalnız tamamlar (`/plan `), diğerlerinde gönderir. Satırlar oturumdan gelir (`controls.setCommands`); `/mouse`, `/select`, `/exit` renderer'ın kendisindedir. |
+| `@` (kelime sınırında) | Workspace yollarında bulanık tamamlama: `git ls-files --cached --others --exclude-standard` (git yoksa sınırlı dizin taraması), bellekte önbellek, 30 sn'den eskiyse arka planda yenilenir. Boşluklu yol `@"a b.md"` olarak eklenir; dizin `@src/` ile gezinir. Gönderimde var olan her `@yol` bir `Attachment` (`file`/`directory`) olur. |
+| Alt+V, Ctrl+V (uygulamaya ulaşırsa), boş bracketed paste | Pano görseli: pi-tui native yardımcısı, sonra Windows `powershell.exe Get-Clipboard -Format Image` (Forms yedeği), macOS `pngpaste`/`osascript`, Linux `wl-paste`/`xclip`. Geçici PNG `os.tmpdir()/synorch-images/` altına yazılır, editöre `[image N]` çipi girer. Yapıştırılan veya sürüklenen tek görsel yolu (`.png/.jpg/.gif/.webp`, tırnak ve `file://` temizlenir) da çip olur. Windows Terminal Ctrl+V'yi kendisi yakalar; görsel için Alt+V. |
+| Shift+Tab (VT input yoksa Alt+M) | Plan modu aç/kapa: alt bilgide `plan mode`, editör çizgisi vurgulu. Politika daraltmasını oturum uygular (`controls.onPlanModeChange`). |
+| Shift+Enter, Ctrl+J | Yeni satır. ↑/↓ oturum içi geçmiş. 10 satırı veya 1000 karakteri aşan yapıştırma `[paste #1 +120 lines]` işaretine iner, gönderimde açılır. |
+| `/mouse [on\|off]`, `SYN_MOUSE=1` | SGR 1006 fare raporlaması. **Varsayılan kapalı**: açıkken terminal kendi seçimini ve scrollback'ini bırakır. Açıkken çerçeve ekranı doldurur, tekerlek transcript'i kaydırır (Shift+PgUp/PgDn da), tıklama tool satırını tek başına açar/kapar, Enter veya Ctrl+End en alta döner. Metin seçmek için çoğu terminalde Shift basılı sürükleyin ya da `/select`: fare raporlaması kapanır, tüm transcript çizilir, Esc/Enter geri döner. |
+| `/model` | Oturum `controls.openModelPicker(entries)` ile seçici açar: tier, provider/model, auth; mevcut route işaretli ve seçili; Esc `undefined` döner. |
+
+Oturum sınırı (U2): `TerminalRenderer.controls?: InteractiveInputControls` (plain/JSONL'de yok) ve `UserInputSource.next()` mesaj sonucundaki isteğe bağlı `attachments: Attachment[]`. Görsel baytları yalnız `image_input` yetenekli route'lara gider; diğerleri için oturum metin notu ekler. `Attachment`, `CommandPaletteEntry`, `ModelPickerEntry` şekilleri `contracts/renderer.ts` içinde örnekli belgelenmiştir.
+
 ## 7. Terminal yaşam döngüsü
 
 - `installTerminalGuard` `exit`, `uncaughtException`, `unhandledRejection`, `SIGTERM`, `SIGHUP` (Windows'ta pencere kapatma) ve Windows'ta `SIGBREAK` için kanca kurar; geri yükleme en fazla bir kez çalışır, `stop()` kancaları kaldırır.

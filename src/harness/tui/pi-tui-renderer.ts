@@ -4,6 +4,7 @@ import {
   Container,
   CURSOR_MARKER,
   Editor,
+  getNativeClipboard,
   Markdown,
   matchesKey,
   ProcessTerminal,
@@ -22,9 +23,13 @@ import type {
   ApprovalBroker,
   ApprovalDecision,
   ApprovalRequest,
+  Attachment,
   AuthInteraction,
   AuthNotice,
+  CommandPaletteEntry,
   DeviceCodePrompt,
+  InteractiveInputControls,
+  ModelPickerEntry,
   ModelStreamEvent,
   PolicyMode,
   RenderEvent,
@@ -64,6 +69,12 @@ import {
   type TerminalGuard,
 } from "./terminal-lifecycle.ts";
 import { TOOL_STATUS_LABEL, ToolCardTracker, type ToolCard } from "./tool-cards.ts";
+import { AttachmentTray } from "./input/attachments.ts";
+import { InputCompletionProvider } from "./input/autocomplete.ts";
+import { imagePathFromPaste, readClipboardImage, type ClipboardImage } from "./input/clipboard.ts";
+import { DEFAULT_COMMAND_PALETTE, mergeCommands, requiresArgument } from "./input/commands.ts";
+import { WorkspaceFileIndex } from "./input/file-index.ts";
+import { isMouseSequence, MOUSE_DISABLE_SEQUENCE, MOUSE_ENABLE_SEQUENCE, parseSgrMouse, TranscriptViewport, type MouseInput } from "./input/mouse.ts";
 
 /**
  * The interactive renderer (ADR-04): the only file that imports `@earendil-works/pi-tui`. It keeps
@@ -106,6 +117,16 @@ export interface PiTuiRendererOptions {
   readonly glyphs?: GlyphSet;
   /** L2: raw event lines under the conversation (`--debug`, `SYN_DEBUG=1`). */
   readonly debug?: boolean;
+  /** Root for `@` completion and mention attachments; defaults to the header's workspace root. */
+  readonly workspaceRoot?: string;
+  /** Pre-built path index (tests); otherwise one is created for the workspace root. */
+  readonly fileIndex?: WorkspaceFileIndex;
+  /** Start with SGR mouse reporting on (default: `SYN_MOUSE=1`, otherwise off so native selection works). */
+  readonly mouse?: boolean;
+  /** Clipboard image reader (tests); defaults to pi-tui's native helper, then the platform tools. */
+  readonly readClipboardImage?: () => Promise<ClipboardImage | undefined>;
+  /** Clipboard text reader used when Ctrl+V reaches the app instead of the terminal pasting. */
+  readonly readClipboardText?: () => Promise<string | undefined>;
 }
 
 /** Wraps a pi-tui terminal so that no single write exceeds the ConPTY-safe size. */
@@ -333,6 +354,10 @@ class ToolLineView implements Component {
     this.item = item;
   }
 
+  public get itemId(): string {
+    return this.item.id;
+  }
+
   public invalidate(): void {}
 
   public render(width: number): string[] {
@@ -402,6 +427,9 @@ class FooterView implements Component {
 type Interruption = { readonly kind: "interrupt" | "exit" };
 type InputResult = Awaited<ReturnType<UserInputSource["next"]>>;
 
+const BRACKETED_PASTE = /^\x1b\[200~([\s\S]*)\x1b\[201~$/;
+const IMAGE_PATH_HINT = /\.(png|jpe?g|gif|webp)['"]?\s*$/i;
+
 interface StreamState {
   readonly parts: Map<number, { readonly view: Markdown; raw: string }>;
 }
@@ -442,6 +470,18 @@ export class PiTuiRenderer implements TerminalRenderer {
   private expanded = false;
   private spinner: ReturnType<typeof setInterval> | undefined;
   private footerLabel: { folder: string; branch: string | undefined; mode: string } = { folder: "", branch: undefined, mode: "" };
+  public readonly controls: InteractiveInputControls;
+  private readonly completions: InputCompletionProvider;
+  private readonly viewport: TranscriptViewport;
+  private readonly expandedItems = new Set<string>();
+  private readonly attachmentListeners = new Set<(attachment: Attachment) => void>();
+  private readonly planListeners = new Set<(on: boolean) => void>();
+  private tray: AttachmentTray;
+  private inputRoot = process.cwd();
+  private planModeOn = false;
+  private mouseOn = false;
+  private selectMode = false;
+  private mousePress: MouseInput | undefined;
 
   public constructor(options: PiTuiRendererOptions) {
     this.options = options;
@@ -482,6 +522,36 @@ export class PiTuiRenderer implements TerminalRenderer {
         : undefined;
     this.editor = new Editor(this.tui, { borderColor: (text) => style.dim(text), selectList: this.selectTheme });
     this.editor.onSubmit = (text) => this.submit(text);
+    this.completions = new InputCompletionProvider(mergeCommands(DEFAULT_COMMAND_PALETTE), options.fileIndex);
+    this.editor.setAutocompleteProvider(this.completions);
+    this.tray = new AttachmentTray(options.workspaceRoot ?? options.fileIndex?.root ?? process.cwd());
+    this.viewport = new TranscriptViewport(this.transcript, {
+      siblings: () => this.tui.children,
+      rows: () => this.terminal.rows,
+      hint: (text, width) => fit(style.dim(text), width),
+      up: (options.glyphs ?? GLYPH_SETS.rich).name === "ascii" ? "^" : "↑",
+    });
+    const self = this;
+    this.controls = {
+      setCommands: (entries) => this.setCommands(entries),
+      onAttachment: (listener) => {
+        this.attachmentListeners.add(listener);
+        return () => this.attachmentListeners.delete(listener);
+      },
+      openModelPicker: (entries, signal) => this.openModelPicker(entries, signal),
+      get planMode() {
+        return self.planModeOn;
+      },
+      setPlanMode: (on) => this.setPlanMode(on),
+      onPlanModeChange: (listener) => {
+        this.planListeners.add(listener);
+        return () => this.planListeners.delete(listener);
+      },
+      get mouseMode() {
+        return self.mouseOn;
+      },
+      setMouseMode: (on) => this.setMouseMode(on),
+    };
     this.queue = new RenderQueue((event) => this.consume(event), {
       ...(options.queueCapacity === undefined ? {} : { capacity: options.queueCapacity }),
       ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
@@ -538,13 +608,16 @@ export class PiTuiRenderer implements TerminalRenderer {
       for (const notice of header.notices) lines.push(this.style.yellow(`notice: ${sanitizeInline(notice)}`));
       this.header.setText(lines.join("\n"));
       this.tui.addChild(this.header);
-      this.tui.addChild(this.transcript);
+      this.tui.addChild(this.viewport);
       this.tui.addChild(this.status);
       this.tui.addChild(this.editor);
     }
+    this.startInput(header);
     this.tui.setFocus(this.editor);
     this.removeInputListener = this.tui.addInputListener((data) => this.onKey(data));
     this.tui.start();
+    const mouseEnv = this.options.environment.env.SYN_MOUSE;
+    if (this.options.mouse ?? (mouseEnv !== undefined && mouseEnv !== "" && mouseEnv !== "0")) this.setMouseMode(true, true);
   }
 
   public render(event: RenderEvent): void {
@@ -575,11 +648,11 @@ export class PiTuiRenderer implements TerminalRenderer {
     });
     this.header.setText([this.style.cyan(title), ...(warning === undefined ? [] : [this.style.yellow(warning)])].join("\n"));
     this.tui.addChild(this.header);
-    this.tui.addChild(this.transcript);
+    this.tui.addChild(this.viewport);
     this.tui.addChild(new ActivityLineView(presenter, this.style, () => this.now()));
     this.tui.addChild(new Text("", 0, 0));
     this.tui.addChild(this.editor);
-    this.tui.addChild(new FooterView(() => footerText(presenter.footer(), { ...this.footerLabel, glyphs: presenter.glyphs, mode: this.footerLabel.mode || undefined }), this.style));
+    this.tui.addChild(new FooterView(() => footerText(presenter.footer(), { ...this.footerLabel, glyphs: presenter.glyphs, mode: this.modeLabel(presenter.glyphs.sep) }), this.style));
   }
 
   private applyOp(op: ViewOp): void {
@@ -606,7 +679,7 @@ export class PiTuiRenderer implements TerminalRenderer {
         return view;
       }
       case "tool":
-        return new ToolLineView(item, this.style, glyphs, () => this.expanded);
+        return new ToolLineView(item, this.style, glyphs, () => this.expanded || this.expandedItems.has(item.id));
       case "note": {
         const text =
           item.level === "error" ? this.style.red(item.text) : item.level === "warning" ? this.style.yellow(item.text) : this.style.dim(item.text);
@@ -659,6 +732,7 @@ export class PiTuiRenderer implements TerminalRenderer {
     this.spinner = undefined;
     this.dialog?.cancel();
     this.removeInputListener?.();
+    if (this.mouseOn && !this.selectMode) this.terminal.write(MOUSE_DISABLE_SEQUENCE);
     await this.terminal.drainInput(this.options.drainInputMs ?? 300, 50);
     this.tui.stop();
     this.guard?.release();
@@ -666,7 +740,9 @@ export class PiTuiRenderer implements TerminalRenderer {
     this.options.codepage?.restore();
   }
 
-  private onKey(data: string): { consume?: boolean } | undefined {
+  private onKey(data: string): { consume?: boolean; data?: string } | undefined {
+    const input = this.onInputKey(data);
+    if (input !== undefined) return input;
     if (matchesKey(data, "ctrl+c")) {
       if (this.dialog !== undefined) {
         this.dialog.cancel();
@@ -695,20 +771,290 @@ export class PiTuiRenderer implements TerminalRenderer {
     return undefined;
   }
 
+  // ---- K1-U1 input: palette, @files, images, plan mode, mouse, model picker ------------------------
+
+  private startInput(header: SessionHeaderView): void {
+    const root = this.options.workspaceRoot ?? this.options.fileIndex?.root ?? (header.workspaceRoot === "." ? process.cwd() : header.workspaceRoot);
+    this.inputRoot = root;
+    this.tray = new AttachmentTray(root);
+    const index = this.options.fileIndex ?? new WorkspaceFileIndex({ root });
+    this.completions.setFiles(index);
+    index.warm();
+  }
+
+  private setCommands(entries: readonly CommandPaletteEntry[]): void {
+    this.completions.setCommands(mergeCommands(entries));
+  }
+
+  /** Footer mode field: select/plan/ask/mouse, joined with the glyph separator. */
+  private modeLabel(sep: string): string | undefined {
+    const parts: string[] = [];
+    if (this.selectMode) parts.push("select mode (esc to exit)");
+    if (this.planModeOn) parts.push("plan mode");
+    if (this.footerLabel.mode !== "") parts.push(this.footerLabel.mode);
+    if (this.mouseOn && !this.selectMode) parts.push("mouse");
+    return parts.length === 0 ? undefined : parts.join(` ${sep} `);
+  }
+
+  /** Keys owned by the input layer; undefined lets the rest of `onKey` and the editor see them. */
+  private onInputKey(data: string): { consume?: boolean; data?: string } | undefined {
+    if (isMouseSequence(data)) {
+      const event = parseSgrMouse(data);
+      if (event !== undefined && this.mouseOn && !this.selectMode) this.handleMouse(event);
+      return { consume: true };
+    }
+    if (this.dialog !== undefined) return undefined;
+    const paste = BRACKETED_PASTE.exec(data);
+    if (paste !== null) return this.onPaste(paste[1] ?? "", data);
+    if (this.selectMode && (matchesKey(data, "escape") || matchesKey(data, "enter"))) {
+      this.leaveSelectMode();
+      return { consume: true };
+    }
+    if (matchesKey(data, "shift+tab") || matchesKey(data, "alt+m")) {
+      this.setPlanMode(!this.planModeOn);
+      return { consume: true };
+    }
+    if (matchesKey(data, "alt+v") || matchesKey(data, "ctrl+v")) {
+      void this.pasteFromClipboard(matchesKey(data, "ctrl+v"));
+      return { consume: true };
+    }
+    if (this.mouseOn && matchesKey(data, "ctrl+end")) {
+      this.viewport.toBottom();
+      this.tui.requestRender();
+      return { consume: true };
+    }
+    if (this.mouseOn && (matchesKey(data, "shift+pageUp") || matchesKey(data, "shift+pageDown"))) {
+      if (this.viewport.page(matchesKey(data, "shift+pageUp") ? -1 : 1)) this.tui.requestRender();
+      return { consume: true };
+    }
+    if (matchesKey(data, "enter") && this.editor.isShowingAutocomplete()) {
+      // `/plan` + Enter completes to `/plan ` so the required argument can be typed.
+      const selected = (this.editor as unknown as { autocompleteList?: SelectList }).autocompleteList?.getSelectedItem();
+      const entry = selected === null || selected === undefined ? undefined : this.completions.command(selected.value);
+      if (entry !== undefined && selected?.value.startsWith("/") === true && requiresArgument(entry)) return { data: "\t" };
+    }
+    return undefined;
+  }
+
+  private handleMouse(event: MouseInput): void {
+    if (event.type === "wheel") {
+      if (this.viewport.scroll((event.wheel ?? 0) * -3)) this.tui.requestRender();
+      return;
+    }
+    if (event.button !== "left") return;
+    if (event.type === "press") {
+      this.mousePress = event;
+      return;
+    }
+    if (event.type !== "release") return;
+    const press = this.mousePress;
+    this.mousePress = undefined;
+    if (press === undefined || press.y !== event.y) return;
+    const hit = this.viewport.hit(event.y);
+    if (hit instanceof ToolLineView) {
+      if (this.expandedItems.has(hit.itemId)) this.expandedItems.delete(hit.itemId);
+      else this.expandedItems.add(hit.itemId);
+      this.tui.requestRender();
+    }
+  }
+
+  /** `/mouse [on|off]` and `/select` run in the renderer; everything else goes to the session. */
+  private runLocalCommand(text: string): boolean {
+    const [command = "", argument = ""] = text.split(/\s+/);
+    switch (command.toLowerCase()) {
+      case "/mouse": {
+        const wanted = argument === "on" ? true : argument === "off" ? false : !this.mouseOn;
+        this.setMouseMode(wanted);
+        return true;
+      }
+      case "/select":
+        if (this.mouseOn) this.enterSelectMode();
+        else this.appendLine({ level: "info", text: "Native text selection is already on (mouse mode is off); select and copy with your terminal." });
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private setPlanMode(on: boolean): void {
+    if (this.planModeOn === on) return;
+    this.planModeOn = on;
+    this.editor.borderColor = on ? (text) => this.style.cyan(text) : (text) => this.style.dim(text);
+    if (this.presenter === undefined) this.appendLine({ level: "info", text: on ? "Plan mode on: Synorch reads and plans, no edits (Shift+Tab to leave)." : "Plan mode off." });
+    for (const listener of this.planListeners) listener(on);
+    if (this.started && !this.stopped) this.tui.requestRender();
+  }
+
+  private setMouseMode(on: boolean, silent = false): void {
+    if (this.mouseOn === on) return;
+    this.mouseOn = on;
+    if (!on) this.selectMode = false;
+    this.viewport.enabled = on;
+    this.viewport.toBottom();
+    this.mousePress = undefined;
+    if (this.started && !this.stopped) {
+      this.terminal.write(on ? MOUSE_ENABLE_SEQUENCE : MOUSE_DISABLE_SEQUENCE);
+      if (!silent) {
+        this.appendLine({
+          level: "info",
+          text: on
+            ? "Mouse on: the wheel scrolls, a click expands a tool row. Native selection is off: hold Shift to select, or /select. /mouse off turns it off."
+            : "Mouse off: native text selection and scrollback are back.",
+        });
+      }
+      this.tui.requestRender(true);
+    }
+  }
+
+  /** Copy-friendly: mouse reporting off and the full transcript drawn, until Esc or Enter. */
+  private enterSelectMode(): void {
+    if (this.selectMode || !this.mouseOn) return;
+    this.selectMode = true;
+    this.viewport.enabled = false;
+    this.terminal.write(MOUSE_DISABLE_SEQUENCE);
+    this.tui.requestRender(true);
+  }
+
+  private leaveSelectMode(): void {
+    if (!this.selectMode) return;
+    this.selectMode = false;
+    if (this.mouseOn) {
+      this.viewport.enabled = true;
+      this.viewport.toBottom();
+      this.terminal.write(MOUSE_ENABLE_SEQUENCE);
+    }
+    this.tui.requestRender(true);
+  }
+
+  /**
+   * Bracketed paste: an empty paste usually means the clipboard holds only an image (Windows
+   * Terminal, iTerm2); a single pasted/dragged image path becomes an image chip. Other text goes to
+   * the editor unchanged (large pastes collapse to `[paste #n +N lines]` there).
+   */
+  private onPaste(content: string, raw: string): { consume?: boolean; data?: string } | undefined {
+    if (content.trim() === "") {
+      void this.pasteFromClipboard(false);
+      return { consume: true };
+    }
+    if (content.includes("\n") || !IMAGE_PATH_HINT.test(content)) return undefined;
+    void imagePathFromPaste(content, this.inputRoot).then((image) => {
+      if (this.stopped) return;
+      if (image === undefined) this.editor.handleInput(raw);
+      else this.attachImage(image, "paste-path");
+      this.tui.requestRender();
+    });
+    return { consume: true };
+  }
+
+  private async pasteFromClipboard(textFallback: boolean): Promise<void> {
+    const reader =
+      this.options.readClipboardImage ??
+      (() => {
+        let native;
+        try {
+          native = getNativeClipboard();
+        } catch {
+          native = undefined;
+        }
+        return readClipboardImage({ platform: this.options.environment.platform, env: this.options.environment.env, native });
+      });
+    let image: ClipboardImage | undefined;
+    try {
+      image = await reader();
+    } catch {
+      image = undefined;
+    }
+    if (this.stopped) return;
+    if (image !== undefined) {
+      this.attachImage(image, "clipboard");
+      this.tui.requestRender();
+      return;
+    }
+    if (textFallback) {
+      // Ctrl+V reached the app, so the terminal did not paste: insert the clipboard text ourselves.
+      let text: string | undefined;
+      try {
+        text = this.options.readClipboardText !== undefined ? await this.options.readClipboardText() : ((await getNativeClipboard()?.getText()) ?? undefined);
+      } catch {
+        text = undefined;
+      }
+      if (text !== undefined && text !== "") {
+        this.editor.handleInput(`\x1b[200~${text}\x1b[201~`);
+        this.tui.requestRender();
+        return;
+      }
+    }
+    this.appendLine({ level: "info", text: "No image in the clipboard. Copy an image and press Alt+V (or paste an image file path)." });
+  }
+
+  private attachImage(image: ClipboardImage, source: "clipboard" | "paste-path"): void {
+    const attachment = this.tray.addImage(image, source);
+    const cursor = this.editor.getCursor();
+    const line = this.editor.getLines()[cursor.line] ?? "";
+    const before = line.slice(0, cursor.col);
+    this.editor.insertTextAtCursor(`${before === "" || before.endsWith(" ") ? "" : " "}${attachment.label} `);
+    for (const listener of this.attachmentListeners) listener(attachment);
+  }
+
+  /** `/model` picker: rows come from the session, which also applies the choice (U2). */
+  private openModelPicker(entries: readonly ModelPickerEntry[], signal?: AbortSignal): Promise<ModelPickerEntry | undefined> {
+    if (entries.length === 0 || this.stopped) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      const glyphs = this.presenter?.glyphs ?? GLYPH_SETS.rich;
+      const tierWidth = Math.min(14, Math.max(...entries.map((entry) => entry.tier.length)));
+      const items = entries.map((entry, index) => ({
+        value: String(index),
+        label: `${entry.current ? glyphs.bullet : " "} ${entry.tier.padEnd(tierWidth)}  ${entry.provider}/${entry.model}`,
+        description: [entry.auth, entry.current ? "current" : undefined, entry.disabled, entry.description].filter((part) => part !== undefined && part !== "").join(` ${glyphs.sep} `),
+      }));
+      const list = new SelectList(items, Math.min(items.length, 10), this.selectTheme, { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 60 });
+      const current = entries.findIndex((entry) => entry.current);
+      if (current >= 0) list.setSelectedIndex(current);
+      const box = new Box(1, 0);
+      box.addChild(new Text(this.style.cyan("Select model"), 0, 0));
+      box.addChild(new Text(this.style.dim("route per tier · provider/model · auth  —  Enter selects, Esc cancels"), 0, 0));
+      box.addChild(list);
+      let settled = false;
+      const finish = (entry: ModelPickerEntry | undefined): void => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        this.closeDialog();
+        resolve(entry);
+      };
+      const onAbort = (): void => finish(undefined);
+      if (signal?.aborted === true) {
+        resolve(undefined);
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      list.onSelect = (item) => {
+        const entry = entries[Number(item.value)];
+        if (entry === undefined || entry.disabled !== undefined) return;
+        finish(entry);
+      };
+      list.onCancel = () => finish(undefined);
+      this.openDialog(box, list, () => finish(undefined));
+    });
+  }
+
   private submit(text: string): void {
     const trimmed = text.trim();
     if (trimmed === "") return;
     this.editor.addToHistory(trimmed);
     this.editor.setText("");
+    this.viewport.toBottom();
     if (trimmed === "/exit" || trimmed === "/quit") {
       this.deliver({ kind: "exit" });
       return;
     }
+    if (this.runLocalCommand(trimmed)) return;
+    const attachments = this.tray.collect(trimmed);
     this.transcript.addChild(
       this.presenter !== undefined ? new UserMessageView(sanitizeTerminalText(trimmed), this.style) : new Text(`${this.style.cyan(">")} ${sanitizeTerminalText(trimmed)}`, 0, 0),
     );
     this.tui.requestRender();
-    this.deliver({ kind: trimmed.startsWith("/") ? "command" : "message", text: trimmed });
+    this.deliver({ kind: trimmed.startsWith("/") ? "command" : "message", text: trimmed, ...(attachments.length === 0 ? {} : { attachments }) });
   }
 
   private nextInput(signal: AbortSignal): Promise<InputResult> {

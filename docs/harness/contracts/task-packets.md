@@ -13,6 +13,9 @@ Alanlar: `schema_version: 1`, `plan_id`, `run_id`, `version`, `goal`, `risk`, `s
 - Task key'leri benzersiz; bağımlılıklar mevcut; DAG çevrimsiz (çevrim mesajda gösterilir).
 - Explorer/reviewer path sahibi olamaz; tüm workspace (`**`, `.`) veya `.git`/`.synorch` sahiplenilemez.
 - **Paralel yazım yasağı:** aralarında (geçişli) bağımlılık olmayan iki görevin `owned_paths`'leri kesişemez. Kesişim testi muhafazakârdır (`pathPatternsOverlap`, büyük/küçük harf duyarsız): şüphede sıralama zorunlu kılınır.
+- **Reviewer görevleri (K1.6-P2, canlı run 01M381W6):** tek bağımlılıklı reviewer görevi o görevin zorunlu bağımsız review'ünü yapılandırır (tier, ek kriter, ek doğrulama). **İki veya daha çok bağımlılıklı** reviewer görevi planın **entegrasyon review'üdür** (`isIntegrationReview`): bağımlılıkları kendi review'leriyle tamamlanıp entegre edildikten sonra ana çalışma alanında (birleşik sonuç, salt okunur) kendi reviewer attempt'iyle koşar ve **yalnız kendi** (görevler arası) kriterlerini denetler; kriterleri görev review'lerine eklenmez. Görev başına review her yazan standard/high-risk görevde kalır (ADR-09); ikisi aynı kriteri denetlemez. Kabul etmeyen entegrasyon review'ü orchestrator triyajına gider (notlarla kabul / review'ü yeniden koş / fail); entegre edilmiş iş geri alınmaz.
+- **Görevler arası kriterler:** görev kriteri o görevin artifact'ı + çalışma alanı okumalarıyla denetlenebilir olmalıdır. Bağımlı olmadığı başka bir görevin sahip olduğu dosyayı anan kriter (`placeCrossTaskCriteria`) ikisini de kapsayan entegrasyon reviewer görevine yeni bir `AC-n` olarak (`(from <görev>) …`) taşınır ve `assumptions`'a not düşülür; böyle bir reviewer yoksa veya görevin kendi kriteri kalmayacaksa plan ne yapılacağını söyleyen mesajla reddedilir.
+- **Okuma kapsamı:** explorer ve reviewer paketleri tüm çalışma alanını okur (`read_paths` + `**`, salt okunur; yazma kapsamı boş). `.git/**`, `.synorch/**`, `**/.env`, `**/.env.*` `forbidden_paths`'e eklenir (incelenen görevin sahip olduğu bir path ile kesişen hariç); kullanıcı/çalışma alanı policy'sinin yasakları ayrıca geçerlidir.
 - Onay `planDigest(plan)`'a bağlanır. Kapsam/risk artışı yeni `version` ve yeni onay gerektirir; eski onay `invalidated` olur.
 
 ## 2. Task Context Packet v2 (`kind: full`)
@@ -70,8 +73,9 @@ Kurallar: her `met` hükmü **bağımsız** en az bir kanıta dayanır: reviewer
 | Doğrulama geçti, risk `standard`/`high-risk` | `verifying → reviewing` |
 | Doğrulama geçti, risk `trivial` | `verifying → completed` |
 | Review `accept` + integrate (`task/integrated`) | `reviewing → completed` |
-| Review `revise` | `reviewing → changes_requested → ready` (delta packet) |
-| Review `block` | `reviewing → failed` |
+| Review `revise` veya `block` (harness doğrulaması geçmiş) | `reviewing → changes_requested → ready` (bulgularla delta packet, `review_revisions` bütçesi). Bütçe bitince orchestrator triyajı: `accept` (blocker bulgu yoksa; değişiklik bulgular not olarak entegre edilir) `reviewing → completed`, `retry` bir tur daha, `fail` `reviewing → failed` |
+| Review kriterleri okuma kapsamı yüzünden `unverifiable` | Harness sorunu: review bir kez, tüm çalışma alanının okunabildiği notuyla yeniden gönderilir (review denemesi harcanmaz) |
+| Entegrasyon review'ü (çok bağımlılıklı reviewer görevi) | `ready → running → verifying → reviewing → completed`; kabul etmezse triyaj: `accept` → `completed` (notlarla), `retry` → `changes_requested → ready`, `fail` → `failed` |
 
 ## 7. Örnekler
 

@@ -4,6 +4,8 @@
 
 Accepted. Kısmen değiştirildi: [ADR-18](./ADR-18-harness-computed-evidence.md) (2026-09-23; bağımsız inceleme R1 ile daraltıldı). Değişen madde: her `met` hükmü reviewer'ın kendi ürettiği **veya o ölçütü kanıtlayan, `passed` bir harness doğrulama çalıştırmasına** (`kind: harness-verification`: build/test sınıfı bir komut ya da ölçütün aynen andığı komut; salt okunur komutlar asla) dayanır. Sabitlenmiş diff (`harness-diff`) yalnız destekleyicidir, tek başına asla yetmez: bir değişikliğin var olduğunu gösterir, incelenen şeyin kendisidir. Worker kanıtı tek başına yine yetmez. Reviewer işaretçileri toleranslı çözülür, tek düzeltme turu vardır; düzeltmeden sonra çözülmeyen işaretçi review'ü `invalid` yapmaz, bağımsız kanıtı kalmayan `met` `unverifiable` sayılır ve sonuç `revise` geri bildirimidir. Diğer maddeler geçerlidir.
 
+K1.6-P2 değişikliği (2026-09-24, canlı run 01M381W6): reviewer (ve explorer) tüm çalışma alanını salt okunur okur (`.git`, `.synorch`, env dosyaları hariç); harness doğrulaması geçmiş bir görevde `revise` veya `block` bulgularla bir düzeltme turudur, `review_revisions` bütçesi bitince orchestrator notlarla kabul edebilir (blocker bulgu yoksa), yeniden deneyebilir veya düşürebilir; okuma kapsamı yüzünden `unverifiable` hükmü bir kez yeniden gönderilir. Çok bağımlılıklı reviewer görevi, görev review'lerine kriter eklemek yerine birleşik sonuç üzerinde ayrı bir entegrasyon review'ü olarak koşar ([task packet'leri](../contracts/task-packets.md) §1, §6).
+
 ## Date
 
 2026-09-22
@@ -40,6 +42,7 @@ Bir modelin "bitti" demesi teslim için yeterli değildir; reviewer implementer 
 
 - `tests/harness-contracts.test.ts`: yalnız worker kanıtlı `met` reddi, yalnız `harness-diff` kanıtlı `met` reddi (belge örneği), `not_met` ile `accept` reddi, blocker ile `accept` reddi, self-review reddi, `separate_context: false` reddi.
 - `tests/harness-orchestration-review.test.ts` (review R1): doğrulama komutu olmayan standard görevde yalnız diff'e dayanan reviewer `revise` alır, hiçbir şey integrate edilmez; `verifyReview` reviewer kanıtını ve `passed` build/test çalıştırmasını bağımsız sayar, salt okunur veya başarısız çalıştırmayı ve diff'i saymaz.
+- `tests/harness-e2e-integration-review.test.ts` (K1.6-P2 replay): görevler arası kriter entegrasyon review'üne taşınır, reviewer paketleri `**` okur, kapsam kaynaklı hüküm bir kez yeniden gönderilir, `block` düzeltme turudur, entegrasyon review'ü üç görev entegre edildikten sonra ana çalışma alanında koşar.
 - I4: reviewer'a implementer transkriptinin geçmediğini gösteren context testi; standard görevin review olmadan `completed` olamaması.
 
 ## Revisit trigger

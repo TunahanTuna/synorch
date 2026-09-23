@@ -1,5 +1,6 @@
 import {
   canRunCommands,
+  completionPacketSchema,
   createId,
   deriveProjectId,
   digestOf,
@@ -59,6 +60,7 @@ import {
   createDeltaPacket,
   deltaNotes,
   DEFAULT_STEP_FLOORS,
+  isIntegrationReview,
   refreshPacketSources,
   reviewerStepLimit,
   runStepLimit,
@@ -78,7 +80,7 @@ import {
   type SourceDigestReader,
 } from "./recorder.ts";
 import { createDagScheduler, DEFAULT_CONCURRENCY, type ConcurrencyLimits, type DagScheduler } from "./scheduler.ts";
-import type { OrchestrationWorkerManager, RunScope } from "./worker-manager.ts";
+import type { IntegratedDependency, IntegrationReviewOutcome, OrchestrationWorkerManager, RunScope } from "./worker-manager.ts";
 
 /**
  * The coordinator drives one run: plan -> approval -> task DAG -> worker attempts -> orchestrator
@@ -196,8 +198,32 @@ interface PendingTriage {
   readonly planCaused: readonly string[];
   /** Every remaining verification problem is plan-caused: `accept` (waiving those commands) is possible for a writing task. */
   readonly verificationOnly: boolean;
+  /**
+   * The review_revisions budget of a verified writing task is spent and the review found no blocker:
+   * `accept` integrates the change with the review findings recorded as notes.
+   */
+  readonly reviewOverride: boolean;
   decision: TriageOutcome | undefined;
 }
+
+/** A review verdict caused by the reviewer's read scope, not by the work (live run 01M381W6). */
+const SCOPE_LIMITED = /\b(?:read[ -]?scope|dispatch'?s? (?:read )?scope|outside (?:the |my |this |its )?(?:authorized |allowed |permitted )?(?:read )?scope|not (?:allowed|permitted|authorized) to read|cannot (?:be )?read|permits reading only)\b/i;
+
+/**
+ * Whether a non-accepting review only failed criteria as unverifiable because the reviewer believed
+ * it could not read what they need. After the workspace-wide read scope this is a harness problem:
+ * the review is re-dispatched once with an explicit note instead of failing the task.
+ */
+export function scopeLimitedReview(review: { readonly criteria: readonly { readonly verdict: string; readonly note?: string | undefined }[]; readonly findings: readonly { readonly summary: string; readonly severity: string }[] } | undefined): boolean {
+  if (review === undefined) return false;
+  const failing = review.criteria.filter((criterion) => criterion.verdict !== "met");
+  if (failing.length === 0 || failing.some((criterion) => criterion.verdict !== "unverifiable")) return false;
+  if (review.findings.some((finding) => finding.severity === "blocker" && !SCOPE_LIMITED.test(finding.summary))) return false;
+  return [...failing.map((criterion) => criterion.note ?? ""), ...review.findings.map((finding) => finding.summary)].some((text) => SCOPE_LIMITED.test(text));
+}
+
+const SCOPE_NOTE =
+  "Harness: an earlier review of this artifact reported criteria as unverifiable because of its read scope. Your read scope is the whole workspace (read-only): read whatever a criterion needs and check it with your own tool calls.";
 
 const NOTE_LIMIT = 1000;
 
@@ -465,7 +491,8 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           const validation = checkPlan({ ...raw, schema_version: 1, plan_id: planId, run_id: runId, version: 1, created_at: now().toISOString() }, { runId, planId, version: 1 });
           if (validation.ok) {
             const approval = request.policyMode === "ask" ? "the runtime now asks the user in its own interface" : "the runtime now approves it under the autonomous policy (audited)";
-            return { ok: true, text: `plan accepted; ${approval}. Do not ask for approval in text. End your turn now.` };
+            const moved = validation.notes ?? [];
+            return { ok: true, text: `plan accepted${moved.length > 0 ? ` with harness changes (${moved.join(" ")})` : ""}; ${approval}. Do not ask for approval in text. End your turn now.` };
           }
           planRejections += 1;
           lastRejection = validation.issues;
@@ -500,6 +527,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         if (validation.ok) {
           plan = validation.plan;
           planDigestValue = validation.digest;
+          for (const note of validation.notes ?? []) notice("info", note);
         } else {
           // A turn whose plan_propose calls were rejected in-turn already counted them; its last rejection is the useful feedback.
           const rejectedInTurn = planRejections > rejectionsBefore;
@@ -702,8 +730,13 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         await workers.dispose(attemptId);
       };
 
-      /** Reviewer plan tasks that configure the mandatory review of `key` (tier, extra criteria, extra verification). */
-      const reviewConfigurations = (key: string): PlanTask[] => approvedPlan.tasks.filter((task) => task.role === "reviewer" && task.depends_on.includes(key));
+      /**
+       * Reviewer plan tasks that configure the mandatory review of `key` (tier, extra criteria, extra
+       * verification): only a reviewer task of that one task. An integration review (two or more
+       * dependencies) runs on its own over the combined result and never joins a per-task review.
+       */
+      const reviewConfigurations = (key: string): PlanTask[] =>
+        approvedPlan.tasks.filter((task) => task.role === "reviewer" && !isIntegrationReview(task) && task.depends_on.includes(key));
 
       /** The reviewer tasks' criteria, renumbered after the implementation's so ids never collide. */
       const reviewerExtras = (packet: TaskContextPacket, configurations: readonly PlanTask[]): { id: string; statement: string }[] => {
@@ -725,6 +758,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         retriesLeft: number,
         problems: readonly string[] = [],
         cause: { readonly planCaused: readonly string[]; readonly verificationOnly: boolean } = { planCaused: [], verificationOnly: false },
+        review: { readonly override: boolean; readonly note: string } | undefined = undefined,
       ): Promise<TriageOutcome> => {
         const fallback: TriageOutcome = { kind: "retry", guidance: undefined };
         if (deps.planner.triage === undefined || deps.delegation === undefined) return fallback;
@@ -738,6 +772,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           retriesLeft,
           planCaused: cause.planCaused,
           verificationOnly: cause.verificationOnly,
+          reviewOverride: review?.override === true,
           decision: undefined,
         };
         await orchestratorTurn(async () => {
@@ -767,6 +802,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
                 problems,
                 planCaused: cause.planCaused,
                 verificationOnly: cause.verificationOnly,
+                ...(review === undefined ? {} : { reviewOverride: review.override, reviewNote: review.note }),
                 ownedPaths: packet.scope.owned_paths,
                 harnessChecks: (completion.harness_evidence?.verification ?? []).map((check) => `${check.command}: ${check.status}${check.exit_code === null ? "" : ` (exit ${check.exit_code})`}`),
                 summary: completion.summary,
@@ -794,10 +830,107 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         return pending.decision ?? fallback;
       };
 
+      /**
+       * The plan's integration review (`isIntegrationReview`): its dependencies each completed through
+       * their own verification and review and are integrated, so one reviewer attempt checks the
+       * reviewer task's own criteria over the combined workspace. A non-accepting verdict consults
+       * the orchestrator (accept with notes / retry the review / fail); it never undoes the
+       * integrated, individually reviewed work.
+       */
+      const runIntegrationReview = async (entry: TaskEntry): Promise<TaskResult> => {
+        const dependencies: IntegratedDependency[] = entry.plan.depends_on.flatMap((key) => {
+          const dependency = entries.get(key);
+          return dependency === undefined ? [] : [{ key, taskId: dependency.taskId, summary: dependency.summary, paths: dependency.integrated, notes: dependency.notes }];
+        });
+        const covered = entry.plan.depends_on.join(", ");
+        const packet = compileTaskPacket({
+          plan: approvedPlan,
+          planDigest: approvedDigest,
+          task: entry.plan,
+          taskId: entry.taskId,
+          createdAt: now().toISOString(),
+          sources: await packetSources(entry),
+          findings: findings(entry),
+          forbiddenPaths: [],
+          preferWorktree: false,
+          stepFloor: limits.stepFloors.reviewer,
+        });
+        let retries = 0;
+        for (;;) {
+          if (signal.aborted) {
+            await move(entry, "cancelled", "run cancelled");
+            return "failed";
+          }
+          let outcome: IntegrationReviewOutcome | undefined;
+          try {
+            const route = await deps.router.resolve({ tier: entry.plan.model_tier, role: "reviewer" }, signal);
+            for (let review = 1; review <= limits.maxReviewAttempts; review += 1) {
+              const handle = await workers.dispatchIntegrationReview(packet, dependencies, signal, { route });
+              entry.attempts.push(handle.attemptId);
+              if (entry.state === "ready") await move(entry, "running", `integration review attempt ${handle.attemptId} of ${covered} dispatched`);
+              outcome = await handle.result;
+              if (outcome.decision !== "invalid") break;
+              notice("warning", `integration review ${review} of ${entry.key} is invalid: ${outcome.problems.slice(0, 3).join("; ")}`);
+            }
+          } catch (error) {
+            entry.failure = errorCodeOf(error);
+            await move(entry, entry.state === "ready" ? "blocked" : "failed", `integration review dispatch failed: ${error instanceof Error ? error.message : String(error)}`);
+            return "failed";
+          }
+          if (outcome === undefined) {
+            await move(entry, "failed", "no integration review ran");
+            return "failed";
+          }
+          await move(entry, "verifying", `integration review of ${covered} recorded: ${outcome.decision}`);
+          await move(entry, "reviewing", `integration review over the combined result of ${covered}`);
+          if (outcome.decision === "accept") {
+            entry.summary = `integration review of ${covered} accepted`;
+            await move(entry, "completed", entry.summary);
+            return "completed";
+          }
+          const report = completionPacketSchema.parse({
+            schema_version: 2,
+            task_id: entry.taskId,
+            attempt_id: outcome.attemptId,
+            packet_digest: packetDigest(packet),
+            status: "partial",
+            summary: `The integration review of ${covered} did not accept (${outcome.decision}).`,
+            changed_paths: [],
+            tool_call_ids: [],
+            acceptance_evidence: [],
+            commands_run: [],
+            decisions_made: [],
+            skipped_checks: [],
+            unresolved_risks: outcome.problems.slice(0, 20).map((problem) => problem.slice(0, 1000)),
+            recommended_context_updates: [],
+          });
+          const decision = await triageReport(entry, packet, report, outcome.attemptId, limits.budgets.triage_retries - retries, outcome.problems, undefined, {
+            override: false,
+            note: `integration review of ${covered} (already integrated, each individually reviewed): ${outcome.decision}`,
+          });
+          if (decision.kind === "accept") {
+            entry.notes.push(...outcome.problems.slice(0, 10).map((problem) => `integration review finding accepted by the orchestrator: ${problem}`.slice(0, NOTE_LIMIT)));
+            entry.summary = `integration review of ${covered} accepted by the orchestrator with notes`;
+            await move(entry, "completed", `${entry.summary}: ${outcome.problems.slice(0, 5).join("; ")}${decision.guidance === undefined ? "" : ` (${decision.guidance})`}`);
+            return "completed";
+          }
+          if (decision.kind === "retry" && retries < limits.budgets.triage_retries) {
+            retries += 1;
+            await move(entry, "changes_requested", `integration review ${outcome.decision}: ${outcome.problems.slice(0, 5).join("; ")}`);
+            await move(entry, "ready", `integration review retry ${retries}`);
+            continue;
+          }
+          entry.failure = outcome.decision === "block" ? "review_blocked" : "verification_failed";
+          await move(entry, "failed", `integration review ${outcome.decision}: ${outcome.problems.slice(0, 5).join("; ")}${decision.kind === "fail" ? " | triage: the orchestrator failed the task" : ""}`);
+          return "failed";
+        }
+      };
+
       const runTask = async (entry: TaskEntry): Promise<TaskResult> => {
         await move(entry, "ready", "plan approved and dependencies completed");
+        if (entry.plan.role === "reviewer" && isIntegrationReview(entry.plan)) return await runIntegrationReview(entry);
         if (entry.plan.role === "reviewer") {
-          // A reviewer plan task never dispatches: each dependency (standard/high-risk by plan validation) already
+          // A reviewer plan task of one dependency never dispatches: each dependency (standard/high-risk by plan validation) already
           // passed its own independent review, run with this task's tier, extra criteria and verification.
           const covered = entry.plan.depends_on.join(", ");
           await move(entry, "running", `no attempt: reviewer task configures the independent review of ${covered}`);
@@ -1028,6 +1161,8 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           let outcome: "accept" | "revise" | "block" | "invalid" = "invalid";
           let problems: readonly string[] = [];
           let findingsEvidence: Parameters<typeof createDeltaPacket>[0]["evidence"] = [];
+          let blocker = false;
+          let widened = false;
           for (let review = 1; review <= limits.maxReviewAttempts; review += 1) {
             const reviewerPacket = compileReviewerPacket({
               implementation: packet,
@@ -1038,6 +1173,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
               extraVerification: configurations.flatMap((task) => task.verification),
               ...(waived === undefined ? {} : { waivedCriteria: waived }),
               maxSteps: reviewerStepLimit(packet.limits.max_steps, limits.stepFloors),
+              ...(widened ? { notes: [SCOPE_NOTE] } : {}),
             });
             const reviewerRoute = await deps.router.resolve({ tier: reviewerPacket.model_tier, role: "reviewer" }, signal);
             const reviewHandle = await workers.dispatchReview(reviewerPacket, handle.attemptId, signal, { route: reviewerRoute });
@@ -1047,9 +1183,18 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             problems = result.verification.problems;
             findingsEvidence = (result.review?.findings ?? []).map((finding) => ({ kind: "review" as const, ref: `review:${finding.id}`, produced_by: "reviewer" as const }));
             if (outcome !== "invalid") {
+              if (outcome !== "accept" && !widened && scopeLimitedReview(result.review)) {
+                // After the workspace-wide read scope a scope-limited verdict is a harness problem, not a
+                // finding about the work: re-dispatch once with an explicit note instead of rejecting.
+                widened = true;
+                notice("warning", `the review of ${entry.key} reported criteria unverifiable because of its read scope; re-dispatching it once with the whole workspace readable`);
+                review -= 1;
+                continue;
+              }
               if (result.review !== undefined) {
                 problems = [...problems, ...result.review.findings.map((finding) => `${finding.id} (${finding.severity}): ${finding.summary}`)];
               }
+              blocker = result.review?.findings.some((finding) => finding.severity === "blocker") ?? false;
               break;
             }
             notice("warning", `review ${review} of ${entry.key} is invalid: ${problems.slice(0, 3).join("; ")}`);
@@ -1065,18 +1210,43 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             await move(entry, "completed", "review accepted and artifact integrated");
             return "completed";
           }
-          if (outcome === "revise") {
-            await move(entry, "changes_requested", problems.slice(0, 5).join("; ") || "review requested changes");
+          if (outcome === "revise" || outcome === "block") {
+            // The harness checks passed (a task reaches review only after verification): a revise or block
+            // verdict is a revise round for the implementer with the reviewer's findings, never a silent
+            // rejection. An exhausted review_revisions budget consults the orchestrator: accept with notes
+            // (no blocker finding), retry (one more revision) or fail.
+            const label = outcome === "block" ? "review blocked" : "review requested changes";
             if (revisions >= limits.budgets.review_revisions) {
-              // An exhausted review_revisions budget consults the orchestrator; only a triage retry buys one more revision.
-              const decision = await triageReport(entry, packet, completion, handle.attemptId, limits.budgets.triage_retries - retries, [`the review asked for changes again after ${revisions} revision(s)`, ...problems]);
+              const decision = await triageReport(
+                entry,
+                packet,
+                completion,
+                handle.attemptId,
+                limits.budgets.triage_retries - retries,
+                [`the review did not accept after ${revisions} revision(s)`, ...problems],
+                undefined,
+                { override: !blocker, note: `${label} after ${revisions} revision(s); harness verification passed${blocker ? "; a blocker finding stands" : ""}` },
+              );
+              if (decision.kind === "accept" && !blocker) {
+                try {
+                  await workers.integrate(handle.attemptId, artifact.artifactDigest, signal);
+                  entry.integrated = artifact.changes.map((change) => change.path);
+                } catch (error) {
+                  await move(entry, "failed", `integration failed: ${error instanceof Error ? error.message : String(error)}`);
+                  return "failed";
+                }
+                entry.notes.push(...problems.slice(0, 10).map((problem) => `review finding accepted by the orchestrator: ${problem}`.slice(0, NOTE_LIMIT)));
+                await move(entry, "completed", `accepted by the orchestrator with the review findings as notes${decision.guidance === undefined ? "" : ` (${decision.guidance})`}: ${problems.slice(0, 5).join("; ")}`);
+                return "completed";
+              }
               if (decision.kind !== "retry" || retries >= limits.budgets.triage_retries) {
-                entry.failure = "verification_failed";
-                await move(entry, "cancelled", decision.kind === "fail" ? "revision limit reached; triage: the orchestrator failed the task" : "revision limit reached");
+                entry.failure = outcome === "block" ? "review_blocked" : "verification_failed";
+                await move(entry, "failed", `${label}; revision limit reached${decision.kind === "fail" ? "; triage: the orchestrator failed the task" : ""}: ${problems.slice(0, 5).join("; ")}`);
                 return "failed";
               }
               retries += 1;
             }
+            await move(entry, "changes_requested", `${label}: ${problems.slice(0, 5).join("; ") || "address the review findings"}`);
             revisions += 1;
             seed = artifact.artifactBytes;
             await workers.revert(handle.attemptId, signal);
@@ -1085,8 +1255,8 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             await move(entry, "ready", `revision ${revisions} requested by review`);
             continue;
           }
-          entry.failure = outcome === "block" ? "review_blocked" : "verification_failed";
-          await move(entry, "failed", outcome === "block" ? `review blocked: ${problems.join("; ")}` : `no valid review: ${problems.slice(0, 5).join("; ")}`);
+          entry.failure = "verification_failed";
+          await move(entry, "failed", `no valid review: ${problems.slice(0, 5).join("; ")}`);
           return "failed";
         }
       };
@@ -1164,6 +1334,10 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             }
             pending.decision = { kind: "retry", guidance: input.guidance, verification: replacement };
             return { ok: true, text: `decision for ${pending.key} recorded: retry with the revised verification (${replacement.join("; ")}); the plan is revised and re-approved. End your turn now.` };
+          }
+          if (input.decision === "accept" && pending.reviewOverride) {
+            pending.decision = { kind: "accept", waived: [], guidance: input.guidance };
+            return { ok: true, text: `decision for ${pending.key} recorded: accept; the verified change is integrated with the review findings recorded as notes. End your turn now.` };
           }
           if (input.decision === "accept" && pending.verificationOnly && !pending.acceptable) {
             pending.decision = { kind: "accept", waived: [], guidance: input.guidance, waivedCommands: pending.planCaused };

@@ -262,9 +262,38 @@ export interface WorkerDispatchOptions extends DispatchOptions {
   readonly reuseAttempt?: AttemptId;
 }
 
+/** A task whose integrated result the plan's integration review checks. */
+export interface IntegratedDependency {
+  readonly key: string;
+  readonly taskId: TaskId;
+  readonly summary: string;
+  readonly paths: readonly string[];
+  readonly notes: readonly string[];
+}
+
+/** The outcome of an integration review (no single pinned artifact, so no `ReviewPacket`). */
+export interface IntegrationReviewOutcome {
+  readonly attemptId: AttemptId;
+  readonly decision: "accept" | "revise" | "block" | "invalid";
+  readonly problems: readonly string[];
+  readonly findings: ReviewReportInput["findings"];
+}
+
+export interface IntegrationReviewHandle {
+  readonly attemptId: AttemptId;
+  readonly result: Promise<IntegrationReviewOutcome>;
+  cancel(reason: string): void;
+}
+
 /** The contract `WorkerManager` plus the coordinator's own verification and integration steps. */
 export interface OrchestrationWorkerManager extends WorkerManager {
   dispatch(packet: TaskContextPacket, signal: AbortSignal, options?: WorkerDispatchOptions): Promise<AttemptHandle>;
+  /**
+   * The plan's integration review (`isIntegrationReview`): a reviewer attempt on the main workspace,
+   * read-only, after its dependencies were integrated; it checks the reviewer task's own criteria
+   * over the combined result, each `met` backed by the reviewer's own tool results.
+   */
+  dispatchIntegrationReview(packet: TaskContextPacket, dependencies: readonly IntegratedDependency[], signal: AbortSignal, options?: DispatchOptions): Promise<IntegrationReviewHandle>;
   attempt(attemptId: AttemptId): AttemptRecord | undefined;
   verify(attemptId: AttemptId, options?: CompletionVerificationOptions): Promise<CompletionVerification>;
   integrate(attemptId: AttemptId, expectedArtifact: Digest, signal: AbortSignal): Promise<void>;
@@ -383,7 +412,7 @@ export function renderReviewBrief(target: AttemptRecord, completion: CompletionP
   const harness = harnessLines(completion.harness_evidence, target.packet);
   return [
     `Independent review of attempt ${target.attemptId} for task ${target.taskId}.`,
-    `The artifact under review is pinned at ${changeSet.artifactDigest}. Your workspace is that artifact, read-only.`,
+    `The artifact under review is pinned at ${changeSet.artifactDigest}. Your workspace is that artifact, read-only; you may read any file in it, not only the changed ones.`,
     "You receive the worker's completion packet and the changed files, not the worker's conversation. Verify every acceptance criterion yourself with your own tool calls.",
     `Worker completion packet:\n\`\`\`json\n${canonicalJson(completion)}\n\`\`\``,
     harness.length > 0 ? `Harness records (computed by the harness, independent of the worker; cite with produced_by: harness):\n${harness.join("\n")}` : "",
@@ -392,6 +421,24 @@ export function renderReviewBrief(target: AttemptRecord, completion: CompletionP
   ]
     .filter((part) => part !== "")
     .join("\n\n");
+}
+
+export function renderIntegrationReviewBrief(packet: TaskContextPacket, dependencies: readonly IntegratedDependency[]): string {
+  const tasks = dependencies.map((dependency) =>
+    [
+      `- ${dependency.key} (${dependency.taskId}): ${dependency.summary.slice(0, 600)}`,
+      `  integrated: ${dependency.paths.join(", ") || "no file changes"}`,
+      ...dependency.notes.slice(0, 5).map((note) => `  note: ${note.slice(0, 400)}`),
+    ].join("\n"),
+  );
+  const criteria = packet.acceptance_criteria.map((criterion) => `- ${criterion.id}: ${criterion.statement}`);
+  return [
+    `Integration review for task ${packet.task_id}: ${packet.objective}`,
+    "Every task below passed its own verification and independent review and is integrated into the workspace. Your workspace is the combined result, read-only; read any file you need.",
+    `Integrated tasks:\n${tasks.join("\n")}`,
+    `Check only these criteria, each with your own tool calls (read the files; run ${packet.verification.commands.length > 0 ? `the verification commands ${packet.verification.commands.join("; ")}` : "a check when a criterion needs one"}):\n${criteria.join("\n")}`,
+    REVIEWER_REPORT_INSTRUCTIONS,
+  ].join("\n\n");
 }
 
 interface Execution {
@@ -1229,6 +1276,87 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
           review: undefined,
           verification: { decision: "invalid", problems: [`review failed inside the harness: ${error instanceof Error ? error.message : String(error)}`] },
         };
+      });
+      return { attemptId: record.attemptId, result, cancel: (reason) => controller.abort(new Error(reason)) };
+    },
+    async dispatchIntegrationReview(packet, dependencies, signal, options) {
+      if (packet.role !== "reviewer" || packet.write_mode !== "read-only") {
+        throw harnessError("review_blocked", "an integration review runs as a read-only reviewer packet");
+      }
+      const { record, controller } = await prepare(packet, signal, options, undefined);
+      const statements = statementsOf(record.packet);
+      /** Only the reviewer's own resolved tool results count: there is no worker artifact or harness run to cite. */
+      const judge = async (log: AttemptLog, criteria: ReviewReportInput["criteria"]) => {
+        const index = indexFor(record, undefined, record.workspace.root, log);
+        const problems: EvidenceProblem[] = [];
+        const judged: ReviewReportInput["criteria"] = [];
+        for (const criterion of criteria) {
+          const kept: EvidenceRef[] = [];
+          for (const evidence of criterion.evidence) {
+            const resolution = evidence.produced_by === "reviewer" ? await resolvePointer(evidence, index, criterion.criterion_id) : unresolvedPointer(evidence, criterion.criterion_id, "an integration review cites only its own tool results (produced_by: reviewer)");
+            if (resolution.status === "resolved" && isIndependentReviewEvidence(evidence, undefined, statements.get(criterion.criterion_id))) kept.push(evidence);
+            else problems.push({ criterionId: criterion.criterion_id, ref: evidence.ref.slice(0, 200), reason: resolution.reason ?? "does not resolve" });
+          }
+          if (criterion.verdict === "met" && kept.length === 0) {
+            problems.push({ criterionId: criterion.criterion_id, ref: "(met)", reason: INDEPENDENT_EVIDENCE_HINT });
+            judged.push({ ...criterion, verdict: "unverifiable", evidence: kept });
+          } else judged.push({ ...criterion, evidence: kept });
+        }
+        return { problems, judged };
+      };
+      const check = async (input: Readonly<Record<string, unknown>>): Promise<ToolResult> => {
+        const report = input as unknown as ReviewReportInput;
+        const { problems } = await judge(await currentLog(record), report.criteria);
+        if (problems.length === 0) return toolOk(REPORT_RECORDED);
+        if (record.repairs.report_corrections < REPORT_CORRECTION_ROUNDS) {
+          record.repairs.report_corrections += 1;
+          const text = formatEvidenceCorrection(problems, evidenceCandidates(await currentLog(record)), REPORT_CORRECTION_ROUNDS - record.repairs.report_corrections);
+          return toolRejected(text, `${problems.length} evidence problem(s) in the review; nothing was recorded. Correct them as listed above and call ${REPORT_TOOL_NAMES.review} again.`);
+        }
+        return toolOk(`review recorded with ${problems.length} unresolved evidence problem(s); a met verdict without your own evidence counts as unverifiable. End your turn now.`);
+      };
+      const run = async (): Promise<IntegrationReviewOutcome> => {
+        unregister.set(record.attemptId, deps.reports?.register(record.attemptId, check) ?? (() => undefined));
+        const execution = await executeBounded(record, renderIntegrationReviewBrief(record.packet, dependencies), controller, "dispatch", REPORT_TOOL_NAMES.review);
+        await closeAttempt(record);
+        await finishAttempt(record, execution, controller.signal.aborted);
+        const claim = readClaim(reviewerClaimSchema, execution.log, REPORT_TOOL_NAMES.review);
+        if (!claim.ok) return { attemptId: record.attemptId, decision: "invalid", problems: claim.problems, findings: [] };
+        const { judged } = await judge(execution.log, claim.claim.criteria);
+        const problems: string[] = [];
+        for (const criterion of record.packet.acceptance_criteria) {
+          const verdict = judged.find((candidate) => candidate.criterion_id === criterion.id);
+          if (verdict === undefined) problems.push(`${criterion.id} was not assessed`);
+          else if (verdict.verdict !== "met") problems.push(`${criterion.id} is ${verdict.verdict}${verdict.note === undefined ? "" : `: ${verdict.note.slice(0, 300)}`}`);
+        }
+        const blocker = claim.claim.findings.some((finding) => finding.severity === "blocker");
+        const decision = claim.claim.decision === "block" ? "block" : claim.claim.decision === "revise" || problems.length > 0 || blocker ? "revise" : "accept";
+        const review = {
+          kind: "integration-review",
+          task_id: record.taskId,
+          reviewer_attempt_id: record.attemptId,
+          reviewer_route: { provider_id: record.route.provider_id, model_id: record.route.model_id },
+          dependencies: dependencies.map((dependency) => ({ key: dependency.key, task_id: dependency.taskId, paths: dependency.paths })),
+          criteria: judged,
+          findings: claim.claim.findings,
+          decision,
+        };
+        const blob = await recorder.putJson(review, REVIEW_MEDIA_TYPE);
+        await recorder.record(
+          "review/recorded",
+          { task_id: record.taskId, reviewer_attempt_id: record.attemptId, review_digest: digestOf(review), decision, blob },
+          { taskId: record.taskId, attemptId: record.attemptId, actor: { kind: "worker", role: "reviewer", attempt_id: record.attemptId } },
+        );
+        return {
+          attemptId: record.attemptId,
+          decision,
+          problems: [...problems, ...claim.claim.findings.map((finding) => `${finding.id} (${finding.severity}): ${finding.summary}`)],
+          findings: claim.claim.findings,
+        };
+      };
+      const result = run().catch(async (error: unknown): Promise<IntegrationReviewOutcome> => {
+        await failUnfinished(record, error);
+        return { attemptId: record.attemptId, decision: "invalid", problems: [`integration review failed inside the harness: ${error instanceof Error ? error.message : String(error)}`], findings: [] };
       });
       return { attemptId: record.attemptId, result, cancel: (reason) => controller.abort(new Error(reason)) };
     },

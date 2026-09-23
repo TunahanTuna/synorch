@@ -250,13 +250,14 @@ test("live run 1: an explorer verification plan is rejected in-turn, re-proposed
     const approval = eventsOf(runLog, "approval/decided")[0];
     assert.equal(approval?.data.decision.decided_by, "orchestrator", "autonomous self-approval, audited");
 
-    // (3)(5) The explorer has its skill and the constitution in context; .ai stays outside its read scope.
+    // (3)(5) The explorer has its skill and the constitution in context; skills come through context, not through reads.
     const explorerSystem = systemText(explorerSeen[0] as ModelRequest);
     assert.ok(explorerSeen[0]?.system.some((block) => block.id === "skill:codebase-exploration" && block.trust === "project"), "the role's skill is loaded through the ContextBuilder");
     assert.ok(explorerSeen[0]?.system.some((block) => block.source === "constitution"), "the constitution reaches the explorer through context");
     assert.match(explorerSystem, /there is no exec tool/);
     assert.ok(!(explorerSeen[0]?.tools ?? []).some((tool) => tool.name === "exec"));
-    assert.match(toolResults(explorerSeen[1] as ModelRequest), /outside the read scope/, "read_file .ai/skills/** is still denied (no scope widening)");
+    // K1.6-P2: explorers read the whole workspace (read-only); the skill file is simply not there, its content is in context.
+    assert.doesNotMatch(toolResults(explorerSeen[1] as ModelRequest), /outside the read scope/, "an explorer's read scope is the whole workspace");
     const loads = toolResults(explorerSeen[2] as ModelRequest);
     assert.match(loads, /Skill project-discovery/, "load_skill serves a catalog skill of the role");
     assert.match(loads, /skill implementation is not in the explorer catalog/, "a skill the manifest forbids is refused");

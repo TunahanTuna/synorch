@@ -186,7 +186,7 @@ test("AC-2 a reviewer that only cites worker evidence cannot accept; the task fa
     const review = reviewPacketSchema.parse(JSON.parse(Buffer.from(await runtime.blobs.get(reviews[0]!.data.blob.digest)).toString("utf8")));
     assert.ok(review.criteria.every((criterion) => criterion.verdict === "unverifiable"));
     assert.ok(!taskStates(events).includes("completed"));
-    assert.equal(taskStates(events).at(-1), "cancelled", "the review_revisions budget and the triage retry run out");
+    assert.equal(taskStates(events).at(-1), "failed", "the review_revisions budget and the triage retry run out");
     await assert.rejects(readFile(path.join(workspace.root, "src", "feature.ts"), "utf8"));
   } finally {
     await workspace.cleanup();

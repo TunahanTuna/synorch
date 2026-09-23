@@ -1,7 +1,7 @@
 import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { isSafeRelativePath, normalizeRelativePath } from "../../domain/relative-path.ts";
-import type { HardRail, PathEscape, PathEscapeReason } from "../contracts/index.ts";
+import { foldPathCase, type HardRail, type PathEscape, type PathEscapeReason } from "../contracts/index.ts";
 
 /**
  * A path a tool refused to normalize because it cannot be expressed inside the workspace at all:
@@ -114,7 +114,7 @@ export async function resolveWorkspacePath(
       throw error;
     }
     if (!contains(canonicalRoot, canonical)) fail("escapes the workspace through a symbolic link or junction", "link-escape");
-    if (SHORT_NAME.test(segment) && path.basename(canonical).toLowerCase() !== segment.toLowerCase()) {
+    if (SHORT_NAME.test(segment) && foldPathCase(path.basename(canonical)) !== foldPathCase(segment)) {
       fail("uses an 8.3 short name for a different long name", "invalid-path");
     }
   }

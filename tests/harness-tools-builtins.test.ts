@@ -61,7 +61,9 @@ test("read_file returns text, honours offset/limit, refuses forbidden paths and 
   assert.equal(whole.state, "succeeded");
   assert.match(whole.result.text, /export function refresh/);
   const slice = await harness.call("read_file", { path: "src/auth/session.ts", offset: 2, limit: 1 });
-  assert.equal(slice.result.text, "export function refresh() {");
+  const digest = await digestOfFile(path.join(root, "src", "auth", "session.ts"));
+  assert.equal(slice.result.text, `src/auth/session.ts · digest ${digest} · lines 2-2 of 4\nexport function refresh() {`);
+  assert.equal(slice.result.digest, digest);
   assert.equal(slice.result.truncated, true);
   const forbidden = await harness.call("read_file", { path: "src/billing/invoice.ts" });
   assert.equal(forbidden.state, "denied");
@@ -100,7 +102,9 @@ test("write_file requires the current digest to overwrite and reports stale prec
   const harness = harnessFor(root);
   const file = path.join(root, "src", "auth", "session.ts");
   const blind = await harness.call("write_file", { path: "src/auth/session.ts", content: "overwritten" });
-  assert.equal(blind.result.error?.code, "stale_precondition");
+  assert.equal(blind.result.error?.code, "invalid_arguments");
+  assert.match(blind.result.error?.message ?? "", /read_file it first/);
+  assert.equal(await readFile(file, "utf8"), "export const ttl = 60;\nexport function refresh() {\n  return 'token';\n}\n");
   const stale = await harness.call("write_file", { path: "src/auth/session.ts", content: "x", expected_digest: sha256("something else") });
   assert.equal(stale.result.error?.code, "stale_precondition");
   const matched = await harness.call("write_file", { path: "src/auth/session.ts", content: "fresh\n", expected_digest: await digestOfFile(file) });

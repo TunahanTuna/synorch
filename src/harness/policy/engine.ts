@@ -27,6 +27,8 @@ import {
   type PolicyInputs,
   type PolicyMode,
   type ToolEffect,
+  foldPathCase,
+  isCaseInsensitivePlatform,
 } from "../contracts/index.ts";
 import { classifyCommand } from "./command-classifier.ts";
 import { DESTRUCTIVE_COMMAND_RULES } from "./command-rules.ts";
@@ -216,7 +218,7 @@ function evaluatePaths(action: NormalizedAction, policy: EffectivePolicy, option
   const policySources = policy.layers
     .map((layer) => layer.source)
     .filter((source) => isSafeRelativePath(source) && source.includes("."))
-    .map((source) => normalizeRelativePath(source).toLowerCase());
+    .map((source) => foldPathCase(normalizeRelativePath(source)));
   for (const escape of action.escapes ?? []) {
     const message = `${escape.requested || "<empty path>"} cannot be expressed inside the workspace (${escape.reason})`.slice(0, 500);
     if (escape.access === "write") deny("platform", PATH_ESCAPE_REASON_CODE.write, message, "write-outside-scope");
@@ -228,15 +230,15 @@ function evaluatePaths(action: NormalizedAction, policy: EffectivePolicy, option
       if (isGitHooksOrConfig(entry.path) || isGitHooksOrConfig(canonical)) {
         deny("platform", "git-hooks-or-config", `${entry.path} is a git hook or git config; writing it would run or reconfigure code`, "reserved-path-write");
       } else if (hasReservedSegment(entry.path)) deny("platform", "reserved-path", `${entry.path} is a reserved path`, "reserved-path-write");
-      else if (policySources.includes(entry.path.toLowerCase())) deny("platform", "policy-source", `${entry.path} is a policy source`, "policy-self-modification");
+      else if (policySources.includes(foldPathCase(entry.path))) deny("platform", "policy-source", `${entry.path} is a policy source`, "policy-self-modification");
       else if (options.synorchHome !== undefined && isUnderSynorchHome(canonical, policy.workspace_root, options.synorchHome)) {
         deny("platform", "synorch-home-write", `${entry.path} resolves inside the Synorch home`, "reserved-path-write");
       } else if (matchesAny(entry.path, policy.forbidden, { caseInsensitive: true })) deny("task", "forbidden-path", `${entry.path} is forbidden for this task`, "write-outside-scope");
-      else if (!matchesAny(entry.path, policy.write_scope, { caseInsensitive: false })) deny("task", "outside-write-scope", `${entry.path} is outside the write scope`, "write-outside-scope");
+      else if (!matchesAny(entry.path, policy.write_scope, GRANT_MATCH)) deny("task", "outside-write-scope", `${entry.path} is outside the write scope`, "write-outside-scope");
       continue;
     }
     if (matchesAny(entry.path, policy.forbidden, { caseInsensitive: true })) deny("task", "forbidden-read", `${entry.path} is forbidden for this task`);
-    else if (!matchesAny(entry.path, policy.read_scope, { caseInsensitive: false }) && !isAncestorOfAny(entry.path, policy.read_scope, { caseInsensitive: false })) {
+    else if (!matchesAny(entry.path, policy.read_scope, GRANT_MATCH) && !isAncestorOfAny(entry.path, policy.read_scope, GRANT_MATCH)) {
       deny("task", "outside-read-scope", `${entry.path} is outside the read scope`);
     }
   }
@@ -283,7 +285,9 @@ function isReadOnlyWorker(role: AgentRole, policy: EffectivePolicy): boolean {
   return (READ_ONLY_ROLES as readonly AgentRole[]).includes(role) || (role === "debugger" && policy.write_scope.length === 0);
 }
 
-const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform === "darwin";
+const CASE_INSENSITIVE_FS = isCaseInsensitivePlatform(process.platform);
+/** Grants match with the platform's path-case policy (ADR-19); denials always case-insensitively. */
+const GRANT_MATCH = { caseInsensitive: CASE_INSENSITIVE_FS } as const;
 
 /**
  * The canonical absolute form of a workspace-relative target: the deepest existing ancestor
@@ -300,12 +304,12 @@ function canonicalPath(target: string): string {
   for (;;) {
     try {
       const resolved = path.join(realpathSync.native(current), ...[...missing].reverse());
-      return CASE_INSENSITIVE_FS ? resolved.toLowerCase() : resolved;
+      return CASE_INSENSITIVE_FS ? foldPathCase(resolved) : resolved;
     } catch {
       const parent = path.dirname(current);
       if (parent === current) {
         const unresolved = path.join(current, ...[...missing].reverse());
-        return CASE_INSENSITIVE_FS ? unresolved.toLowerCase() : unresolved;
+        return CASE_INSENSITIVE_FS ? foldPathCase(unresolved) : unresolved;
       }
       missing.push(path.basename(current));
       current = parent;
@@ -329,8 +333,8 @@ function isUnderSynorchHome(canonical: string, workspaceRoot: string, synorchHom
 
 /** `.git/hooks/**` or `.git/config`, compared case-insensitively on any path shape. */
 function isGitHooksOrConfig(candidate: string): boolean {
-  const segments = candidate.replaceAll("\\", "/").toLowerCase().split("/");
-  return segments.some((segment, index) => segment === ".git" && (segments[index + 1] === "hooks" || (segments[index + 1] === "config" && index + 2 === segments.length)));
+  const segments = foldPathCase(candidate.replaceAll("\\", "/")).split("/");
+  return segments.some((segment, index) => segment === ".GIT" && (segments[index + 1] === "HOOKS" || (segments[index + 1] === "CONFIG" && index + 2 === segments.length)));
 }
 
 function evaluateNetwork(action: NormalizedAction, network: NetworkPolicy, deny: Deny): void {

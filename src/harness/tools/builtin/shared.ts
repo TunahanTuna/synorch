@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   digestOf,
   hasReservedSegment,
+  isCaseInsensitivePlatform,
   matchesAnyPathPattern as matchesAny,
   normalizedActionSchema,
   toolMetadataSchema,
@@ -13,6 +14,13 @@ import {
   type ToolResult,
 } from "../../contracts/index.ts";
 import { resolveWorkspacePath, ToolScopeViolation } from "../workspace-path.ts";
+
+/**
+ * How grants (write and read scopes) are matched (ADR-19): case-insensitively (`foldPathCase`) on
+ * win32/darwin, whose volumes treat `readme.md` and `Readme.md` as one file, exactly on other
+ * platforms. Denials (forbidden, reserved) are always matched case-insensitively.
+ */
+export const GRANT_MATCH = { caseInsensitive: isCaseInsensitivePlatform(process.platform) } as const;
 
 export type BuiltinMetadataFields = Omit<ToolMetadata, "version" | "source" | "effect_source">;
 
@@ -110,7 +118,7 @@ export async function recheckWritePath(context: ToolExecutionContext, candidate:
   if (
     hasReservedSegment(resolved.relative) ||
     matchesAny(resolved.relative, policy.forbidden, { caseInsensitive: true }) ||
-    !matchesAny(resolved.relative, policy.write_scope, { caseInsensitive: false })
+    !matchesAny(resolved.relative, policy.write_scope, GRANT_MATCH)
   ) {
     throw new ToolScopeViolation(`${resolved.relative} is outside the write scope`, "write-outside-scope");
   }
@@ -120,7 +128,7 @@ export async function recheckWritePath(context: ToolExecutionContext, candidate:
 export function readableByPolicy(relative: string, context: ToolExecutionContext): boolean {
   return (
     !matchesAny(relative, context.policy.forbidden, { caseInsensitive: true }) &&
-    matchesAny(relative, context.policy.read_scope, { caseInsensitive: false })
+    matchesAny(relative, context.policy.read_scope, GRANT_MATCH)
   );
 }
 

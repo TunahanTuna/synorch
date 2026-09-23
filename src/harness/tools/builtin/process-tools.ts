@@ -15,7 +15,7 @@ import {
 import { childEnvironment, isBlockedEnvName } from "../environment.ts";
 import { resolveWorkspacePath } from "../workspace-path.ts";
 import { messageOf } from "./read-tools.ts";
-import { actionOf, builtinMetadata, defineTool, errorResult, NormalizedMemo, okResult, readableByPolicy, scopeViolationResult } from "./shared.ts";
+import { actionOf, builtinMetadata, defineTool, errorResult, GRANT_MATCH, NormalizedMemo, okResult, readableByPolicy, scopeViolationResult } from "./shared.ts";
 
 export interface CommandScopeHint {
   readonly cwd: string;
@@ -153,7 +153,7 @@ export function createGitStatusTool(options: ProcessToolOptions): Tool<GitStatus
         if (line.length < 4 || line.startsWith("## ")) continue;
         const target = (line.slice(3).split(" -> ").pop() ?? "").replace(/^"|"$/g, "");
         if (!readableByPolicy(target, context)) continue;
-        (matchesAny(target, context.policy.write_scope, { caseInsensitive: false }) ? owned : other).push(line);
+        (matchesAny(target, context.policy.write_scope, GRANT_MATCH) ? owned : other).push(line);
       }
       const sections = [
         `branch: ${branch || "(unknown)"}`,

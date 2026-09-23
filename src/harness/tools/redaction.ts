@@ -78,14 +78,17 @@ export interface BoundedText {
   readonly blob: BlobRef | undefined;
 }
 
-/** Keeps text inline up to 16 KiB; larger text is stored whole as a blob and previewed head + tail. */
-export async function boundText(text: string, blobs: BlobStore): Promise<BoundedText> {
+/**
+ * Keeps text inline up to 16 KiB; larger text is stored whole as a blob and previewed head + tail.
+ * `hint` tells the model how to see the omitted part with the same tool (audit F18).
+ */
+export async function boundText(text: string, blobs: BlobStore, hint?: string): Promise<BoundedText> {
   const bytes = Buffer.from(text, "utf8");
   if (bytes.length <= INLINE_OUTPUT_LIMIT_BYTES) return { text, blob: undefined };
   const blob = await blobs.put(new Uint8Array(bytes), "text/plain; charset=utf-8");
   const head = sliceUtf8(bytes, 0, PREVIEW_HEAD_BYTES);
   const tail = sliceUtf8(bytes, bytes.length - PREVIEW_TAIL_BYTES, bytes.length);
-  const marker = `\n… [${bytes.length - Buffer.byteLength(head) - Buffer.byteLength(tail)} bytes omitted; full output in blob ${blob.digest}] …\n`;
+  const marker = `\n… [${bytes.length - Buffer.byteLength(head) - Buffer.byteLength(tail)} bytes omitted; ${hint ?? "truncated"}; full output in blob ${blob.digest}] …\n`;
   return { text: head + marker + tail, blob };
 }
 

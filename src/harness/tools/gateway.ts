@@ -16,6 +16,7 @@ import {
   toolResultSchema,
   type ApprovalBroker,
   type ApprovalDecision,
+  type AttemptFileLedger,
   type BlobRef,
   type BlobStore,
   type EffectivePolicy,
@@ -39,6 +40,7 @@ import {
   type ToolResult,
 } from "../contracts/index.ts";
 import { errorResult } from "./builtin/shared.ts";
+import { createAttemptFileLedger } from "./file-ledger.ts";
 import { boundText, containsCredentialValue, createRedactor, INLINE_OUTPUT_LIMIT_BYTES, type Redactor } from "./redaction.ts";
 import { ToolScopeViolation } from "./workspace-path.ts";
 
@@ -54,6 +56,8 @@ export interface ToolGatewayDependencies {
   /** Streaming progress from a running tool, already redacted. */
   readonly onUpdate?: (toolCallId: ToolCallId, text: string) => void;
   readonly now?: () => Date;
+  /** Platform whose path-case policy keys the attempt file ledger (defaults to the running one). */
+  readonly platform?: string;
 }
 
 type PolicyLayer = PolicyDecision["reasons"][number]["layer"];
@@ -62,6 +66,15 @@ type EventBody = DistributiveOmit<SessionEventDraft, "event_version" | "actor" |
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 const WRITE_EFFECTS = new Set(["workspace-write", "exec"]);
+const SESSION_SCOPE = "session";
+
+/** How to see what a bounded preview left out, per tool (audit F18). */
+const TRUNCATION_HINTS: Readonly<Record<string, string>> = {
+  read_file: "truncated; use offset/limit to read the omitted lines",
+  exec: "truncated; narrow the command's output (a filter, head/tail, a narrower test selection) to see the omitted part",
+  git_diff: "truncated; pass paths to see the diff of fewer files",
+  search: "truncated; narrow the pattern, path or glob",
+};
 const ENFORCEMENT_ORDER = ["unavailable", "partial", "full"] as const;
 
 /**
@@ -78,6 +91,40 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
   const now = dependencies.now ?? (() => new Date());
   const recordedPolicies = new Set<string>();
   const scopedGrants = new Set<string>();
+  const ledgers = new Map<string, AttemptFileLedger>();
+  const ledgerFor = (scope: ToolInvocationScope): AttemptFileLedger => {
+    const key = scope.attemptId ?? SESSION_SCOPE;
+    let ledger = ledgers.get(key);
+    if (ledger === undefined) {
+      ledger = createAttemptFileLedger(dependencies.platform ?? process.platform);
+      ledgers.set(key, ledger);
+    }
+    return ledger;
+  };
+  // Short refs (`[#n]`, ADR-18): the highest ordinal per attempt (or session), seeded once from the
+  // recorded `tool/call_proposed` events so a resumed session continues the numbering.
+  let lastRefs: Promise<Map<string, number>> | undefined;
+  const seedRefs = async (): Promise<Map<string, number>> => {
+    const highest = new Map<string, number>();
+    try {
+      for await (const item of dependencies.events.read()) {
+        if (item.status !== "ok" || item.event.type !== "tool/call_proposed" || item.event.data.ref === undefined) continue;
+        const key = item.event.attempt_id ?? SESSION_SCOPE;
+        highest.set(key, Math.max(highest.get(key) ?? 0, item.event.data.ref));
+      }
+    } catch {
+      // An unreadable log only costs numbering continuity; the append below still fails loudly.
+    }
+    return highest;
+  };
+  const nextRef = async (scope: ToolInvocationScope): Promise<number> => {
+    lastRefs ??= seedRefs();
+    const highest = await lastRefs;
+    const key = scope.attemptId ?? SESSION_SCOPE;
+    const ref = (highest.get(key) ?? 0) + 1;
+    highest.set(key, ref);
+    return ref;
+  };
   let sandboxReport: Promise<SandboxReport> | undefined;
   const liveSandbox = (): Promise<SandboxReport> => {
     sandboxReport ??= dependencies.sandbox.probe().catch((error: unknown) => ({
@@ -110,17 +157,21 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
     let decision: PolicyDecision | undefined;
     let approval: ApprovalDecision | undefined;
     let executionStarted = false;
+    let ref: number | undefined;
+    let endsTurnTool = false;
     const finish = async (state: ToolCallOutcome["state"], raw: ToolResult): Promise<ToolCallOutcome> => {
-      const result = await finalize(raw);
+      const result = await finalize(raw, request.tool_name);
       const recorded = state === "interrupted" ? "failed" : state;
+      const refField = ref === undefined ? {} : { ref };
       try {
         await append({
           type: "tool/result_recorded",
           data: { tool_call_id: toolCallId, state: recorded, result, duration_ms: Math.max(0, Math.round(performance.now() - started)) },
         });
-        return { toolCallId, state, result, decision, approval };
+        const endsTurn = endsTurnTool && state === "succeeded" && result.status === "ok";
+        return { toolCallId, state, result, decision, approval, ...refField, ...(endsTurn ? { endsTurn } : {}) };
       } catch {
-        return { toolCallId, state: executionStarted ? "interrupted" : state, result, decision, approval };
+        return { toolCallId, state: executionStarted ? "interrupted" : state, result, decision, approval, ...refField };
       }
     };
     const refuseUnlogged = (message: string): ToolCallOutcome => ({
@@ -148,6 +199,7 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
       if (Buffer.byteLength(argsJson) > INLINE_PAYLOAD_MAX_BYTES) {
         argsBlob = await dependencies.blobs.put(new Uint8Array(Buffer.from(redact(argsJson).text, "utf8")), "application/json");
       }
+      const ordinal = await nextRef(scope);
       const proposed = await append({
         type: "tool/call_proposed",
         data: {
@@ -156,8 +208,10 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
           tool_name: request.tool_name,
           args_digest: sha256(argsJson),
           ...(argsBlob === undefined ? {} : { args_blob: argsBlob }),
+          ref: ordinal,
         },
       });
+      ref = ordinal;
       causation = proposed.seq;
     } catch (error: unknown) {
       return refuseUnlogged(`the event log refused the call record; nothing was started (${error instanceof Error ? error.message : String(error)})`);
@@ -165,6 +219,7 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
 
     const tool = dependencies.registry.get(request.tool_name);
     if (tool === undefined) return finish("denied", errorResult("unknown_tool", `no tool named ${request.tool_name}`));
+    endsTurnTool = tool.metadata.ends_turn === true;
     const parsed = tool.input.safeParse(request.arguments);
     if (!parsed.success) return finish("denied", errorResult("invalid_arguments", formatZodIssues(parsed.error)));
 
@@ -172,6 +227,8 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
     const callSignal = AbortSignal.any([signal, execution.signal]);
     const context: ToolExecutionContext = {
       toolCallId,
+      ...(ref === undefined ? {} : { ref }),
+      files: ledgerFor(scope),
       runId: scope.runId,
       taskId: scope.taskId,
       attemptId: scope.attemptId,
@@ -328,28 +385,42 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
     return answer;
   }
 
-  async function finalize(raw: ToolResult): Promise<ToolResult> {
+  async function finalize(raw: ToolResult, toolName: string): Promise<ToolResult> {
     const text = redact(raw.text);
     const message = raw.error === undefined ? undefined : redact(raw.error.message);
     let bounded: { text: string; blob: BlobRef | undefined };
     try {
-      bounded = await boundText(text.text, dependencies.blobs);
+      bounded = await boundText(text.text, dependencies.blobs, TRUNCATION_HINTS[toolName]);
     } catch {
       bounded = { text: Buffer.from(text.text, "utf8").subarray(0, INLINE_OUTPUT_LIMIT_BYTES - 64).toString("utf8").replace(/�$/, ""), blob: undefined };
     }
-    const blob = bounded.blob ?? raw.blob;
+    const toolBlob = raw.blob === undefined || bounded.blob !== undefined ? undefined : await redactedBlob(raw.blob);
+    const blob = bounded.blob ?? toolBlob?.ref;
     const candidate: ToolResult = {
       status: raw.status,
       text: bounded.text,
-      truncated: raw.truncated || (bounded.blob === undefined && bounded.text.length < text.text.length),
-      redactions: raw.redactions + text.count + (message?.count ?? 0),
+      truncated: raw.truncated || bounded.text.length < text.text.length,
+      redactions: raw.redactions + text.count + (message?.count ?? 0) + (toolBlob?.count ?? 0),
       ...(blob === undefined ? {} : { blob }),
       ...(raw.exit_code === undefined ? {} : { exit_code: raw.exit_code }),
       ...(raw.changed_paths === undefined ? {} : { changed_paths: raw.changed_paths }),
+      ...(raw.digest === undefined ? {} : { digest: raw.digest }),
       ...(raw.error === undefined || message === undefined ? {} : { error: { code: raw.error.code, message: message.text.slice(0, 2000) } }),
     };
     const checked = toolResultSchema.safeParse(candidate);
     return checked.success ? checked.data : errorResult("execution_failed", `the tool returned an invalid result: ${formatZodIssues(checked.error)}`.slice(0, 2000));
+  }
+
+  /** A text blob a tool stored itself goes through the same redaction as its inline text. */
+  async function redactedBlob(ref: BlobRef): Promise<{ ref: BlobRef; count: number } | undefined> {
+    if (!ref.media_type.startsWith("text/")) return { ref, count: 0 };
+    try {
+      const redacted = redact(Buffer.from(await dependencies.blobs.get(ref.digest)).toString("utf8"));
+      if (redacted.count === 0) return { ref, count: 0 };
+      return { ref: await dependencies.blobs.put(new Uint8Array(Buffer.from(redacted.text, "utf8")), ref.media_type), count: redacted.count };
+    } catch {
+      return undefined;
+    }
   }
 
   return { invoke };

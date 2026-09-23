@@ -273,6 +273,15 @@ test("AC-4: the headless broker only refuses and records the run mode", async ()
   assert.equal((await broker.request(request, aborted.signal)).outcome, "cancelled");
 });
 
+test("AC-a9 (ADR-19): write grants follow the platform path-case policy; forbidden stays case-insensitive everywhere", () => {
+  const policy = engine.compute(inputs({ taskScope: { owned: ["readme.md", "src/auth/**"], read: [], forbidden: ["src/auth/secret/**"] } }));
+  const caseInsensitive = process.platform === "win32" || process.platform === "darwin";
+  assert.equal(engine.evaluate(write("Readme.md"), policy).decision, caseInsensitive ? "allow" : "deny");
+  assert.equal(engine.evaluate(write("SRC/Auth/token.ts"), policy).decision, caseInsensitive ? "allow" : "deny");
+  assert.equal(engine.evaluate(write("src/auth/SECRET/key.txt"), policy).decision, "deny");
+  assert.equal(engine.evaluate(write("src/auth/şehir.ts"), policy).decision, "allow", "an NFD name is matched in NFC");
+});
+
 function _typecheck(policy: EffectivePolicy): EffectivePolicy {
   return policy;
 }

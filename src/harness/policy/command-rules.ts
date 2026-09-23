@@ -1,6 +1,6 @@
 import path from "node:path";
 import { isSafeRelativePath, normalizeRelativePath } from "../../domain/relative-path.ts";
-import { hasReservedSegment, matchesAnyPathPattern as matchesAny, staticPrefix } from "../contracts/index.ts";
+import { hasReservedSegment, isCaseInsensitivePlatform, matchesAnyPathPattern as matchesAny, staticPrefix } from "../contracts/index.ts";
 
 /**
  * The irreversible-command table (ADR-08 hard rail `destructive-command`). It is data: each rule
@@ -135,7 +135,7 @@ function targetInScope(raw: string, scope: CommandScope): boolean {
   const checked = prefix.join("/");
   if (hasReservedSegment(checked)) return false;
   if (matchesAny(checked, scope.forbidden, { caseInsensitive: true })) return false;
-  return matchesAny(checked, scope.writeScope, { caseInsensitive: false });
+  return matchesAny(checked, scope.writeScope, { caseInsensitive: isCaseInsensitivePlatform(process.platform) });
 }
 
 function flagValue(args: readonly string[], names: readonly string[]): string | undefined {

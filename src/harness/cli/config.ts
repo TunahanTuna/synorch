@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -27,8 +27,15 @@ import type { RouteOverride } from "./args.ts";
  * optional, and a session layer comes from `--profile` flags:
  *
  *   user       <synorch home>/config.yaml                  (SYNORCH_HOME or ~/.synorch)
- *   workspace  nearest ancestor of the target with .synorch/config.yaml (never the synorch home)
- *   project    <target>/.synorch/config.yaml
+ *   workspace  nearest ancestor of the target with .synorch/config.yaml (never a synorch home)
+ *   project    <target>/.synorch/config.yaml                (never a synorch home)
+ *
+ * A synorch home is never read as a repository layer: the walk skips the `.synorch` directory that
+ * canonically (realpath, case-folded on Windows and macOS) equals the resolved home, and any other
+ * `.synorch` directory holding a home marker (`SYNORCH_HOME_MARKERS`: credentials, trust or auth
+ * state), such as a stray `~/.synorch` while `SYNORCH_HOME` points elsewhere. Skipping a directory
+ * can only drop a narrowing layer, never grant anything. `ConfigDiscoveryOptions.ceiling` bounds
+ * the walk (tests anchor it at their sandbox root so files above the OS temp dir cannot leak in).
  *
  * Trust layering (SEC-C1): the workspace and project layers are repository content and therefore
  * untrusted. Only the user layer and explicit session flags choose adapters, endpoints, routes,
@@ -230,16 +237,43 @@ export function checkEndpoint(kind: ConfigurableAdapterKind, baseUrl: string, al
   return undefined;
 }
 
-/** The nearest ancestor (strictly above `target`) holding `.synorch/config.yaml`, excluding the synorch home. */
-export function findWorkspaceConfig(target: string, home: string): string | undefined {
-  const homeResolved = path.resolve(home).toLowerCase();
+/** Files that only a synorch home holds; a `.synorch` directory containing one is never a repository layer. */
+export const SYNORCH_HOME_MARKERS = ["credentials.json", "credentials.dpapi.json", "trust.json", "auth-state.json"] as const;
+
+export interface ConfigDiscoveryOptions {
+  /** The highest directory the workspace walk may inspect; directories above it are never read. */
+  readonly ceiling?: string;
+  readonly platform?: NodeJS.Platform;
+}
+
+function canonicalPath(target: string, platform: NodeJS.Platform): string {
+  let resolved = path.resolve(target);
+  try {
+    resolved = realpathSync.native(resolved);
+  } catch {
+    // A missing path keeps its lexical form.
+  }
+  return platform === "win32" || platform === "darwin" ? resolved.toLowerCase() : resolved;
+}
+
+/** Whether `dotDir` is the resolved synorch home or looks like another synorch home (holds a home marker). */
+export function isSynorchHome(dotDir: string, home: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (canonicalPath(dotDir, platform) === canonicalPath(home, platform)) return true;
+  return SYNORCH_HOME_MARKERS.some((marker) => existsSync(path.join(dotDir, marker)));
+}
+
+/** The nearest ancestor (strictly above `target`, not above `ceiling`) holding `.synorch/config.yaml`, skipping synorch homes. */
+export function findWorkspaceConfig(target: string, home: string, options: ConfigDiscoveryOptions = {}): string | undefined {
+  const platform = options.platform ?? process.platform;
+  const ceiling = options.ceiling === undefined ? undefined : canonicalPath(options.ceiling, platform);
   let current = path.dirname(path.resolve(target));
+  if (ceiling !== undefined && canonicalPath(path.resolve(target), platform) === ceiling) return undefined;
   for (;;) {
     const dotDir = path.join(current, ".synorch");
     const candidate = path.join(dotDir, CONFIG_FILE);
-    if (path.resolve(dotDir).toLowerCase() !== homeResolved && existsSync(candidate)) return candidate;
+    if (existsSync(candidate) && !isSynorchHome(dotDir, home, platform)) return candidate;
     const parent = path.dirname(current);
-    if (parent === current) return undefined;
+    if (parent === current || (ceiling !== undefined && canonicalPath(current, platform) === ceiling)) return undefined;
     current = parent;
   }
 }
@@ -350,11 +384,16 @@ export function resolveHome(env: Readonly<Record<string, string | undefined>>): 
   return path.join(env.HOME ?? env.USERPROFILE ?? os.homedir(), ".synorch");
 }
 
-export async function loadRuntimeConfig(home: string, target: string, overrides: readonly RouteOverride[] = []): Promise<RuntimeConfig> {
+export async function loadRuntimeConfig(
+  home: string,
+  target: string,
+  overrides: readonly RouteOverride[] = [],
+  discovery: ConfigDiscoveryOptions = {},
+): Promise<RuntimeConfig> {
   const userPath = path.join(home, CONFIG_FILE);
-  const workspacePath = findWorkspaceConfig(target, home);
+  const workspacePath = findWorkspaceConfig(target, home, discovery);
   const projectPath = path.join(path.resolve(target), ".synorch", CONFIG_FILE);
-  const samePlace = path.resolve(path.dirname(projectPath)).toLowerCase() === path.resolve(home).toLowerCase();
+  const samePlace = isSynorchHome(path.dirname(projectPath), home, discovery.platform ?? process.platform);
   const user = await readLayer(userPath);
   const workspaceRead = workspacePath === undefined ? undefined : await readLayer(workspacePath, true);
   const projectRead = samePlace ? undefined : await readLayer(projectPath, true);

@@ -99,7 +99,7 @@ test("SEC-C1 repository routes and adapters are ignored with warnings; policy an
       ].join("\n"),
     );
     await writeFile(path.join(sandbox.home, "config.yaml"), "routes:\n  - { tier: orchestrator, provider: openai, model: gpt-user }\nbudget: { max_cost_usd: 3 }\n");
-    const config = await loadRuntimeConfig(sandbox.home, sandbox.workspace, [{ tier: "fast_worker", route: "anthropic/claude-session" }]);
+    const config = await loadRuntimeConfig(sandbox.home, sandbox.workspace, [{ tier: "fast_worker", route: "anthropic/claude-session" }], { ceiling: sandbox.root });
     assert.deepEqual(config.adapters, [], "a repository cannot declare adapters");
     assert.deepEqual(
       config.router.rules.map((rule) => `${rule.source}:${rule.tier}:${rule.route.model_id}`),
@@ -155,28 +155,79 @@ test("SEC-C1 base_url is pinned to official endpoints; the ChatGPT token never g
   const sandbox = await createSandbox({ "README.md": "# r\n" });
   const userConfig = (lines: readonly string[]) => writeFile(path.join(sandbox.home, "config.yaml"), `${lines.join("\n")}\n`);
   const rejects = async (pattern: RegExp) =>
-    assert.rejects(loadRuntimeConfig(sandbox.home, sandbox.workspace), (error: unknown) => error instanceof HarnessError && error.info.code === "config_invalid" && pattern.test(error.info.message));
+    assert.rejects(loadRuntimeConfig(sandbox.home, sandbox.workspace, [], { ceiling: sandbox.root }), (error: unknown) => error instanceof HarnessError && error.info.code === "config_invalid" && pattern.test(error.info.message));
   try {
     await userConfig(["adapters:", "  - { id: corp, kind: anthropic-messages, base_url: 'https://gateway.corp.example/v1' }"]);
     await rejects(/not an official anthropic-messages endpoint.*allow_custom_endpoint/);
 
     await userConfig(["adapters:", "  - { id: corp, kind: anthropic-messages, base_url: 'https://gateway.corp.example/v1', allow_custom_endpoint: true }"]);
-    const custom = await loadRuntimeConfig(sandbox.home, sandbox.workspace);
+    const custom = await loadRuntimeConfig(sandbox.home, sandbox.workspace, [], { ceiling: sandbox.root });
     assert.equal(custom.adapters[0]?.baseUrl, "https://gateway.corp.example/v1", "the user may opt in to a custom endpoint for an API-key adapter");
 
     await userConfig(["adapters:", "  - { id: chat, kind: openai-chatgpt, base_url: 'https://proxy.example/backend-api/codex', allow_custom_endpoint: true }"]);
     await rejects(/ChatGPT subscription token is only sent to https:\/\/chatgpt\.com/);
 
     await userConfig(["adapters:", "  - { id: chat, kind: openai-chatgpt, base_url: 'https://chatgpt.com/backend-api/codex' }"]);
-    assert.equal((await loadRuntimeConfig(sandbox.home, sandbox.workspace)).adapters[0]?.baseUrl, "https://chatgpt.com/backend-api/codex");
+    assert.equal((await loadRuntimeConfig(sandbox.home, sandbox.workspace, [], { ceiling: sandbox.root })).adapters[0]?.baseUrl, "https://chatgpt.com/backend-api/codex");
 
     await userConfig(["adapters:", "  - { id: plain, kind: openai-responses, base_url: 'http://api.openai.com/v1' }"]);
     await rejects(/not an official openai-responses endpoint/);
 
     await userConfig(["adapters:", "  - { id: bridge, kind: claude-code, allow_non_subscription_auth: true }"]);
-    assert.equal((await loadRuntimeConfig(sandbox.home, sandbox.workspace)).adapters[0]?.allowNonSubscriptionAuth, true);
+    assert.equal((await loadRuntimeConfig(sandbox.home, sandbox.workspace, [], { ceiling: sandbox.root })).adapters[0]?.allowNonSubscriptionAuth, true);
     await userConfig(["adapters:", "  - { id: api, kind: anthropic-messages, allow_non_subscription_auth: true }"]);
     await rejects(/allow_non_subscription_auth applies only to kind claude-code/);
+  } finally {
+    await sandbox.cleanup();
+  }
+});
+
+test("the Synorch home config is never read as a workspace layer when the workspace lives under the user's home", async () => {
+  const sandbox = await createSandbox({ "README.md": "# r\n" });
+  try {
+    const fakeUser = path.join(sandbox.root, "user");
+    const home = path.join(fakeUser, ".synorch");
+    const workspace = path.join(fakeUser, "code", "repo");
+    await mkdir(home, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    await writeFile(path.join(home, "config.yaml"), "routes:\n  - { tier: orchestrator, provider: openai, model: gpt-user }\nadapters:\n  - { id: corp, kind: anthropic-messages }\n");
+    for (const spelling of process.platform === "win32" ? [home, home.toUpperCase()] : [home]) {
+      const config = await loadRuntimeConfig(spelling, workspace, [], { ceiling: sandbox.root });
+      assert.deepEqual(config.router.rules.map((rule) => `${rule.source}:${rule.tier}:${rule.route.model_id}`), ["user:orchestrator:gpt-user"]);
+      assert.deepEqual(config.adapters.map((adapter) => adapter.id), ["corp"]);
+      assert.deepEqual(config.warnings, [], "the user layer must not be reported as ignored repository keys");
+      assert.deepEqual(config.files.map((file) => file.layer), ["user"], "no workspace layer is read from the Synorch home");
+    }
+  } finally {
+    await sandbox.cleanup();
+  }
+});
+
+test("a stray Synorch home above the workspace (SYNORCH_HOME elsewhere) is skipped; a real workspace layer and the ceiling still apply", async () => {
+  const sandbox = await createSandbox({ "README.md": "# r\n" });
+  try {
+    const fakeUser = path.join(sandbox.root, "user");
+    const stray = path.join(fakeUser, ".synorch");
+    const workspace = path.join(fakeUser, "code", "repo");
+    await mkdir(stray, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    await writeFile(path.join(stray, "config.yaml"), "routes:\n  - { tier: orchestrator, provider: anthropic, model: stray }\n");
+    await writeFile(path.join(stray, "trust.json"), "{}\n");
+    await writeFile(path.join(sandbox.home, "config.yaml"), "routes:\n  - { tier: orchestrator, provider: openai, model: gpt-user }\n");
+
+    const skipped = await loadRuntimeConfig(sandbox.home, workspace, [], { ceiling: sandbox.root });
+    assert.deepEqual(skipped.router.rules.map((rule) => `${rule.source}:${rule.route.model_id}`), ["user:gpt-user"]);
+    assert.deepEqual(skipped.warnings, []);
+    assert.deepEqual(skipped.files.map((file) => file.layer), ["user"]);
+
+    await writeRepoConfig(path.join(fakeUser, "code"), "routes:\n  - { tier: orchestrator, provider: anthropic, model: repo }\npolicy: { mode: ask }\n");
+    const nested = await loadRuntimeConfig(sandbox.home, workspace, [], { ceiling: sandbox.root });
+    assert.deepEqual(nested.files.map((file) => file.layer), ["user", "workspace"], "an ordinary ancestor .synorch is still a workspace layer");
+    assert.deepEqual(nested.warnings.map((warning) => `${warning.layer}:${warning.key}`), ["workspace:routes"]);
+    assert.equal(nested.workspacePolicy?.mode, "ask");
+
+    const capped = await loadRuntimeConfig(sandbox.home, workspace, [], { ceiling: workspace });
+    assert.deepEqual(capped.files.map((file) => file.layer), ["user"], "nothing above the ceiling is read");
   } finally {
     await sandbox.cleanup();
   }

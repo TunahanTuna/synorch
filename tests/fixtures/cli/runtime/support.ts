@@ -189,7 +189,7 @@ export async function trustWorkspace(sandbox: Sandbox): Promise<void> {
 }
 
 export function overridesFor(sandbox: Sandbox, extra: RuntimeOverrides = {}): RuntimeOverrides {
-  return { home: sandbox.home, sandbox: TEST_SANDBOX, credentialStore: () => createMemoryCredentialStore(), ...extra };
+  return { home: sandbox.home, configCeiling: sandbox.root, sandbox: TEST_SANDBOX, credentialStore: () => createMemoryCredentialStore(), ...extra };
 }
 
 export function toolResultIds(request: ModelRequest): string[] {

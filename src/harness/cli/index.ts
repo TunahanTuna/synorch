@@ -242,7 +242,10 @@ async function dispatch(parsed: Exclude<ParsedCommand, { kind: "help" }>, io: Ha
         parsed.revoke,
       );
     case "memory": {
-      const config = await loadRuntimeConfig(home, io.cwd).catch(() => undefined);
+      const config = await loadRuntimeConfig(home, io.cwd, [], {
+        platform,
+        ...(overrides.configCeiling === undefined ? {} : { ceiling: overrides.configCeiling }),
+      }).catch(() => undefined);
       const handler = createMemoryCommand({
         config: config?.memory,
         platform,

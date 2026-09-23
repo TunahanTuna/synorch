@@ -97,6 +97,8 @@ export interface RuntimeOverrides {
   readonly sandbox?: SandboxReport;
   readonly limits?: Partial<CoordinatorLimits>;
   readonly platform?: NodeJS.Platform;
+  /** Highest directory the workspace-config walk may inspect (tests anchor it at their sandbox root). */
+  readonly configCeiling?: string;
 }
 
 export interface RuntimeOptions {
@@ -289,7 +291,10 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const platform = overrides.platform ?? process.platform;
   const home = overrides.home ?? resolveHome(env);
   const workspaceRoot = path.resolve(options.workspaceRoot);
-  const config = await loadRuntimeConfig(home, workspaceRoot, options.routes ?? []);
+  const config = await loadRuntimeConfig(home, workspaceRoot, options.routes ?? [], {
+    platform,
+    ...(overrides.configCeiling === undefined ? {} : { ceiling: overrides.configCeiling }),
+  });
   const adapters = await buildAdapters(config, overrides, env, home);
   const baseRouter = createModelRouter({ rules: config.router.rules }, adapters);
 

@@ -59,5 +59,6 @@ export function renderRoleCapabilityTable(): string {
     "Worker role capabilities (enforced by the harness policy; plans that ignore them are rejected):",
     ...WORKER_ROLES.map((role) => `- ${role}: ${ROLE_CAPABILITIES[role].summary}.`),
     "Put every command that must run (tests, `node check.mjs`, builds) in the verification of a task whose role can run it, usually the implementer that owns the change.",
+    "The harness runs each verification command itself as a plain argv under the task's policy, and plan_propose dry-runs them: no shell syntax (quoted code, pipes, redirects, &&, VAR=value) and no inline interpreter code (`node -e`, `python -c`, `sh -c`); to check behaviour, let the implementer own a small check script and verify with `node check-x.mjs`, or use the project's test runner.",
   ].join("\n");
 }

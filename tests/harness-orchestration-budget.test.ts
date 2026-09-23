@@ -159,26 +159,24 @@ test("AC-6 an exhausted run budget stops new work: remaining tasks are cancelled
   const workspace = await createTempWorkspace({ "docs/a.md": "a\n", "docs/b.md": "b\n" }, { git: false });
   try {
     const planner = createScriptedPlanner((input) =>
-      testPlan(
-        input,
-        [
-          { key: "first", owned_paths: ["docs/a.md"], risk: "trivial" },
-          { key: "second", owned_paths: ["docs/b.md"], risk: "trivial", depends_on: ["first"] },
-        ],
-        { budget: { max_wall_time_seconds: 600, max_steps: 1 } },
-      ),
+      testPlan(input, [
+        { key: "first", owned_paths: ["docs/a.md"], risk: "trivial" },
+        { key: "second", owned_paths: ["docs/b.md"], risk: "trivial", depends_on: ["first"] },
+      ]),
     );
     const runtime = createTestRuntime({
       workspace,
       planner,
       context: ({ sessions, blobs, budgetGate }) => createContextBuilder({ readSession: (id) => sessions.openForRead(id), blobs, tools: createStaticToolRegistry(), budget: budgetGate }),
       script: async (context) => {
+        // The first attempt spends the whole cost budget (not 120%: nothing is cancelled).
+        runtime.budgetGate.current()?.observe([{ sessionId: context.input.sessionId, seq: 1, usage: usage(1) }]);
         await context.write(context.input.packet?.scope.owned_paths[0] ?? "docs/x.md", "changed\n");
         const call = await context.toolCall("exec", { exitCode: 0 });
         await context.reply(workerClaim(context, call));
       },
     });
-    const outcome = await runtime.run();
+    const outcome = await runtime.run("g", { maxWallTimeSeconds: undefined, maxCostUsd: 1 });
     assert.equal(outcome.exitCode, 9, outcome.summary);
     const events: readonly SessionEvent[] = runtime.runEvents(outcome);
     assert.deepEqual(replayTransitions(events), []);

@@ -70,6 +70,8 @@ export interface CompilePacketInput {
   readonly findings: readonly string[];
   readonly forbiddenPaths: readonly string[];
   readonly preferWorktree: boolean;
+  /** The worker step floor (`StepFloors.worker`); `MIN_TASK_STEPS` when absent. */
+  readonly stepFloor?: number;
 }
 
 export const EXPECTED_REPORT = [
@@ -101,20 +103,57 @@ function uniqueSources(sources: readonly PacketSource[]): PacketSource[] {
 /** Lower bound of a task's step limit: a real model spends several steps on reads, the change, the check and the report (F13). */
 export const MIN_TASK_STEPS = 25;
 
+/** Lower bound of an independent reviewer's step limit: reads, its own checks and the report (live run 01M37V2J). */
+export const MIN_REVIEWER_STEPS = 25;
+
+/**
+ * Guaranteed step floors per attempt (live run 01M37V2J: the plan's `max_steps: 10` was the whole
+ * run's step budget, the implementer's repairs used it up and both reviewer attempts ended
+ * `budget_exceeded` without a report). `worker` bounds implementer/debugger/explorer attempts,
+ * `reviewer` the independent review; `finishWarning` is how many steps before its limit an attempt
+ * is told to finish and report.
+ */
+export interface StepFloors {
+  readonly worker: number;
+  readonly reviewer: number;
+  readonly finishWarning: number;
+}
+
+export const DEFAULT_STEP_FLOORS: StepFloors = { worker: MIN_TASK_STEPS, reviewer: MIN_REVIEWER_STEPS, finishWarning: 3 };
+
 /**
  * A task's share of the plan's step budget (F13): divided among the tasks that dispatch an attempt
- * (reviewer plan tasks never do; they configure the review of their dependencies), never below
- * `MIN_TASK_STEPS`. The run's own budget tracker still bounds the run as a whole.
+ * (reviewer plan tasks never do; they configure the review of their dependencies), never below the
+ * worker floor (`MIN_TASK_STEPS` by default).
  */
-export function perTaskStepLimit(plan: Pick<Plan, "budget" | "tasks">): number {
+export function perTaskStepLimit(plan: Pick<Plan, "budget" | "tasks">, floor: number = MIN_TASK_STEPS): number {
   const dispatching = Math.max(1, plan.tasks.filter((task) => task.role !== "reviewer").length);
-  return Math.max(MIN_TASK_STEPS, Math.min(500, Math.floor(plan.budget.max_steps / dispatching)));
+  return Math.max(floor, Math.min(500, Math.floor(plan.budget.max_steps / dispatching)));
+}
+
+/** The reviewer's step limit: never below the reviewer floor, nor below the implementation's own limit. */
+export function reviewerStepLimit(taskSteps: number, floors: StepFloors = DEFAULT_STEP_FLOORS): number {
+  return Math.min(500, Math.max(floors.reviewer, taskSteps));
+}
+
+/**
+ * The run's step budget. The plan's `max_steps` is the orchestrator's estimate; it is never less
+ * than what the run guarantees: every dispatching task's step limit plus, for a task that needs an
+ * independent review (risk above trivial), the reviewer's. Attempts beyond that (retries,
+ * revisions) draw from whatever is left.
+ */
+export function runStepLimit(plan: Pick<Plan, "budget" | "tasks">, floors: StepFloors = DEFAULT_STEP_FLOORS): number {
+  const taskSteps = perTaskStepLimit(plan, floors.worker);
+  const guaranteed = plan.tasks
+    .filter((task) => task.role !== "reviewer")
+    .reduce((sum, task) => sum + taskSteps + (task.risk === "trivial" ? 0 : reviewerStepLimit(taskSteps, floors)), 0);
+  return Math.max(plan.budget.max_steps, guaranteed);
 }
 
 /** Compiles the full v2 packet for one plan task; the schema re-validates every authority rule. */
 export function compileTaskPacket(input: CompilePacketInput): TaskContextPacket {
   const { plan, task } = input;
-  const perTaskSteps = perTaskStepLimit(plan);
+  const perTaskSteps = perTaskStepLimit(plan, input.stepFloor ?? MIN_TASK_STEPS);
   const stopConditions = [
     "A change outside owned_paths is required",
     "A cited source changed since the packet was created",
@@ -257,6 +296,8 @@ export interface ReviewerPacketInput {
   readonly extraVerification?: readonly string[];
   /** Criteria the orchestrator waived for a read-only task in triage; they are not reviewed. */
   readonly waivedCriteria?: readonly string[];
+  /** The reviewer's step limit (`reviewerStepLimit`); the implementation's limit when absent. */
+  readonly maxSteps?: number;
 }
 
 /**
@@ -299,7 +340,7 @@ export function compileReviewerPacket(input: ReviewerPacketInput): TaskContextPa
     non_goals: ["Modifying the artifact under review"],
     open_questions: [],
     stop_conditions: ["The artifact changes during review"],
-    limits: impl.limits,
+    limits: { ...impl.limits, max_steps: input.maxSteps ?? impl.limits.max_steps },
     context: { created_at: input.createdAt, project_snapshot: digestSchema.parse(input.artifactDigest), sources: [] },
     expected_report: ["criteria", "findings", "decision"],
   });

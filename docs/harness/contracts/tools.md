@@ -57,7 +57,8 @@ tool/result_recorded    → model'e tool_result (`renderToolResultText(ref, resu
 | `memory_propose` | control | orchestrator, worker | Yalnız öneri; kalıcı yazım memory modülünde ([memory.md](./memory.md)) |
 | `task_report` | control | explorer, implementer, debugger | Attempt raporu (`taskReportInputSchema`); callback gerekmez, orchestration kaydı günlükten okur ([runtime-seams.md](./runtime-seams.md#5-yapılandırılmış-rapor-araçları)) |
 | `review_report` | control | reviewer | Review hükmü (`reviewReportInputSchema`) |
-| `plan_propose` | control | orchestrator | Plan önerisi (`planProposalSchema`); kimlik alanlarını harness ekler, `planSchema` doğrular |
+| `plan_propose` | control | orchestrator | Plan önerisi (`planProposalSchema`); kimlik alanlarını harness ekler, `planSchema` doğrular ve her doğrulama komutunu harness runner'ı gibi (argv + policy) çalıştırmadan dener; reddedilecek komut `invalid_arguments` ile adı, ret kodu ve alternatifiyle döner |
+| `task_triage` | control | orchestrator | Yalnız triyaj danışmasında: `task`, `decision` (`accept` \| `retry` \| `fail`), `waive_criteria?`, `guidance?`, `verification?` (1–20 komut; yalnız `retry` ile ve yalnız plan kaynaklı doğrulama sorununda: görevin yedek doğrulama listesi, `plan_propose` gibi denenir; plan yeni sürüme çıkar ve onaylanır). Plan kaynaklı sorunlar tek sorunsa `accept` yazan görevde de o komutları feragat eder |
 
 ## 3. Sonuç
 

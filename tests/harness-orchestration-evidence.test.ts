@@ -159,11 +159,13 @@ function ofType<T extends SessionEvent["type"]>(events: readonly SessionEvent[],
 test("AC-c3 / AC-c4 a failed harness verification is repaired in the same session, keeping the workspace", async () => {
   const workspace = await createTempWorkspace({ "docs/a.md": "a\n" }, { git: false });
   try {
-    const planner = createScriptedPlanner((input) => testPlan(input, [{ key: "doc", owned_paths: ["docs/**"], risk: "trivial", verification: ["pnpm test", "pnpm lint && echo ok"] }]));
+    // A shell-syntax command is now rejected at plan time (verification preflight); a command the runner refuses is still recorded not-run.
+    const planner = createScriptedPlanner((input) => testPlan(input, [{ key: "doc", owned_paths: ["docs/**"], risk: "trivial", verification: ["pnpm test", "pnpm lint"] }]));
     const runs: VerificationRequest[] = [];
     const verification = async (request: VerificationRequest): Promise<VerificationResult> => {
       runs.push(request);
-      const passed = runs.length > 1;
+      if (request.argv[1] === "lint") return { status: "not-run", exitCode: null, output: "", durationMs: 0, reason: "refused: pnpm lint is not on the build/test allowlist" };
+      const passed = runs.filter((run) => run.argv[1] === "test").length > 1;
       return { status: passed ? "passed" : "failed", termination: "exited", exitCode: passed ? 0 : 1, output: passed ? "1 passed" : "1 failed\nexpected a2", durationMs: 5 };
     };
     let turns = 0;
@@ -179,7 +181,7 @@ test("AC-c3 / AC-c4 a failed harness verification is repaired in the same sessio
           workerClaim(context, call, {
             acceptance_evidence: [{ criterion_id: "AC-1", evidence: [{ kind: "tool-call", ref: turns === 1 ? "the suite is green" : call, produced_by: "worker" }] }],
             commands_run: [],
-            skipped_checks: [{ check: "pnpm lint && echo ok", reason: "not needed" }],
+            skipped_checks: [{ check: "pnpm lint", reason: "not needed" }],
           }),
         );
       },
@@ -192,12 +194,12 @@ test("AC-c3 / AC-c4 a failed harness verification is repaired in the same sessio
     const ran = ofType(events, "attempt/verification_ran");
     assert.deepEqual(ran.map((event) => [event.data.command, event.data.status]), [
       ["pnpm test", "failed"],
-      ["pnpm lint && echo ok", "not-run"],
+      ["pnpm lint", "not-run"],
       ["pnpm test", "passed"],
-      ["pnpm lint && echo ok", "not-run"],
+      ["pnpm lint", "not-run"],
     ]);
-    assert.match(ran[1]?.data.reason ?? "", /shell syntax/);
-    assert.deepEqual(runs.map((run) => run.argv), [["pnpm", "test"], ["pnpm", "test"]], "a command that is not a plain argv is never handed to the runner");
+    assert.match(ran[1]?.data.reason ?? "", /refused/);
+    assert.deepEqual(runs.map((run) => run.argv), [["pnpm", "test"], ["pnpm", "lint"], ["pnpm", "test"], ["pnpm", "lint"]]);
     assert.ok(runs.every((run) => run.role === "implementer" && run.policy.role === "implementer" && run.policy.verification_commands?.includes("pnpm test")), "it runs under the attempt's own policy");
     const repair = ofType(events, "attempt/repair_requested");
     assert.equal(repair.length, 1);

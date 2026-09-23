@@ -8,6 +8,7 @@ export {
   createBudgetTracker,
   isHumanBudgetGrant,
   requestBudgetIncrease,
+  type AdmitOptions,
   type BudgetAdmission,
   type BudgetExceeded,
   type BudgetGateSlot,
@@ -50,6 +51,7 @@ export {
   evidenceCandidates,
   firstPathToken,
   harnessCanSubstitute,
+  isPlanCausedVerification,
   INDEPENDENT_EVIDENCE_HINT,
   isIndependentReviewEvidence,
   mayComplete,
@@ -89,11 +91,16 @@ export {
   compileReviewerPacket,
   compileTaskPacket,
   createDeltaPacket,
+  DEFAULT_STEP_FLOORS,
+  MIN_REVIEWER_STEPS,
   MIN_TASK_STEPS,
   perTaskStepLimit,
   refreshPacketSources,
+  reviewerStepLimit,
+  runStepLimit,
   validatePlan,
   type PlanValidation,
+  type StepFloors,
 } from "./plan.ts";
 export {
   createModelPlanner,
@@ -117,6 +124,9 @@ export {
 } from "./scheduler.ts";
 export {
   classifyAttemptFailure,
+  DEFAULT_FINISH_WARNING,
+  renderFinishNowMessage,
+  renderReportOnlyMessage,
   createWorkerManager,
   renderRepairMessage,
   renderReviewBrief,
@@ -131,4 +141,5 @@ export {
   type RunScope,
   type WorkerManagerDependencies,
 } from "./worker-manager.ts";
+export { formatVerificationRefusal, preflightVerification, type VerificationPreflight, type VerificationPreflightContext, type VerificationRefusal } from "./verification-preflight.ts";
 export { contentIdentities, contentIdentity, createWorkspaceDigestReader, resolveOnDiskPath, type ContentIdentityOptions, type WorkspaceDigestOptions } from "./workspace-digest.ts";

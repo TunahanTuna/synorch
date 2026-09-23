@@ -40,6 +40,7 @@ import {
   type ProjectId,
   type RepairCounts,
   type RepairKind,
+  type ReportToolName,
   type ReviewOutcome,
   type ReviewPacket,
   type ReviewReportInput,
@@ -80,6 +81,7 @@ import {
   evidenceCandidates,
   evidenceProblems,
   INDEPENDENT_EVIDENCE_HINT,
+  isPlanCausedVerification,
   isIndependentReviewEvidence,
   provingVerification,
   resolveCompletionEvidence,
@@ -123,6 +125,22 @@ export interface RunScope {
   readonly recorder: RunRecorder;
   /** Per-task budgets of the run (ADR-18 D2); `evidence_repairs` bounds the in-session repairs. */
   readonly budgets?: OrchestrationBudgets;
+  /** Steps before its limit at which an attempt is told to finish and report (`StepFloors.finishWarning`). */
+  readonly finishWarning?: number;
+}
+
+/** Default distance (steps) of the finish-now message from an attempt's step limit. */
+export const DEFAULT_FINISH_WARNING = 3;
+
+/** The runtime message an attempt gets when it is `steps` steps from its limit without a report. */
+export function renderFinishNowMessage(tool: string, steps: number): string {
+  const what = tool === REPORT_TOOL_NAMES.review ? "your verdicts so far (unverifiable where you could not check)" : "what you have (status partial if work remains)";
+  return `Harness: ${steps} step(s) left before the step limit. Finish now: call \`${tool}\` with ${what}, citing the [#n] refs you already have. Do not start new work.`;
+}
+
+/** The message of the forced report-only turn (the limit was hit without a report). */
+export function renderReportOnlyMessage(tool: string): string {
+  return `Harness: the step limit is reached. This is a report-only turn: \`${tool}\` is the only tool available. Call it now with what you have; anything unfinished goes into the report (status partial, or verdict unverifiable).`;
 }
 
 /** One verification command the harness runs in an attempt workspace (ADR-18 D1). */
@@ -328,7 +346,7 @@ function harnessLines(harness: HarnessEvidence | undefined, packet: TaskContextP
 }
 
 export function renderRepairMessage(kind: RepairKind, problems: readonly string[], log: AttemptLog, harness: HarnessEvidence | undefined): string {
-  const verification = (harness?.verification ?? []).filter((record) => record.status !== "passed");
+  const verification = (harness?.verification ?? []).filter((record) => record.status !== "passed" && !isPlanCausedVerification(record));
   const lead =
     kind === "verification-repair"
       ? "The harness ran the packet's verification commands in your workspace after your turn, and they did not pass. Your workspace and changes are kept."
@@ -619,7 +637,13 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     return buildAttemptLog(record.sessionId, await readEvents(events), deps.blobs);
   };
 
-  const execute = async (record: AttemptRecord, userMessage: string, controller: AbortController, trigger: TurnInput["trigger"]): Promise<Execution> => {
+  const execute = async (
+    record: AttemptRecord,
+    userMessage: string,
+    controller: AbortController,
+    trigger: TurnInput["trigger"],
+    options: { readonly maxSteps?: number; readonly reportOnly?: string } = {},
+  ): Promise<Execution> => {
     const events = pendingStores.get(record.attemptId);
     if (events === undefined) throw harnessError("internal", `attempt ${record.attemptId} has no session`);
     const timer = setTimeout(
@@ -641,8 +665,9 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         packet: record.packet,
         userMessage,
         trigger,
-        maxSteps: record.packet.limits.max_steps,
+        maxSteps: options.maxSteps ?? record.packet.limits.max_steps,
         sources: readerFor(record.workspace, platform),
+        ...(options.reportOnly === undefined ? {} : { reportOnly: options.reportOnly }),
       };
       outcome = await deps.createDriver(events).runTurn(input, controller.signal);
     } catch (caught) {
@@ -659,6 +684,47 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     record.outcome = outcome;
     record.failure = classifyAttemptFailure(outcome, error, recorded);
     return { outcome, error, log };
+  };
+
+  const reportsIn = (log: AttemptLog, tool: ReportToolName): number =>
+    log.reports.filter((report) => report.name === tool && log.toolCalls.get(report.toolCallId)?.state === "succeeded").length;
+
+  /** Steps the run budget still admits (undefined: no step limit). */
+  const runStepsLeft = (): number | undefined => {
+    const max = deps.budget?.limits().maxSteps;
+    return max === undefined || deps.budget === undefined ? undefined : Math.max(0, max - deps.budget.usage().steps);
+  };
+
+  /**
+   * One worker or reviewer turn that always ends with a chance to report (live run 01M37V2J: both
+   * reviewers hit the step budget mid-review and left no report, so the task failed "no valid
+   * review"). The turn runs until `finishWarning` steps before the attempt's limit (or what the run
+   * budget still admits); if it stops there without a report, the harness tells the model to finish
+   * now with the remaining steps; if the limit is then hit without a report, one forced report-only
+   * turn follows (only the report tool is offered, and the run's step budget graces that request).
+   */
+  const executeBounded = async (record: AttemptRecord, userMessage: string, controller: AbortController, trigger: TurnInput["trigger"], tool: ReportToolName): Promise<Execution> => {
+    const limit = record.packet.limits.max_steps;
+    const warn = Math.max(0, Math.min(deps.run.finishWarning ?? DEFAULT_FINISH_WARNING, limit - 1));
+    const before = reportsIn(await currentLog(record), tool);
+    const reported = (execution: Execution): boolean => reportsIn(execution.log, tool) > before;
+    const stopped = (execution: Execution): boolean => execution.error !== undefined || controller.signal.aborted || execution.outcome === undefined;
+    const available = Math.min(limit, runStepsLeft() ?? limit);
+    let execution: Execution;
+    if (available > warn) {
+      execution = await execute(record, userMessage, controller, trigger, { maxSteps: available - warn });
+      if (warn > 0 && execution.outcome?.outcome === "max_steps" && !reported(execution) && !stopped(execution)) {
+        const left = Math.min(warn, runStepsLeft() ?? warn);
+        if (left > 0) execution = await execute(record, renderFinishNowMessage(tool, left), controller, "follow-up", { maxSteps: left });
+      }
+    } else {
+      execution = await execute(record, `${userMessage}\n\n${renderFinishNowMessage(tool, Math.max(1, available))}`, controller, trigger, { maxSteps: Math.max(1, available) });
+    }
+    const exhausted = execution.outcome?.outcome === "max_steps" || execution.outcome?.outcome === "budget_exceeded";
+    if (exhausted && !reported(execution) && !stopped(execution)) {
+      execution = await execute(record, renderReportOnlyMessage(tool), controller, "follow-up", { maxSteps: 1, reportOnly: tool });
+    }
+    return execution;
   };
 
   const closeAttempt = async (record: AttemptRecord): Promise<void> => {
@@ -934,7 +1000,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
 
   const complete = async (record: AttemptRecord, controller: AbortController): Promise<CompletionPacket> => {
     unregister.set(record.attemptId, deps.reports?.register(record.attemptId, taskReportCheck(record)) ?? (() => undefined));
-    let execution = await execute(record, renderWorkerMessage(record.packet, record.notes), controller, "dispatch");
+    let execution = await executeBounded(record, renderWorkerMessage(record.packet, record.notes), controller, "dispatch", REPORT_TOOL_NAMES.task);
     let completion: CompletionPacket;
     let cancelledReason: string | undefined;
     let rounds = 0;
@@ -961,6 +1027,12 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       if (completion.status !== "completed" || stale !== undefined || cancelledReason !== undefined) break;
       const check = await verifyCompletion(record.packet, completion, indexFor(record, changeSet, record.workspace.root, execution.log), platform);
       if (check.decision !== "revise") break;
+      // Plan-caused verification problems (a refused / unrunnable / missing command) are the
+      // orchestrator's to decide (triage): the worker cannot change its plan, so they never cost a
+      // repair round. Only what the worker can fix is sent back.
+      const planProblems = new Set(check.planProblems ?? []);
+      const workerProblems = check.problems.filter((problem) => !planProblems.has(problem));
+      if (workerProblems.length === 0) break;
       const used = repairsUsed.get(record.taskId) ?? 0;
       if (used >= budgets.evidence_repairs) break;
       const kind: RepairKind = (check.failedVerification ?? []).length > 0 ? "verification-repair" : "evidence-repair";
@@ -968,13 +1040,13 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       rounds += 1;
       if (kind === "verification-repair") record.repairs.verification_repairs += 1;
       else record.repairs.evidence_repairs += 1;
-      const problems = check.problems.slice(0, 50).map((problem) => problem.slice(0, 2000));
+      const problems = workerProblems.slice(0, 50).map((problem) => problem.slice(0, 2000));
       await recorder.record(
         "attempt/repair_requested",
         { attempt_id: record.attemptId, task_id: record.taskId, kind, round: Math.min(rounds, budgets.evidence_repairs), budget: budgets.evidence_repairs, problems },
         { taskId: record.taskId, attemptId: record.attemptId, actor: { kind: "system" } },
       );
-      execution = await execute(record, renderRepairMessage(kind, problems, execution.log, record.harness), controller, "follow-up");
+      execution = await executeBounded(record, renderRepairMessage(kind, problems, execution.log, record.harness), controller, "follow-up", REPORT_TOOL_NAMES.task);
     }
     record.completion = completion;
     await closeAttempt(record);
@@ -1083,7 +1155,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       const { record, controller } = await prepare(packet, signal, options, target.workspace.root);
       const run = async (): Promise<ReviewOutcome> => {
         unregister.set(record.attemptId, deps.reports?.register(record.attemptId, reviewReportCheck(record, target, pinned, completion)) ?? (() => undefined));
-        const execution = await execute(record, renderReviewBrief(target, completion, pinned), controller, "dispatch");
+        const execution = await executeBounded(record, renderReviewBrief(target, completion, pinned), controller, "dispatch", REPORT_TOOL_NAMES.review);
         await closeAttempt(record);
         await finishAttempt(record, execution, controller.signal.aborted);
         const claim = readClaim(reviewerClaimSchema, execution.log, REPORT_TOOL_NAMES.review);

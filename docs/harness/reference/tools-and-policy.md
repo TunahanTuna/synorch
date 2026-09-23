@@ -103,7 +103,8 @@ tool/execution_started → execute (timeout + iptal) → redaksiyon → sınırl
 | `memory_propose` | control | hepsi | Yalnız öneri; davranış `control.memoryPropose` (I6) |
 | `task_report` | control | explorer, implementer, debugger | Girdi `taskReportInputSchema`; callback opsiyonel (`control.taskReport`), yoksa `report recorded` onayı |
 | `review_report` | control | reviewer | Girdi `reviewReportInputSchema`; callback opsiyonel |
-| `plan_propose` | control | orchestrator | Girdi `planProposalSchema`; callback opsiyonel |
+| `plan_propose` | control | orchestrator | Girdi `planProposalSchema`; callback opsiyonel (orchestration: şema, rol yetenekleri ve doğrulama ön denemesi, [orkestrasyon §2](./orchestration-and-context.md#2-run-akışı)) |
+| `task_triage` | control | orchestrator | Girdi `task`, `decision`, `waive_criteria?`, `guidance?`, `verification?` (yalnız `retry` + plan kaynaklı doğrulama sorunu: yedek komutlar, ön denemeden geçer); davranış `DelegationPort.triage` ([orkestrasyon §4a](./orchestration-and-context.md#4a-harness-doğrulaması-ve-session-içi-onarım-adr-18-d1d2)) |
 
 **Önkoşul (ADR-18 D3, ADR-19).** Yazan araçların digest'i her zaman `workspaceDigest`'tir (attempt çalışma alanındaki ham baytlar). Sıra: çağrıda verilen digest (`null` = dosya var olmamalı) → defterde bu attempt'in o yol için son okunan/yazılan digest'i → dosya yoksa "var olmamalı" → dosya var ve hiç görülmemişse `invalid_arguments` ("… has not been read in this attempt: read_file it first …"). Uyuşmazlık `stale_precondition`: beklenen ve **güncel** digest ile "Re-read the file with read_file and retry". Yazma defteri güncellediği için aynı dosyada ardışık düzenlemeler yeniden okuma istemez.
 

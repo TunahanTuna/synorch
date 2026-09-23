@@ -33,6 +33,12 @@ export interface ContextBuildInput {
    * absent the builder falls back to its own configured reader (pre-ADR-19 behaviour).
    */
   readonly sources?: WorkspaceDigestReader;
+  /**
+   * A report-only request (the forced last turn of an attempt that hit its step limit without a
+   * report): only this report tool is offered, and the budget gate may grace the one request when
+   * only the step budget is exhausted (`RequestBudgetGate.admit(..., { grace: true })`).
+   */
+  readonly reportOnly?: string;
 }
 
 export interface ContextBlockReport {
@@ -84,6 +90,11 @@ export interface TurnInput {
   readonly maxSteps: number;
   /** Passed through to `ContextBuildInput.sources` (ADR-19); set by the worker manager per attempt. */
   readonly sources?: WorkspaceDigestReader;
+  /**
+   * Report-only turn: passed to `ContextBuildInput.reportOnly`; the driver refuses (without running)
+   * any call to another tool. Set by the worker manager for the forced report turn only.
+   */
+  readonly reportOnly?: string;
 }
 
 export interface TurnOutcome {

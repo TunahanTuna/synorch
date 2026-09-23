@@ -43,6 +43,10 @@ export type BudgetAdmission =
   | { readonly ok: true }
   | { readonly ok: false; readonly metric: BudgetMetric; readonly limit: number; readonly used: number };
 
+export interface AdmitOptions {
+  readonly grace?: boolean;
+}
+
 export interface UsageObservation {
   readonly sessionId: SessionId;
   readonly seq: number;
@@ -63,8 +67,13 @@ export interface BudgetTracker {
   /** Folds provider-reported usage in; observations are de-duplicated by session and seq. */
   observe(observations: readonly UsageObservation[]): void;
   recordToolCalls(count: number): void;
-  /** Called right before a model request; a successful admission counts one step. */
-  admit(): BudgetAdmission;
+  /**
+   * Called right before a model request; a successful admission counts one step. With `grace` (the
+   * one forced report-only turn of an attempt, bounded by the worker manager) a request is still
+   * admitted when `steps` is the only exhausted metric, so an attempt can always hand in its report;
+   * a graced request is not counted as a step and cost and wall time are never graced.
+   */
+  admit(options?: AdmitOptions): BudgetAdmission;
   /** Non-consuming check used before dispatching new work. */
   exhausted(): BudgetAdmission;
   /** Re-evaluates wall time and the 120% rule; fires cancel listeners at most once. */
@@ -136,6 +145,13 @@ export function createBudgetTracker(options: BudgetTrackerOptions): BudgetTracke
     return { ok: true };
   };
 
+  /** Every metric but `steps` is still below its limit. */
+  const graceable = (): boolean =>
+    BUDGET_METRICS.every((metric) => {
+      const limit = limitOf(limits, metric);
+      return metric === "steps" || limit === undefined || usedOf(metric) < limit;
+    });
+
   const check = (): void => {
     for (const metric of BUDGET_METRICS) {
       const limit = limitOf(limits, metric);
@@ -171,12 +187,13 @@ export function createBudgetTracker(options: BudgetTrackerOptions): BudgetTracke
       toolCalls += count;
       check();
     },
-    admit() {
+    admit(admission) {
       check();
       const verdict = exhausted();
       if (!verdict.ok) {
         report({ scope: options.scope, metric: verdict.metric, limit: verdict.limit, used: verdict.used, action: "stop-new-requests" });
-        return verdict;
+        if (admission?.grace !== true || !graceable()) return verdict;
+        return { ok: true };
       }
       steps += 1;
       return verdict;
@@ -274,7 +291,7 @@ export function budgetError(admission: Extract<BudgetAdmission, { ok: false }>):
 export interface BudgetGateSlot {
   set(tracker: BudgetTracker | undefined): void;
   current(): BudgetTracker | undefined;
-  admit(observations: readonly UsageObservation[]): BudgetAdmission;
+  admit(observations: readonly UsageObservation[], options?: AdmitOptions): BudgetAdmission;
 }
 
 export function createBudgetGateSlot(): BudgetGateSlot {
@@ -284,10 +301,10 @@ export function createBudgetGateSlot(): BudgetGateSlot {
       tracker = next;
     },
     current: () => tracker,
-    admit(observations) {
+    admit(observations, options) {
       if (tracker === undefined) return { ok: true };
       tracker.observe(observations);
-      return tracker.admit();
+      return tracker.admit(options);
     },
   };
 }

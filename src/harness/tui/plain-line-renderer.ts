@@ -26,6 +26,8 @@ import { sanitizeInline, sanitizeTerminalText } from "./sanitize.ts";
 import { createStyler, type Styler } from "./style.ts";
 import { installTerminalGuard, type GuardProcess, type GuardSignal, type TerminalGuard } from "./terminal-lifecycle.ts";
 import { TOOL_STATUS_LABEL, ToolCardTracker, type ToolCard, type ToolCardStatus } from "./tool-cards.ts";
+import type { HarnessView, OrchestrationView, ViewHost } from "../contracts/views.ts";
+import { PlainViews } from "./views/index.ts";
 
 /**
  * Append-only renderer for pipes, CI, `TERM=dumb`, `--plain` and screen readers (ADR-04). It never
@@ -70,7 +72,7 @@ const INTERRUPTION_EVENT = Symbol("interruption");
 
 type Interruption = { readonly kind: "interrupt" | "exit" };
 
-export class PlainLineRenderer implements TerminalRenderer {
+export class PlainLineRenderer implements TerminalRenderer, ViewHost {
   public readonly kind = "plain" as const;
   public readonly input: UserInputSource | undefined;
   public readonly approvals: ApprovalBroker;
@@ -96,6 +98,7 @@ export class PlainLineRenderer implements TerminalRenderer {
   /** Conversation view: characters of each streamed assistant item already written. */
   private readonly written = new Map<string, number>();
   private readonly toolsShown = new Set<string>();
+  private views: PlainViews | undefined;
 
   public constructor(options: PlainLineRendererOptions) {
     this.options = options;
@@ -121,6 +124,24 @@ export class PlainLineRenderer implements TerminalRenderer {
       this.auth = new HeadlessAuthInteraction((text) => this.writeErr(text));
     }
     this.input = lines === undefined ? undefined : { next: (signal) => this.nextInput(lines, signal) };
+  }
+
+  /** K1-U3 views as append-only text (TUI experience §12). */
+  private plainViews(): PlainViews {
+    this.views ??= new PlainViews({ glyphs: this.options.glyphs ?? GLYPH_SETS.ascii, color: this.style });
+    return this.views;
+  }
+
+  public showView(view: HarnessView): void {
+    if (!this.stopped) for (const line of this.plainViews().view(view)) this.writeLine(line);
+  }
+
+  public showGraph(view: OrchestrationView): void {
+    if (!this.stopped) for (const line of this.plainViews().graph(view)) this.writeLine(line);
+  }
+
+  public setBoard(view: OrchestrationView | undefined): void {
+    if (!this.stopped) for (const line of this.plainViews().board(view)) this.writeLine(line);
   }
 
   public async start(header: SessionHeaderView): Promise<void> {

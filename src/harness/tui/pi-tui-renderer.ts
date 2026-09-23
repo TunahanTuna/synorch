@@ -64,6 +64,8 @@ import {
   type TerminalGuard,
 } from "./terminal-lifecycle.ts";
 import { TOOL_STATUS_LABEL, ToolCardTracker, type ToolCard } from "./tool-cards.ts";
+import type { HarnessView, OrchestrationView, ViewHost } from "../contracts/views.ts";
+import { LiveBoardComponent, StaticViewComponent, type ViewStyleOptions } from "./views/index.ts";
 
 /**
  * The interactive renderer (ADR-04): the only file that imports `@earendil-works/pi-tui`. It keeps
@@ -406,7 +408,7 @@ interface StreamState {
   readonly parts: Map<number, { readonly view: Markdown; raw: string }>;
 }
 
-export class PiTuiRenderer implements TerminalRenderer {
+export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   public readonly kind = "tui" as const;
   public readonly input: UserInputSource;
   public readonly approvals: ApprovalBroker;
@@ -442,6 +444,9 @@ export class PiTuiRenderer implements TerminalRenderer {
   private expanded = false;
   private spinner: ReturnType<typeof setInterval> | undefined;
   private footerLabel: { folder: string; branch: string | undefined; mode: string } = { folder: "", branch: undefined, mode: "" };
+  /** K1-U3 views: the live orchestration board sits between the transcript and the activity line. */
+  private readonly boardSlot = new Container();
+  private board: LiveBoardComponent | undefined;
 
   public constructor(options: PiTuiRendererOptions) {
     this.options = options;
@@ -539,6 +544,7 @@ export class PiTuiRenderer implements TerminalRenderer {
       this.header.setText(lines.join("\n"));
       this.tui.addChild(this.header);
       this.tui.addChild(this.transcript);
+      this.tui.addChild(this.boardSlot);
       this.tui.addChild(this.status);
       this.tui.addChild(this.editor);
     }
@@ -576,6 +582,7 @@ export class PiTuiRenderer implements TerminalRenderer {
     this.header.setText([this.style.cyan(title), ...(warning === undefined ? [] : [this.style.yellow(warning)])].join("\n"));
     this.tui.addChild(this.header);
     this.tui.addChild(this.transcript);
+    this.tui.addChild(this.boardSlot);
     this.tui.addChild(new ActivityLineView(presenter, this.style, () => this.now()));
     this.tui.addChild(new Text("", 0, 0));
     this.tui.addChild(this.editor);
@@ -615,8 +622,48 @@ export class PiTuiRenderer implements TerminalRenderer {
     }
   }
 
+  private viewStyle(): ViewStyleOptions {
+    return { glyphs: this.presenter?.glyphs ?? this.options.glyphs ?? GLYPH_SETS.rich, color: this.style, now: () => this.now() };
+  }
+
+  /** Pins a card (usage, evidence, action, why, or a board summary) once to the transcript. */
+  public showView(view: HarnessView): void {
+    if (this.stopped) return;
+    this.transcript.addChild(new StaticViewComponent(view, this.viewStyle()));
+    this.tui.requestRender();
+  }
+
+  /** `/graph`: pins the plan graph to the transcript. */
+  public showGraph(view: OrchestrationView): void {
+    if (this.stopped) return;
+    this.transcript.addChild(new StaticViewComponent({ kind: "graph", view }, this.viewStyle()));
+    this.tui.requestRender();
+  }
+
+  /** Keeps one live board in place; a `done` board collapses to its summary, pinned once. */
+  public setBoard(view: OrchestrationView | undefined): void {
+    if (this.stopped) return;
+    if (view === undefined || view.done) {
+      this.boardSlot.clear();
+      this.board = undefined;
+      if (view !== undefined) this.transcript.addChild(new StaticViewComponent(view, this.viewStyle()));
+    } else if (this.board === undefined) {
+      this.board = new LiveBoardComponent(view, this.viewStyle());
+      this.boardSlot.addChild(this.board);
+    } else {
+      this.board.setView(view);
+    }
+    this.updateSpinner();
+    this.tui.requestRender();
+  }
+
+  /** Mode of the live board (`g` / Ctrl+G toggles board and graph); undefined without a board. */
+  public get boardMode(): "board" | "graph" | undefined {
+    return this.board?.mode;
+  }
+
   private updateSpinner(): void {
-    const active = this.presenter?.activity() !== undefined;
+    const active = this.presenter?.activity() !== undefined || this.board !== undefined;
     if (active && this.spinner === undefined && this.started && !this.stopped) {
       const interval = this.presenter?.glyphs.spinnerMs ?? 80;
       this.spinner = setInterval(() => this.tui.requestRender(), interval);
@@ -685,6 +732,11 @@ export class PiTuiRenderer implements TerminalRenderer {
     }
     if (matchesKey(data, "ctrl+o") && this.dialog === undefined && this.presenter !== undefined) {
       this.expanded = !this.expanded;
+      this.tui.requestRender(true);
+      return { consume: true };
+    }
+    if (this.board !== undefined && this.dialog === undefined && (matchesKey(data, "ctrl+g") || (data === "g" && this.editor.getText().length === 0))) {
+      this.board.toggleMode();
       this.tui.requestRender(true);
       return { consume: true };
     }

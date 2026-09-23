@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed — ürün sahibinin dikey dilim onayıyla `Accepted` olur ([ürün gereksinimleri §9](../foundation/product-requirements.md#9-ilk-dikey-dilim-onay-kapısı)). Kısmen değiştirir: ADR-02 (tetikleyici modeli), ADR-08 (doğrudan yazan rol, orkestrasyon başlatma onayı), ADR-09 (doğrudan düzenlemeler zorunlu review'dan geçmez), ADR-15 (`syn run` eşlemesi). ADR-07, ADR-18, ADR-19 ve orkestrasyon içindeki ADR-09 aynen geçerlidir. Ekran tarafı: [TUI deneyimi](../design/tui-experience.md) (R0 bu ADR'dir).
+Accepted — 2026-09-23: ürün sahibi K0 dikey dilimini gerçek terminalde denedi ve onayladı ("Her şey çok güzel çalışıyor gibi duruyor"; merge `2c51679`). Önceki statü: Proposed, ürün sahibinin dikey dilim onayıyla `Accepted` olur ([ürün gereksinimleri §9](../foundation/product-requirements.md#9-ilk-dikey-dilim-onay-kapısı)). Kısmen değiştirir: ADR-02 (tetikleyici modeli), ADR-08 (doğrudan yazan rol, orkestrasyon başlatma onayı), ADR-09 (doğrudan düzenlemeler zorunlu review'dan geçmez), ADR-15 (`syn run` eşlemesi). ADR-07, ADR-18, ADR-19 ve orkestrasyon içindeki ADR-09 aynen geçerlidir. Ekran tarafı: [TUI deneyimi](../design/tui-experience.md) (R0 bu ADR'dir).
 
 ## Date
 

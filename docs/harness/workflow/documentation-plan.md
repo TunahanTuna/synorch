@@ -98,3 +98,17 @@ Belgenin başında **durum** (`research`, `proposal`, `accepted`, `implemented`,
 ## 6. Planın bitmiş sayılması
 
 “Bütün belgeler yazıldı” tek kapı değildir. D0–D3 tamamlandığında ilk runtime dilimini güvenle geliştirmek için yeterli normatif temel vardır. D4 ve D5 kodla birlikte canlı tutulur. Her P0 gereksinimi bir ADR veya açık varsayım, bir sözleşme maddesi, bir doğrulama senaryosu ve sorumlu modülle izlenebilir olmalıdır. Bu bağlantı yoksa ilgili iş uygulamaya hazır değildir.
+
+## 7. Konuşma öncelikli pivot (revizyon notu, 2026-09-23)
+
+Revizyon: ürün sahibinin konuşma öncelikli ürün tanımıyla D0 geriye dönük tamamlandı. Önceki bölümler değiştirilmedi; §3'teki "planlanan `foundation/product-requirements.md`" artık vardır (durum `proposal`, ürün sahibi onayı bekleniyor).
+
+| Aşama | Belge | Kapı |
+| --- | --- | --- |
+| D0 — kapsam | [product-requirements.md](../foundation/product-requirements.md) (persona, yolculuklar, gecikme, HREQ-023…040, ayrıştırıcılar), [izlenebilirlik](../foundation/requirements-traceability.md) satırları | Ürün sahibi ilk dikey dilimi ve sınırları onaylar |
+| D1 — karar | [ADR-21](../decisions/ADR-21-conversation-first-runtime.md) (ADR-08/09 deltası, tur/run kimliği, doğrudan mod yetki matrisi) | ADR-21 `Accepted` (K0 onayıyla) |
+| D2 — sözleşme | [conversation-runtime §3](../design/conversation-runtime.md#3-sözleşme-değişiklikleri-tek-commit-k0dan-önce): tek sözleşme commit'i | `pnpm check` yeşil, eski olaylar okunur |
+| Dikey dilim | [uygulama planı §8.2 K0](../implementation-plan.md#82-k0--dikey-dilim-ürün-sahibi-deneyecek) | Ürün sahibi gerçek terminalde dener (UX kapısı, [yönetişim §11](./governance.md#11-ux-kapısı)) |
+| Dalgalar | Uygulama planı §8.3–8.5 (K1…K4) | Dalga sonu UX kapısı; K2 sonunda tek review |
+
+Ekran tasarımı ayrı iş akışındadır: [TUI deneyimi](../design/tui-experience.md), [UX araştırması](../research/ux/README.md). Ürün sahibinin tasarım bağlamı: [harness-context.yaml](../harness-context.yaml).

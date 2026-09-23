@@ -4,6 +4,16 @@
 
 Bu dizin, Synorch'un gelecekte kendi CLI agent harness'ını geliştirmek için başvuru kaynağıdır. `harness` bu girişimin ana entegrasyon dalıdır; geliştirme işlerinin tabanı ve hedefi burasıdır. `main`e taşıma ayrı karardır. [Bugünkü Synorch mimarisi](../AI-ORCHESTRATION-ARCHITECTURE.md) ve [önceki çok sağlayıcılı harness vizyonu](../FUTURE-MULTI-PROVIDER-HARNESS.md) geçerliliğini korur. Bu belgeler onların yerine geçmez; kaynak araştırmasını, somut runtime sınırlarını ve doğrulama ölçütlerini ekler.
 
+## Agent için YAML tasarım bağlamı
+
+- [Çekirdek harness context](./harness-context.yaml): olmazsa olmaz çalışma zamanı, güvenlik, bağlam, doğrulama ve teslim sırası; her maddenin statüsü ve kabul ölçütü.
+- [UX context](./harness-ux-context.yaml): konuşma öncelikli yolculuklar, ayrıştırıcı özellikler, ölçümler ve senaryo seti.
+- [Araştırma ve kanıt dizini](./harness-research-evidence.yaml): OpenAI, Anthropic, OpenHands, LangGraph, Aider, VS Code ve MCP resmi kaynakları; gözlem ile Synorch çıkarımı ayrı.
+
+Bu dosyalar **uygulama konfigürasyonu değil tasarım girdisidir**. Kabul edilmiş ADR ve sözleşmelerle yeni önerilerin statüsü ayrı tutulur. Konuşma öncelikli [ürün gereksinimleri](./foundation/product-requirements.md) ile [ADR-21](./decisions/ADR-21-conversation-first-runtime.md) henüz öneri aşamasındadır; aralarındaki güven zamanlaması ve arka plan orkestrasyonu farkları YAML'da açık karar olarak kaydedilmiştir.
+
+> Ek (2026-09-23): ürün konuşma öncelikli bir kodlama ajanına dönüyor. Önce [harness-context.yaml](./harness-context.yaml), [ürün gereksinimleri](./foundation/product-requirements.md), [ADR-21](./decisions/ADR-21-conversation-first-runtime.md), [konuşma runtime tasarımı](./design/conversation-runtime.md), [TUI deneyimi](./design/tui-experience.md) ve [uygulama planı §8](./implementation-plan.md#8-konuşma-öncelikli-çekirdek-dalgası) okunur.
+
 ## Okuma sırası
 
 1. [Mevcut durum ve kapsam](./foundation/current-state.md)

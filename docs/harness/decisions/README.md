@@ -26,6 +26,7 @@ Her ADR, [ADR şablonundaki](../delivery/decisions.md#adr-şablonu) bölümleri 
 | ADR-18 | Harness'in hesapladığı kanıt, toleranslı çözümleme, model dostu düzenleme araçları (ADR-09'u kısmen değiştirir) | Accepted | 2026-09-23 | [ADR-18](./ADR-18-harness-computed-evidence.md) | [task-packets](../contracts/task-packets.md), [tools](../contracts/tools.md), [events-and-storage](../contracts/events-and-storage.md), [runtime-seams](../contracts/runtime-seams.md) | HREQ-003, HREQ-004 |
 | ADR-19 | Çalışma alanı sadakati — tek digest şeması, izolasyon, integrate (ADR-07'yi kısmen değiştirir) | Accepted | 2026-09-23 | [ADR-19](./ADR-19-workspace-fidelity.md) | [events-and-storage](../contracts/events-and-storage.md), [runtime-seams](../contracts/runtime-seams.md), [task-packets](../contracts/task-packets.md) | HREQ-015 |
 | ADR-20 | Bağlam verimliliği — terminal araçta tur sonu, prompt cache, rol başına kapsam | Accepted | 2026-09-23 | [ADR-20](./ADR-20-context-efficiency.md) | [model-adapter](../contracts/model-adapter.md), [tools](../contracts/tools.md) | HREQ-006, HREQ-016 |
+| ADR-21 | Konuşma öncelikli runtime — ana ajan (`session` rolü), kabiliyet olarak orkestrasyon (ADR-02/08/09/15'i kısmen değiştirir) | Proposed | 2026-09-23 | [ADR-21](./ADR-21-conversation-first-runtime.md) | [policy-and-approval](../contracts/policy-and-approval.md), [runtime-seams](../contracts/runtime-seams.md), [cli-and-jsonl](../contracts/cli-and-jsonl.md) | HREQ-023…HREQ-040 |
 
 ## Açık alt kararlar
 

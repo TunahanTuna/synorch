@@ -347,3 +347,67 @@ Dalga W2:                             gerçekçilik testleri (D6)
 - F14 (rapor girdisinde gevşek ön işleme) ve F15 (JSON bloğu geri dönüşünü sağlamlaştırma): rapor araçları artık birincil kanal ve düzeltme turu var; ihtiyaç ölçülürse sonraki dalga.
 - B12 ve hafıza `source_digest`: hafıza `digestText` kullanmaya devam eder (ADR-19'da belgelendi).
 - Triyaj için sıkıştırılmış yeni session (Denetim A §4 madde 8).
+
+## 8. Konuşma öncelikli çekirdek dalgası
+
+> Durum: `proposal`, 2026-09-23; ürün sahibinin K0 onayıyla `accepted`. Kararlar: [ADR-21](./decisions/ADR-21-conversation-first-runtime.md). Gereksinimler: [product-requirements.md](./foundation/product-requirements.md) (HREQ-023…040). Bileşenler: [conversation-runtime.md](./design/conversation-runtime.md). Ekran: [TUI deneyimi](./design/tui-experience.md). Bağlam: [harness-context.yaml](./harness-context.yaml) `delivery_order`.
+
+### 8.1 Çalışma kuralları (önce inşa et)
+
+Ürün sahibi kararı: kişisel proje; öncelik kullanılabilir ürünü hızla ele vermek, hatalar kullanımla düzeltilir.
+
+- Kapı yalnız: `pnpm check` 0 hata (typecheck/build + mevcut paket), legacy snapshot değişmez, birkaç kritik güvenlik rail testi. Özellik başına test matrisi, replay paketi ve dalga başına bağımsız review **yok**; tek review K2 sonunda (büyük kilometre taşı: güvenlik + ürün).
+- §1 kuralları geçerli (sözleşmeler entegrasyon sahibinde, `owned_paths` ayrık, modüller yalnız `contracts` import eder), tek istisna: K0 tek bir dikey iş akışıdır ve listelenen dosyalara birlikte yazar.
+- Her dalga sonunda UX kapısı ([yönetişim §11](./workflow/governance.md#11-ux-kapısı)): tasarıma uyum + ürün sahibinin denemesi.
+- Mevcut orkestrasyon yolu bozulmaz: `syn run --orchestrate` kalıcı, `syn agent --legacy` K0 onayına kadar.
+
+### 8.2 K0 — Dikey dilim (ürün sahibi deneyecek)
+
+Hedef: ilk dalgada ürün sahibi gerçek terminalde `syn agent` ile sohbet eder. Önce entegrasyon sahibi ADR-21 sözleşme commit'ini yapar ([conversation-runtime §3](./design/conversation-runtime.md#3-sözleşme-değişiklikleri-tek-commit-k0dan-önce); en az: `session` rolü, `agent` aktörü, opsiyonel `runId`, `session` yazma kapsamı), sonra tek iş akışı:
+
+| | |
+| --- | --- |
+| **owned_paths** | `src/harness/cli/{conversation,session,runtime,args,slash-commands,trust}.ts`, `src/harness/policy/engine.ts`, `src/harness/policy/exec-allowlist.ts` (yalnız `session` git kuralı), `src/harness/tools/builtin/{read-tools,write-tools,process-tools}.ts` (yalnız `visible_to`), `src/harness/context/{instructions,model-view,history}.ts` (yalnız `session` rolü), `src/harness/tui/**` (yalnız ana konuşma görünümü için gereken asgari değişiklik), `tests/harness-e2e-conversation.test.ts` (yeni), `tests/harness-security-session.test.ts` (yeni), mevcut e2e testlerine `--orchestrate`/`--legacy` eklemek |
+| **Kapsam dışı** | plan modu, `orchestrate`, checkpoint/`/undo`, compaction değişikliği, hafıza değişikliği, pano |
+
+Kapsam: `syn agent` mesajı ana ajan turu açar (mevcut `AgentDriver`); `session` rolü policy tavanı ve yazma kapsamı; okuma/düzenleme/exec araçları `session`'a açık; `harness:session` talimatı (kısa: kim, doğrudan mod, kullanıcının dilinde cevap); güven sorusu yalnız depo kodu çalıştıran ilk exec'te (UX-GATE-01); tembel kurulum (kanonik yükleme, sandbox probu, credential ön-çözümü arka planda); Esc iptali ve Enter ile steer (mevcut driver); resume (`--resume`) konuşma oturumunu açar; `--legacy`/`--orchestrate` eski yolu korur; renderer ana cevabı stream eder ve araç satırlarını tek satır gösterir ([TUI §8.2–8.4](./design/tui-experience.md#82-selam-ve-hızlı-soru-cevap)).
+
+Kabul ölçütleri:
+- K0-1 Ürün sahibi, [ürün gereksinimleri §9](./foundation/product-requirements.md#9-ilk-dikey-dilim-onay-kapısı) adımlarını gerçek terminalde (Windows Terminal) tamamlar ve onaylar. **K1+ bu onaydan sonra başlar.**
+- K0-2 Scripted adapter e2e: "selam" turu tek model isteği yapar ve hiç `plan/*`/`task/*`/`attempt/*` olayı yazmaz; okuma → `apply_patch` → `exec` akışı geçer.
+- K0-3 Kritik rail'ler: `session` `.git/**`, `.synorch/**` ve rol manifestine yazamaz; `git commit` reddedilir.
+- K0-4 `pnpm check` yeşil; mevcut e2e'ler `--orchestrate`/`--legacy` ile aynen geçer; legacy snapshot değişmez.
+- K0-5 Harness payı ölçülür ve raporlanır (L3; hedefin altında kalması K1'de kapatılabilir, K0'ı bloklamaz).
+
+### 8.3 K1 — Konuşma çekirdeği (paralel)
+
+| İş akışı | owned_paths | Teslim |
+| --- | --- | --- |
+| K1a bağlam | `src/harness/context/**`, `src/harness/core/driver.ts` | Artımlı projeksiyon (L6), tur başına hafıza çağırma, boşta compaction + `/compact [odak]`, `timing.first_token_ms` |
+| K1b araç + policy | `src/harness/tools/**`, `src/harness/policy/**` | Checkpoint ön görüntüsü + `checkpoint/*` olayları, plan modu katmanı, `/why` için `explainPermission` çıkışı |
+| K1c cli | `src/harness/cli/**` | `/undo`, `/why`, `/plan` (plan modu, `plan_propose` bloğu), eski `/plan` → `/tasks`, `--continue`, `syn run` konuşma eşlemesi + JSONL `turn` frame'i, `result.reviewed` |
+| K1d tui | `src/harness/tui/**` | [TUI deneyimi](./design/tui-experience.md) ana konuşma görünümü, aktivite satırı ve alt bilgi (R2), plan modu göstergesi, `Shift+Tab` |
+
+Kabul: `pnpm check` yeşil; plan modunda yazma/exec reddi testi; `/undo` tek bir mutlu yol testi; ana konuşma görünümü snapshot'ları (TUI §15 madde 1–3); ürün sahibi denemesi.
+
+### 8.4 K2 — Kabiliyet olarak orkestrasyon (paralel)
+
+| İş akışı | owned_paths | Teslim |
+| --- | --- | --- |
+| K2a orkestrasyon | `src/harness/orchestration/**` | `RunRequest.log/plan/approval/brief/turnId` (paylaşılan günlük, planner atlama), `RunOutcome.finalMessage` (R5), stream atfı ve worker etkinlik özeti (R1/R4) |
+| K2b cli | `src/harness/cli/**`, `src/harness/tools/builtin/control-tools.ts` | `orchestrate` aracı ve callback'i, plan bloğundan *Workers ile çalıştır*, otonom/ask başlatma kuralı, çalışırken Enter → `coordinator.steer`, Esc/Esc durdurma, `/workers`, sohbette `/evidence` (X2) |
+| K2c tui | `src/harness/tui/**` | Canlı pano ve sonuç bloğu ([TUI §8.6](./design/tui-experience.md#86-konuşmaya-gömülü-orkestrasyon)), kota %/$ (X7) |
+| K2d sağlayıcı | `src/harness/providers/claude-code/**` | Oturum boyu açık `stream-json` köprü süreci |
+
+Kabul: kritik test "gösterilmemiş planla worker başlamaz" (otonom ve ask); orkestrasyon e2e'si (mevcut standart senaryo `orchestrate` üzerinden); `pnpm check` yeşil; **K2 sonunda tek bağımsız review** (güvenlik: `session` yetkisi; ürün: J1–J5) ve ürün sahibi denemesi.
+
+### 8.5 K3 ve sonrası
+
+- K3: dirty base overlay (`isolation.ts`, ADR-21 D6), `/review` doğrudan diff için (X3), onaylanırsa insan onaylı `/commit`, `/why` cilası (X6).
+- K4: karar masası (X4), `/rewind` ve oturum içi `/fork` (X5), kullanım ölçümüyle orkestrasyon eşiği ayarı.
+
+### 8.6 Sıra
+
+```text
+ADR-21 sözleşme commit'i ─► K0 dikey dilim ─► [ürün sahibi onayı] ─► K1a K1b K1c K1d ─► K2a K2b K2c K2d ─► [tek review + onay] ─► K3 ─► K4
+```

@@ -32,3 +32,30 @@ Kaynak: ürün sahibi kararları (2026-09-22), [vizyon](../../FUTURE-MULTI-PROVI
 ## Kapsam dışı (v1)
 
 Daemon, web/desktop UI, remote runner, stdin RPC modu, MCP client, semantik hafıza katmanı, Obsidian eklentisi, üçüncü taraf eklenti yükleme, Codex app-server köprüsünün uygulanması (yalnız seam), ekip/çok kullanıcılı yönetim.
+
+## Konuşma öncelikli pivot (ekleme, 2026-09-23)
+
+Kaynak: [product-requirements.md](./product-requirements.md) (D0), [ADR-21](../decisions/ADR-21-conversation-first-runtime.md) (D1), [harness-context.yaml](../harness-context.yaml) (HCTX/HD kimlikleri). Zincir: D0 → D1 (ADR-21) → D2 (sözleşme commit'i) → K0 dikey dilim → K1…K4 ([uygulama planı §8](../implementation-plan.md#8-konuşma-öncelikli-çekirdek-dalgası)). Test sütunu "önce inşa et" kararına göre yalnız kritik testleri listeler; diğerleri ürün sahibi denemesiyle (UX kapısı) kabul edilir.
+
+| HREQ | Öncelik | Gereksinim (kısa) | ADR | Sözleşme | Planlanan test / kanıt | Dalga | Modül |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| HREQ-023 | P0 | Her mesaj ana ajan turu, anında stream | ADR-21 D1 | `runtime.ts` `TurnInput` | `harness-e2e-conversation` (selam turu), ürün sahibi | K0 | cli, core |
+| HREQ-024 | P0 | Gecikme L1–L4, güven sorusu açılışta | ADR-21 D3, D8 | `events.ts` `timing` | tek zamanlama testi | K0/K1 | cli, context |
+| HREQ-025 | P0 | Ana ajan araçları tek gateway'den | ADR-21 D2, ADR-08 | `tools.ts` | mevcut gateway testleri | K0 | tools, policy |
+| HREQ-026 | P0 | Doğrudan yazma kapsamı, git mutasyonu yok | ADR-21 D3 | `policy.ts` | `harness-security-session` | K0 | policy |
+| HREQ-027 | P0 | Exec sınırlaması + güven | ADR-21 D3, ADR-06 | `policy.ts` | mevcut exec/trust testleri | K0 | policy, tools |
+| HREQ-028 | P0 | Doğrudan değişiklik "review yapılmadı" etiketi, `/review` | ADR-21 uzlaşma tablosu, ADR-09 | `jsonl.ts` `result.reviewed` | ürün sahibi | K1/K3 | cli, tui |
+| HREQ-029 | P1 | Checkpoint + `/undo` | ADR-21 D6 | `events.ts` `checkpoint/*` | tek mutlu yol testi | K1 | tools, cli |
+| HREQ-030 | P1 | Plan modu | ADR-21 D2 | `policy.ts` katman | plan modu ret testi | K1 | policy, cli |
+| HREQ-031 | P0 | Orkestrasyon ana ajan aracı, aynı oturum | ADR-21 D5 | `runtime.ts` `RunRequest` | orkestrasyon e2e | K2 | orchestration, cli |
+| HREQ-032 | P0 | Gösterilmemiş planla worker yok | ADR-21 D4 | `policy.ts` `decided_by` | kritik test (otonom + ask) | K2 | cli, orchestration |
+| HREQ-033 | P0 | Tur ≠ run; JSONL tur frame'leri | ADR-21 D1, D9 | `jsonl.ts` | JSONL frame testi | K1 | cli, tui |
+| HREQ-034 | P0 | Uzun oturum bağlamı | ADR-21 D7, ADR-11, ADR-20 | `runtime.ts` | ürün sahibi (uzun oturum) | K1 | context |
+| HREQ-035 | P0 | Resume/fork/recovery, `--continue` | ADR-21 D1, ADR-03 | `events.ts` | mevcut recovery testleri | K0/K1 | cli, core |
+| HREQ-036 | P1 | Tur başına hafıza | ADR-21 D7, ADR-16/17 | `memory.ts` | ürün sahibi | K1 | context |
+| HREQ-037 | P0 | `syn run` tek tur, `--orchestrate` | ADR-21 D9, ADR-15 | `jsonl.ts` | mevcut e2e'ler `--orchestrate` ile | K0/K1 | cli |
+| HREQ-038 | P0 | Esc/steer semantiği | ADR-21 D8 | `runtime.ts` `AgentDriver.steer` | mevcut driver iptal testleri | K0 | core, cli |
+| HREQ-039 | P0 | UX kapısı | ADR-21 | — | ana konuşma snapshot'ları + ürün sahibi | her dalga | tui |
+| HREQ-040 | P1 | Ayrıştırıcılar | ADR-21 | — | ürün sahibi | K1–K4 | çeşitli |
+
+HREQ-002 notu: orchestrator'ın ürün dosyası yazmaması değişmez; doğrudan yazma ADR-21 ile eklenen `session` rolüne aittir.

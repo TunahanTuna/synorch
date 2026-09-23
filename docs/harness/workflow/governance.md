@@ -47,3 +47,19 @@ Reviewer şu iddiaları ayrı ayrı değerlendirir: gereksinim karşılandı mı
 ## 9. Süreç iyileştirmesi
 
 Bir kapı tekrar tekrar yanlış alarm üretiyor, gerçek hatayı kaçırıyor veya gereksiz bekleme yaratıyorsa olay kaydı açılır. Yeni süreç kuralı gözlenen problem, alternatif, ölçüm ve güncelleme tarihiyle değiştirilir. Süreç metni büyüdüğü için değil, anlaşılır ve uygulanabilir kaldığı için değer taşır. Özellikle trivial işlerde gereksiz onay ve tekrar keşif maliyeti [doğrulama metrikleriyle](../delivery/verification.md) izlenir.
+
+## 10. Kanonik bağlam ve sahip belgeleri
+
+- `docs/harness/` ürün sahibinin bakımını yaptığı **kanonik bağlamdır**; ürün sahibi onu kendisi ve ChatGPT gibi araçlarla da günceller (ör. [harness-context.yaml](../harness-context.yaml)). Yetki sırası o dosyanın `reading_contract.authority_order`'ıdır: en güncel açık kullanıcı kararı > kabul edilmiş ADR ve `src/harness/contracts/**` > doğrulanmış kod ve test > tasarım bağlamı ve UX önerileri > dış araştırma. §1 bu sırayla birlikte okunur.
+- Her ajan göreve başlarken bu dizini **o anki haliyle yeniden okur**; önceki bir oturumdan hatırlanan içerik güncel sayılmaz.
+- Ürün sahibinin yazdığı belgeler silinmez ve üzerine yazılmaz. Değişiklik eklemelidir (yeni bölüm, yeni satır, yeni ADR) ya da açık bir revizyon notu taşır (tarih, neyin neden değiştiği, kim). Çelişki sessizce çözülmez; ADR veya [açık kararlar](../delivery/decisions.md) kaydına gider.
+- Ajanın kendi yazdığı taslak belgeler (aynı görev içinde) serbestçe düzeltilebilir; kabul edildikten sonra bu kural onlara da uygulanır.
+
+## 11. UX kapısı
+
+Kullanıcıya görünen davranışı değiştiren her dalga ([uygulama planı §8](../implementation-plan.md#8-konuşma-öncelikli-çekirdek-dalgası)) şu hafif kapıdan geçer:
+
+1. **Tasarıma uyum:** ekran çıktısı [TUI deneyimi](../design/tui-experience.md) mockup'larıyla biçimce eşleşir. Yalnız **ana konuşma görünümü** için birkaç sanal terminal snapshot testi tutulur (selam, okuyarak açıklama, doğrudan düzenleme + test; orkestrasyon gelince sonuç bloğu) — TUI §15.
+2. **Ürün sahibi denemesi:** ürün sahibi gerçek terminalde senaryoyu dener ve onaylar. Onay verilmeden bir sonraki dalga başlamaz (K0 için zorunlu).
+
+Tam snapshot matrisi, her ekran için ayrı test veya piksel eşleştirme istenmez. Kapı başarısızsa bulgu bir sonraki dalgaya iş olarak girer; ürün sahibi kullanımı engellemiyorsa dalgayı bloklamaz.

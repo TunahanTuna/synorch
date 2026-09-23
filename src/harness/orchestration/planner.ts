@@ -80,6 +80,13 @@ export interface TriageInput {
    */
   readonly planCaused?: readonly string[];
   readonly verificationOnly?: boolean;
+  /**
+   * A verified writing task whose review_revisions budget is spent (the review still did not
+   * accept, no blocker finding): `accept` integrates the change with the findings as notes.
+   */
+  readonly reviewOverride?: boolean;
+  /** What the review said, when the triage follows a review (per-task or integration). */
+  readonly reviewNote?: string;
   /** The task's owned paths (where a replacement check script must live). */
   readonly ownedPaths?: readonly string[];
   /** The harness-run verification commands and their outcome. */
@@ -126,7 +133,9 @@ export function renderTriagePrompt(input: TriageInput): string {
   const problems = input.problems ?? [];
   const checks = input.harnessChecks ?? [];
   const planCaused = input.planCaused ?? [];
-  const acceptLine = input.acceptable
+  const acceptLine = input.reviewOverride === true
+    ? "- accept: the harness verification passed and the review found no blocker; the change is integrated with the review findings recorded as notes. Choose it only when the remaining findings do not matter for the goal."
+    : input.acceptable
     ? "- accept: the findings are sufficient; list in waive_criteria the criteria this role could not meet (they are handed to dependent tasks as notes); every other criterion must be evidenced."
     : input.verificationOnly === true
       ? "- accept: the change goes to independent review without the commands that could not run (they are waived and noted); choose it when the reviewer can still check the criteria."
@@ -135,6 +144,7 @@ export function renderTriagePrompt(input: TriageInput): string {
     `Worker report needs your decision (plan v${input.planVersion}, goal: ${input.goal}).`,
     `Task ${input.task.key} ${input.task.taskId} (${input.task.role}, ${input.task.risk}, ${input.task.writeMode}), attempt ${input.attempt}, reported ${input.status}${problems.length > 0 ? " but did not pass verification after its in-session repairs" : ""}.`,
     `Summary: ${input.summary}`,
+    input.reviewNote === undefined ? "" : `Review: ${input.reviewNote}`,
     `Acceptance criteria (evidence as the harness resolved it):\n${criteria.join("\n")}`,
     checks.length > 0 ? `Harness-run verification:\n${checks.map((line) => `- ${line}`).join("\n")}` : "",
     problems.length > 0 ? `Verification problems:\n${problems.slice(0, 10).map((line) => `- ${line}`).join("\n")}` : "",
@@ -170,7 +180,8 @@ export const PLAN_FORMAT = [
   `Call the \`${REPORT_TOOL_NAMES.plan}\` tool once with the whole plan; its schema lists every field (if the tool is unavailable, reply with exactly one \`\`\`json block holding the same object).`,
   "Rules: explorers and reviewers own no paths; two tasks without a dependency between them never own overlapping paths;",
   "nobody owns the whole workspace, .git or .synorch. An explorer runs no commands: its verification is empty and its criteria are about what to find by reading;",
-  "put commands on the implementer that owns the change. A reviewer task depends on the standard/high-risk task(s) it reviews. You never implement anything yourself.",
+  "put commands on the implementer that owns the change. A reviewer task depends on the standard/high-risk task(s) it reviews; with several dependencies it is the integration review of their combined result.",
+  "A task's criteria must be checkable from its own files; criteria about other tasks' files or the combined result go on the integration reviewer task. You never implement anything yourself.",
 ].join("\n");
 
 export function renderPlanningPrompt(input: PlannerInput): string {

@@ -1,4 +1,5 @@
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
+import { closestMatch } from "../../domain/suggest.ts";
 import {
   AUTH_METHODS,
   modelTierSchema,
@@ -91,12 +92,72 @@ const SESSION_OPTIONS = {
   profile: { type: "string", multiple: true },
 } as const;
 
+export const HARNESS_COMMAND_OPTIONS = {
+  agent: {
+    ...COMMON_OPTIONS,
+    ...SESSION_OPTIONS,
+    resume: { type: "string" },
+    fork: { type: "string" },
+    continue: { type: "boolean", short: "c", default: false },
+    legacy: { type: "boolean", default: false },
+    debug: { type: "boolean", default: false },
+  },
+  run: {
+    ...COMMON_OPTIONS,
+    ...SESSION_OPTIONS,
+    mode: { type: "string" },
+    json: { type: "boolean", default: false },
+    "stream-deltas": { type: "boolean", default: false },
+    "trust-workspace": { type: "boolean", default: false },
+  },
+  trust: { ...COMMON_OPTIONS, revoke: { type: "boolean", default: false } },
+  runs: { ...COMMON_OPTIONS, json: { type: "boolean", default: false } },
+  show: { ...COMMON_OPTIONS, json: { type: "boolean", default: false } },
+  doctor: {
+    ...COMMON_OPTIONS,
+    runtime: { type: "boolean", default: false },
+    "probe-model": { type: "boolean", default: false },
+    json: { type: "boolean", default: false },
+  },
+  login: {
+    ...COMMON_OPTIONS,
+    method: { type: "string" },
+    profile: { type: "string" },
+    "device-code": { type: "boolean", default: false },
+  },
+  logout: { ...COMMON_OPTIONS, profile: { type: "string" } },
+  auth: { ...COMMON_OPTIONS, json: { type: "boolean", default: false } },
+} as const satisfies Record<string, ParseArgsOptionsConfig>;
+
+/** Every spelling (`--name`, `-x`) a command accepts; empty for commands whose options belong to another module. */
+export function harnessCommandFlags(command: string): readonly string[] {
+  const options = (HARNESS_COMMAND_OPTIONS as Record<string, ParseArgsOptionsConfig>)[command];
+  if (options === undefined) return [];
+  return Object.entries(options).flatMap(([name, option]) => (option.short === undefined ? [`--${name}`] : [`--${name}`, `-${option.short}`]));
+}
+
+function unknownOption(command: string, flag: string): string {
+  const longFlags = harnessCommandFlags(command).filter((candidate) => candidate.startsWith("--"));
+  const match = flag.startsWith("--") ? closestMatch(flag, longFlags) : undefined;
+  return `Unknown option ${flag} for syn ${command}${match === undefined ? "" : `. Did you mean ${match}?`}`;
+}
+
+export const HARNESS_COMMANDS = [...Object.keys(HARNESS_COMMAND_OPTIONS), "memory"] as const;
+
+function unknownCommand(command: string): string {
+  const match = closestMatch(command, HARNESS_COMMANDS);
+  return `Unknown runtime command: ${command}${match === undefined ? "" : `. Did you mean: syn ${match}?`}`;
+}
+
 function parse<const O extends ParseArgsOptionsConfig>(command: string, args: readonly string[], options: O) {
   try {
     return parseArgs({ args: [...args], options, allowPositionals: true, strict: true });
   } catch (error) {
-    const message = error instanceof Error ? error.message.split(". To specify a positional")[0] ?? error.message : String(error);
-    throw new UsageError(message, command);
+    const code = (error as { code?: unknown } | null)?.code;
+    const raw = error instanceof Error ? error.message : String(error);
+    const unknown = /Unknown option '([^']+)'/.exec(raw);
+    if (code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" && unknown?.[1] !== undefined) throw new UsageError(unknownOption(command, unknown[1]), command);
+    throw new UsageError(raw.split(". To specify a positional")[0] ?? raw, command);
   }
 }
 
@@ -160,15 +221,7 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
   const [command, ...args] = argv;
   switch (command) {
     case "agent": {
-      const { values, positionals } = parse(command, args, {
-        ...COMMON_OPTIONS,
-        ...SESSION_OPTIONS,
-        resume: { type: "string" },
-        fork: { type: "string" },
-        continue: { type: "boolean", short: "c", default: false },
-        legacy: { type: "boolean", default: false },
-        debug: { type: "boolean", default: false },
-      });
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.agent);
       if (values.help) return { kind: "help", command };
       noPositionals(command, positionals);
       if (values.resume !== undefined && values.fork !== undefined) throw new UsageError("--resume and --fork cannot be combined.", command);
@@ -194,14 +247,7 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
       };
     }
     case "run": {
-      const { values, positionals } = parse(command, args, {
-        ...COMMON_OPTIONS,
-        ...SESSION_OPTIONS,
-        mode: { type: "string" },
-        json: { type: "boolean", default: false },
-        "stream-deltas": { type: "boolean", default: false },
-        "trust-workspace": { type: "boolean", default: false },
-      });
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.run);
       if (values.help) return { kind: "help", command };
       if (values.mode !== undefined && values.mode !== "jsonl") throw new UsageError(`Invalid --mode: ${values.mode}. The only machine mode is jsonl.`, command);
       const jsonl = values.mode === "jsonl" || values.json;
@@ -223,19 +269,19 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
       };
     }
     case "trust": {
-      const { values, positionals } = parse(command, args, { ...COMMON_OPTIONS, revoke: { type: "boolean", default: false } });
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.trust);
       if (values.help) return { kind: "help", command };
       noPositionals(command, positionals);
       return { kind: "trust", common: common(command, values), revoke: values.revoke };
     }
     case "runs": {
-      const { values, positionals } = parse(command, args, { ...COMMON_OPTIONS, json: { type: "boolean", default: false } });
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.runs);
       if (values.help) return { kind: "help", command };
       noPositionals(command, positionals);
       return { kind: "runs", common: common(command, values), json: values.json };
     }
     case "show": {
-      const { values, positionals } = parse(command, args, { ...COMMON_OPTIONS, json: { type: "boolean", default: false } });
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.show);
       if (values.help) return { kind: "help", command };
       if (positionals.length !== 1) throw new UsageError("syn show requires exactly one run or session id.", command);
       const value = positionals[0] ?? "";
@@ -245,24 +291,14 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
       return { kind: "show", common: common(command, values), id: run.success ? run.data : (ses.data as SessionId), json: values.json };
     }
     case "doctor": {
-      const { values, positionals } = parse(command, args, {
-        ...COMMON_OPTIONS,
-        runtime: { type: "boolean", default: false },
-        "probe-model": { type: "boolean", default: false },
-        json: { type: "boolean", default: false },
-      });
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.doctor);
       if (!values.runtime) throw new UsageError("The runtime doctor requires --runtime.", command);
       if (values.help) return { kind: "help", command };
       noPositionals(command, positionals);
       return { kind: "doctor-runtime", common: common(command, values), probeModel: values["probe-model"], json: values.json };
     }
     case "login": {
-      const { values, positionals } = parse(command, args, {
-        ...COMMON_OPTIONS,
-        method: { type: "string" },
-        profile: { type: "string" },
-        "device-code": { type: "boolean", default: false },
-      });
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.login);
       if (values.help) return { kind: "help", command };
       const method = values.method === undefined ? undefined : oneOf(command, "--method", values.method, AUTH_METHODS, "api-key");
       return {
@@ -276,12 +312,12 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
       };
     }
     case "logout": {
-      const { values, positionals } = parse(command, args, { ...COMMON_OPTIONS, profile: { type: "string" } });
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.logout);
       if (values.help) return { kind: "help", command };
       return { kind: "logout", common: common(command, values), provider: provider(command, positionals), profile: credentialProfile(command, values.profile), args };
     }
     case "auth": {
-      const { values, positionals } = parse(command, args, { ...COMMON_OPTIONS, json: { type: "boolean", default: false } });
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.auth);
       if (values.help) return { kind: "help", command };
       if (positionals[0] !== "status" || positionals.length > 1) {
         throw new UsageError(positionals.length === 0 ? "syn auth requires a sub-command: status" : `Unknown auth sub-command: ${positionals.join(" ")}. Expected status.`, command);
@@ -292,12 +328,14 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
       const [subcommand, ...rest] = args;
       if (subcommand === undefined || subcommand === "--help" || subcommand === "-h") return { kind: "help", command };
       if (!(MEMORY_SUBCOMMANDS as readonly string[]).includes(subcommand)) {
-        throw new UsageError(`Unknown memory sub-command: ${subcommand}. Expected ${MEMORY_SUBCOMMANDS.join(", ")}.`, command);
+        const match = closestMatch(subcommand, MEMORY_SUBCOMMANDS);
+        const hint = match === undefined ? `Expected ${MEMORY_SUBCOMMANDS.join(", ")}.` : `Did you mean: syn memory ${match}?`;
+        throw new UsageError(`Unknown memory sub-command: ${subcommand}. ${hint}`, command);
       }
       return { kind: "memory", subcommand: subcommand as MemorySubcommand, args: [subcommand, ...rest] };
     }
     default:
-      throw new UsageError(`Unknown runtime command: ${String(command)}`, undefined);
+      throw new UsageError(unknownCommand(String(command)), undefined);
   }
 }
 

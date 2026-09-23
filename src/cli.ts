@@ -9,6 +9,7 @@ import { scopeSchema, type StructureScope } from "./domain/config.ts";
 import { CliError } from "./domain/errors.ts";
 import type { GenerationPlan } from "./domain/generation.ts";
 import { SYNORCH_VERSION } from "./domain/product.ts";
+import { closestMatch } from "./domain/suggest.ts";
 import { NodeFileSystem } from "./infrastructure/file-system.ts";
 
 const HELP = `syn — Synorch orchestration structure generator for Codex and Claude Code
@@ -43,6 +44,76 @@ Safety:
 
 const HARNESS_COMMAND_NAMES: readonly string[] = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust"];
 
+const LEGACY_OPTIONS = {
+  target: { type: "string", short: "t" },
+  scope: { type: "string", short: "s" },
+  force: { type: "boolean", short: "f", default: false },
+  json: { type: "boolean", default: false },
+  help: { type: "boolean", short: "h", default: false },
+  version: { type: "boolean", short: "v", default: false },
+} as const;
+
+const LEGACY_COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  inspect: ["--target", "-t", "--scope", "-s", "--force", "-f", "--json", "--help", "-h"],
+  init: ["--target", "-t", "--scope", "-s", "--force", "-f", "--json", "--help", "-h"],
+  sync: ["--target", "-t", "--force", "-f", "--json", "--help", "-h"],
+  doctor: ["--target", "-t", "--json", "--help", "-h"],
+};
+
+const LEGACY_COMMAND_NAMES = Object.keys(LEGACY_COMMAND_FLAGS);
+
+class UsageFailure extends CliError {
+  public constructor(lines: readonly string[]) {
+    super(lines.join("\n"), 2);
+    this.name = "UsageFailure";
+  }
+}
+
+function usageLine(command: string): string | undefined {
+  return HELP.split("\n").find((line) => line.trim().startsWith(`syn ${command} `))?.trim();
+}
+
+function flagName(token: string): string {
+  const separator = token.indexOf("=");
+  return separator === -1 ? token : token.slice(0, separator);
+}
+
+async function flagsAccepted(command: string, args: readonly string[]): Promise<boolean> {
+  const flags = args.filter((token) => token.startsWith("-") && token !== "--").map(flagName);
+  if (flags.length === 0) return true;
+  const accepted = new Set(LEGACY_COMMAND_FLAGS[command] ?? []);
+  if (HARNESS_COMMAND_NAMES.includes(command) || command === "doctor") {
+    const harness = await import("./harness/cli/index.ts");
+    for (const flag of harness.harnessCommandFlags(command)) accepted.add(flag);
+  }
+  return flags.every((flag) => accepted.has(flag));
+}
+
+async function unknownCommand(command: string, args: readonly string[]): Promise<UsageFailure> {
+  const lines = [`Unknown command: ${command}`];
+  const match = closestMatch(command, [...LEGACY_COMMAND_NAMES, ...HARNESS_COMMAND_NAMES]);
+  if (match !== undefined) {
+    const suggestion = (await flagsAccepted(match, args)) ? ["syn", match, ...args] : ["syn", match];
+    lines.push(`Did you mean: ${suggestion.join(" ")}?`);
+  }
+  lines.push("Run syn --help for all commands.");
+  return new UsageFailure(lines);
+}
+
+function unknownOption(error: unknown, command: string | undefined): UsageFailure | undefined {
+  if ((error as { code?: unknown } | null)?.code !== "ERR_PARSE_ARGS_UNKNOWN_OPTION") return undefined;
+  const flag = /Unknown option '([^']+)'/.exec(error instanceof Error ? error.message : "")?.[1] ?? "";
+  if (command === undefined || LEGACY_COMMAND_FLAGS[command] === undefined) {
+    return new UsageFailure([`Unknown option ${flag}`, "Run syn --help for all commands."]);
+  }
+  const lines = [`Unknown option ${flag} for syn ${command}`];
+  const match = flag.startsWith("--") ? closestMatch(flag, (LEGACY_COMMAND_FLAGS[command] ?? []).filter((candidate) => candidate.startsWith("--"))) : undefined;
+  if (match !== undefined) lines.push(`Did you mean ${match}?`);
+  const usage = usageLine(command);
+  if (usage !== undefined) lines.push(`Usage: ${usage}`);
+  return new UsageFailure(lines);
+}
+
 function isHarnessInvocation(argv: readonly string[]): boolean {
   const [command] = argv;
   if (HARNESS_COMMAND_NAMES.includes(command ?? "")) {
@@ -69,19 +140,18 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { values, positionals } = parseArgs({
-    args: argv,
-    allowPositionals: true,
-    strict: true,
-    options: {
-      target: { type: "string", short: "t" },
-      scope: { type: "string", short: "s" },
-      force: { type: "boolean", short: "f", default: false },
-      json: { type: "boolean", default: false },
-      help: { type: "boolean", short: "h", default: false },
-      version: { type: "boolean", short: "v", default: false },
-    },
-  });
+  const [first] = argv;
+  if (first !== undefined && !first.startsWith("-") && !LEGACY_COMMAND_NAMES.includes(first)) {
+    throw await unknownCommand(first, argv.slice(1));
+  }
+
+  let parsed: ReturnType<typeof parseArgs<{ args: string[]; allowPositionals: true; strict: true; options: typeof LEGACY_OPTIONS }>>;
+  try {
+    parsed = parseArgs({ args: argv, allowPositionals: true, strict: true, options: LEGACY_OPTIONS });
+  } catch (error) {
+    throw unknownOption(error, argv.find((token) => !token.startsWith("-"))) ?? new CliError(error instanceof Error ? error.message : String(error), 2);
+  }
+  const { values, positionals } = parsed;
 
   if (values.version) {
     console.log(SYNORCH_VERSION);
@@ -155,7 +225,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      throw new CliError(`Unknown command: ${String(command)}\n\n${HELP}`, 2);
+      throw await unknownCommand(String(command), []);
   }
 }
 
@@ -221,12 +291,18 @@ function printDiagnostics(diagnostics: readonly Diagnostic[], asJson: boolean): 
 }
 
 main().catch((error: unknown) => {
+  if (error instanceof UsageFailure) {
+    console.error(error.message);
+    process.exitCode = error.exitCode;
+    return;
+  }
   if (error instanceof CliError) {
     console.error(`Error: ${error.message}`);
     process.exitCode = error.exitCode;
     return;
   }
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  const debug = process.env.SYN_DEBUG === "1";
+  const message = error instanceof Error ? (debug ? error.stack ?? error.message : error.message) : String(error);
   console.error(`Unexpected error: ${message}`);
   process.exitCode = 1;
 });

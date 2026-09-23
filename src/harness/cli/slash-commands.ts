@@ -5,6 +5,7 @@ import {
   type SessionId,
   type CommandPaletteEntry,
 } from "../contracts/index.ts";
+import { closestMatch } from "../../domain/suggest.ts";
 import type { Runtime } from "./runtime.ts";
 
 /**
@@ -169,7 +170,7 @@ export async function handleSlashCommand(text: string, context: SlashContext): P
       case "/help":
         return SLASH_HELP;
       default:
-        return [`unknown command ${command}; /help lists the commands`];
+        return [unknownConversationCommand(command, "·")];
     }
   };
   if (command === "/exit" || command === "/quit") return { lines: [], exit: true };
@@ -254,6 +255,13 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
 export function findConversationCommand(name: string): SlashCommand | undefined {
   const lower = name.toLowerCase();
   return CONVERSATION_COMMANDS.find((command) => command.name === lower || command.aliases?.includes(lower) === true);
+}
+
+/** The reply to an unknown slash command: the closest registered command when one is plausibly meant. */
+export function unknownConversationCommand(name: string, sep: string): string {
+  const names = CONVERSATION_COMMANDS.flatMap((command) => [command.name, ...(command.aliases ?? [])]);
+  const match = name.startsWith("/") ? closestMatch(name.slice(1), names.map((candidate) => candidate.slice(1))) : undefined;
+  return match === undefined ? `Unknown command ${name} ${sep} /help lists the commands` : `Unknown command ${name} ${sep} did you mean /${match}?`;
 }
 
 /** Palette rows for the interactive renderer (`controls.setCommands`, K1-U1): names without the slash; renderer-local commands stay the renderer's. */

@@ -60,6 +60,7 @@ import {
   conversationPaletteEntries,
   evidenceReport,
   findConversationCommand,
+  unknownConversationCommand,
   memoryReport,
   permissionsReport,
   tasksReport,
@@ -990,7 +991,7 @@ class Conversation implements ConversationCommandHost {
     const argument = text.slice(name.length).trim();
     const command = findConversationCommand(name);
     if (command === undefined) {
-      this.print([`Unknown command ${name} ${this.glyphs.sep} /help lists the commands`]);
+      this.print([unknownConversationCommand(name, this.glyphs.sep)]);
       return false;
     }
     try {

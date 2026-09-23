@@ -37,7 +37,7 @@ import { trustCommand } from "./trust.ts";
 export const HARNESS_COMMANDS = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust"] as const;
 export type HarnessCommand = (typeof HARNESS_COMMANDS)[number];
 
-export { parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";
+export { harnessCommandFlags, parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";
 export { commandHelp } from "./help.ts";
 export { approvalFailure, failureInfo, isAbortError } from "./outcome.ts";
 export { resolveTerminalSettings, streamHasColors, type TerminalFacts, type TerminalRequest, type TerminalSettings } from "./terminal.ts";

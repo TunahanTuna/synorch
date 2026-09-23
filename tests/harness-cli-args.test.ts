@@ -127,7 +127,9 @@ test("invalid invocations are usage errors with actionable messages", () => {
   assert.match(usage(["agent", "--profile", "boss=x"]), /Invalid --profile/);
   assert.match(usage(["agent", "--profile", "fast_worker=a", "--profile", "fast_worker=b"]), /more than once/);
   assert.match(usage(["agent", "--color", "sometimes"]), /Invalid --color/);
-  assert.match(usage(["agent", "--bogus"]), /Unknown option '--bogus'$/);
+  assert.match(usage(["agent", "--bogus"]), /^Unknown option --bogus for syn agent$/);
+  assert.match(usage(["runs", "--jsn"]), /Unknown option --jsn for syn runs. Did you mean --json\?/);
+  assert.match(usage(["memory", "serch"]), /Did you mean: syn memory search\?/);
   assert.match(usage(["run"]), /requires a goal/);
   assert.match(usage(["run", "a", "b"]), /quote the goal/);
   assert.match(usage(["run", "  "]), /must not be empty/);

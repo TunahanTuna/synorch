@@ -49,7 +49,7 @@ import {
   type ClaimResult,
   type WorkerClaim,
 } from "./claims.ts";
-import { verifyCompletion, verifyReview, type CompletionVerification, type EvidenceIndex } from "./evidence.ts";
+import { verifyCompletion, verifyReview, type CompletionVerification, type CompletionVerificationOptions, type EvidenceIndex } from "./evidence.ts";
 import type { ChangeSet, OrchestratedWorkspace, OrchestrationIsolationProvider } from "./isolation.ts";
 import { matchesAny, normalizeWorkspacePath } from "./paths.ts";
 import {
@@ -109,6 +109,11 @@ export interface AttemptRecord {
   outcome: TurnOutcome | undefined;
   /** Why the attempt's turn failed, when the cause is the provider or a tool (exit code 4). */
   failure: AttemptFailure | undefined;
+  /**
+   * Sources that changed while the attempt ran (the harness, not the worker, set `needs_context`).
+   * Undefined when the sources held; a worker-claimed `needs_context` is triaged instead.
+   */
+  stale: readonly string[] | undefined;
 }
 
 export type AttemptFailure = "provider_failed" | "tool_failed";
@@ -135,7 +140,7 @@ export function classifyAttemptFailure(outcome: TurnOutcome | undefined, error: 
 /** The contract `WorkerManager` plus the coordinator's own verification and integration steps. */
 export interface OrchestrationWorkerManager extends WorkerManager {
   attempt(attemptId: AttemptId): AttemptRecord | undefined;
-  verify(attemptId: AttemptId): Promise<CompletionVerification>;
+  verify(attemptId: AttemptId, options?: CompletionVerificationOptions): Promise<CompletionVerification>;
   integrate(attemptId: AttemptId, expectedArtifact: Digest, signal: AbortSignal): Promise<void>;
   revert(attemptId: AttemptId, signal: AbortSignal): Promise<readonly string[]>;
   dispose(attemptId: AttemptId): Promise<void>;
@@ -327,6 +332,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       completion: undefined,
       outcome: undefined,
       failure: undefined,
+      stale: undefined,
     };
     records.set(attemptId, record);
     const controller = linkSignals(signal);
@@ -501,6 +507,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         else throw error;
       }
     }
+    record.stale = stale;
     const cancelledReason = controller.signal.aborted ? String((controller.signal.reason as Error | undefined)?.message ?? controller.signal.reason) : undefined;
     const completion = assemble(record, execution, changeSet, readClaim(workerClaimSchema, execution.log, REPORT_TOOL_NAMES.task), stale, cancelledReason);
     record.completion = completion;
@@ -602,7 +609,8 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         if (after.artifactDigest !== pinned.artifactDigest) {
           return { attemptId: record.attemptId, review, verification: { decision: "invalid", problems: ["the artifact changed during review"] } };
         }
-        const verification = await verifyReview(review, target.packet, completion, {
+        // Judged against the criteria the reviewer was given: the implementation's, minus waived ones, plus reviewer-task extras.
+        const verification = await verifyReview(review, record.packet, completion, {
           worker: indexFor(target, pinned, target.workspace.root),
           reviewer: indexFor(record, pinned, target.workspace.root),
         });
@@ -624,12 +632,12 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     attempt(attemptId) {
       return records.get(attemptId);
     },
-    async verify(attemptId) {
+    async verify(attemptId, options) {
       const record = records.get(attemptId);
       if (record?.completion === undefined || record.changeSet === undefined) {
         return { decision: "reject", problems: [`attempt ${attemptId} has no completion`], unevidenced: [] };
       }
-      return verifyCompletion(record.packet, record.completion, indexFor(record, record.changeSet, record.workspace.root), platform);
+      return verifyCompletion(record.packet, record.completion, indexFor(record, record.changeSet, record.workspace.root), platform, options);
     },
     async integrate(attemptId, expectedArtifact, signal) {
       const record = records.get(attemptId);

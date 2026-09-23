@@ -412,9 +412,28 @@ function skillVisible(skill: CanonicalSkill, definition: RoleDefinition | undefi
   return skill.kind !== "base" && definition.allowedSkills.includes(TECHNOLOGY_SKILL_TOKEN);
 }
 
-function createCatalog(entries: readonly CanonicalSkill[], reader: CanonicalReader, roles: ReadonlyMap<AgentRole, RoleDefinition>): SkillCatalog {
+const SKILL_REFERENCE = /\.ai\/skills\/([a-z0-9][a-z0-9-]*)\/SKILL\.md/g;
+
+/** Skills a role manifest body points at (`.ai/skills/<name>/SKILL.md`), in order of first mention. */
+export function referencedSkills(body: string): readonly string[] {
+  return [...new Set([...body.matchAll(SKILL_REFERENCE)].map((match) => match[1] ?? "").filter((name) => name !== ""))];
+}
+
+function createCatalog(
+  entries: readonly CanonicalSkill[],
+  reader: CanonicalReader,
+  roles: ReadonlyMap<AgentRole, RoleDefinition>,
+  roleTexts: Partial<Record<AgentRole, string>>,
+): SkillCatalog {
   const byName = new Map(entries.map((entry) => [entry.name, entry]));
   return {
+    primary(role: AgentRole): readonly string[] {
+      const definition = roles.get(role);
+      return referencedSkills(roleTexts[role] ?? "").filter((name) => {
+        const entry = byName.get(name);
+        return entry !== undefined && skillVisible(entry, definition);
+      });
+    },
     list(role?: AgentRole): readonly SkillEntry[] {
       const definition = role === undefined ? undefined : roles.get(role);
       return entries.filter((entry) => skillVisible(entry, definition)).map((entry) => ({ name: entry.name, description: entry.description, triggers: [] }));
@@ -428,6 +447,28 @@ function createCatalog(entries: readonly CanonicalSkill[], reader: CanonicalRead
       if ("error" in parsed) return undefined;
       return bounded(`Skill ${entry.name} (${sourceLabel(reader, entry.path)}):\n${parsed.body}`, CANONICAL_SIZE_CEILINGS.skillReference, entry.path, []);
     },
+  };
+}
+
+const ENTRYPOINT_FILE = "AGENTS.md";
+
+/**
+ * The repository's own `AGENTS.md` guidance as a context block, so no worker has to read it with a
+ * tool. The unmodified Synorch entrypoint is left out: its substance is the constitution and core
+ * protocols (already in context) and its bootstrap steps are the runtime's job.
+ */
+async function loadEntrypoint(workspaceRoot: string, diagnostics: string[]): Promise<{ path: string; text: string } | undefined> {
+  const text = await repositoryReader(workspaceRoot)
+    .read(ENTRYPOINT_FILE)
+    .catch(() => undefined);
+  if (text === undefined) return undefined;
+  const normalized = normalizeLines(text).trim();
+  const generated = ["AGENTS.md", "CLAUDE.md"].map((file) => builtinFiles?.get(file)).filter((content): content is string => content !== undefined);
+  if (normalized === "" || generated.some((content) => normalizeLines(content).trim() === normalized)) return undefined;
+  const body = bounded(normalized, CANONICAL_SIZE_CEILINGS.entrypoint, ENTRYPOINT_FILE, diagnostics);
+  return {
+    path: ENTRYPOINT_FILE,
+    text: `Repository entrypoint ${ENTRYPOINT_FILE} (project guidance; host bootstrap steps it lists, such as reading files, confirming a model profile or asking for approval, are performed by the Synorch runtime):\n${body}`,
   };
 }
 
@@ -456,6 +497,7 @@ export async function loadCanonicalStructure(workspaceRoot: string): Promise<Can
   if (roleTexts.orchestrator !== undefined) roleTexts.orchestrator = `${roleTexts.orchestrator}\n\n${roster(roles)}`;
   const skills = await loadSkills(readers, diagnostics);
   const profiles = await loadProfiles(readers, diagnostics);
+  const entrypoint = await loadEntrypoint(workspaceRoot, diagnostics);
 
   return {
     origin: present ? "repository" : "builtin",
@@ -463,9 +505,10 @@ export async function loadCanonicalStructure(workspaceRoot: string): Promise<Can
       ...(constitution === undefined ? {} : { constitution: constitution.value }),
       protocols: protocols?.value ?? [],
       roles: roleTexts,
+      ...(entrypoint === undefined ? {} : { entrypoint }),
     },
     roles,
-    skills: createCatalog(skills.entries, skills.reader, roles),
+    skills: createCatalog(skills.entries, skills.reader, roles, roleTexts),
     skillEntries: skills.entries,
     profiles,
     protocolIds: (protocols?.value ?? []).map((protocol) => protocol.id),

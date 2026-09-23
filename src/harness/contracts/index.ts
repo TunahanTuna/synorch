@@ -12,6 +12,7 @@ export * from "./paths.ts";
 export * from "./policy.ts";
 export * from "./projection.ts";
 export * from "./renderer.ts";
+export * from "./roles.ts";
 export * from "./runtime.ts";
 export * from "./state.ts";
 export * from "./store.ts";

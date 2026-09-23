@@ -62,7 +62,8 @@ Kurallar: her `met` hükmü reviewer'ın **kendi ürettiği** en az bir kanıta 
 | Plan onaylandı, bağımlılıklar tamam | `draft → ready` |
 | `task/packet_issued` + `attempt/started` | `ready → running` |
 | Completion `completed` | `running → verifying` |
-| Completion `needs_context` | `running → needs_context` |
+| Completion `needs_context` | `running → needs_context` (kaynak değiştiyse yeniden paketleme; worker'ın kendi bildirimiyse orchestrator triyajı) |
+| Completion `partial` | Orchestrator triyajı: `accept` (yalnız hiçbir şey değiştirmemiş salt okunur görev) `running → verifying`, `retry` `running → failed → retry_pending → ready` (delta önceki raporu taşır), `fail` `running → failed` |
 | Completion `blocked` / `failed` | `running → blocked` / `failed` |
 | Doğrulama geçti, risk `standard`/`high-risk` | `verifying → reviewing` |
 | Doğrulama geçti, risk `trivial` | `verifying → completed` |

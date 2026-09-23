@@ -33,6 +33,7 @@ import {
   type ToolBridgeResult,
   type ToolCallId,
   type ToolCallOutcome,
+  type ToolResult,
   type TurnId,
   type TurnInput,
   type TurnOutcome,
@@ -159,7 +160,7 @@ class FixedAgentDriver implements AgentDriver {
         return this.#endStep(step, "aborted", "cancelled");
       }
       const result = await this.#invokeRecorded(step, call, signal);
-      await this.#recordToolResult(step, call, { isError: result.result.status === "error", text: result.result.text, blob: result.result.blob });
+      await this.#recordToolResult(step, call, { isError: result.result.status === "error", text: modelVisibleText(result.result), blob: result.result.blob });
     }
     if (signal.aborted) return this.#endStep(step, "aborted", "cancelled");
     return this.#endStep(step, "settled", "continue");
@@ -182,7 +183,7 @@ class FixedAgentDriver implements AgentDriver {
       const ref: ToolCallRef = { toolCallId, providerCallId: call.providerCallId, name: bridgeToolName(call.name), arguments: call.arguments };
       try {
         const outcome = await this.#invokeRecorded(step, ref, AbortSignal.any([stepSignal, callSignal]));
-        await this.#recordToolResult(step, ref, { isError: outcome.result.status === "error", text: outcome.result.text, blob: outcome.result.blob });
+        await this.#recordToolResult(step, ref, { isError: outcome.result.status === "error", text: modelVisibleText(outcome.result), blob: outcome.result.blob });
         return { isError: outcome.result.status === "error", text: outcome.result.text };
       } catch (error: unknown) {
         storeError = error;
@@ -415,6 +416,17 @@ class TurnLog {
   public append<T extends SessionEventType>(type: T, data: SessionEventOf<T>["data"]): Promise<SessionEvent> {
     return this.#events.append({ type, event_version: EVENT_VERSIONS[type], actor: this.#actor, ...this.#correlation, data } as SessionEventDraft);
   }
+}
+
+/**
+ * The tool result text the model sees. An error's code and (already redacted) message are appended:
+ * without them a denial or a structured rejection (e.g. `plan_propose` with the reasons to fix)
+ * reached the model as an empty error it could not act on.
+ */
+export function modelVisibleText(result: Pick<ToolResult, "text" | "error">): string {
+  if (result.error === undefined) return result.text;
+  const error = `Error [${result.error.code}]: ${result.error.message}`;
+  return result.text === "" ? error : `${result.text}\n${error}`;
 }
 
 /** Gives every tool_call part its runtime `ToolCallId` (the provider id is kept alongside, never reused). */

@@ -16,12 +16,14 @@ export {
   type UsageObservation,
 } from "./budget.ts";
 export { latestReport, type AttemptLog, type RecordedReportCall } from "./attempt-log.ts";
+export { commandMentioned, roleCapabilityIssues } from "./capabilities.ts";
 export { extractJsonBlock, parseClaim, readClaim, reviewerClaimSchema, workerClaimSchema } from "./claims.ts";
 export { createControlPlaneWriter, type ControlPlaneWriter } from "./control-plane.ts";
 export {
   createCoordinator,
   DEFAULT_COORDINATOR_LIMITS,
   failedRunExitCode,
+  retryNotes,
   type CoordinatorDependencies,
   type CoordinatorLimits,
   type WorkerFactory,
@@ -33,6 +35,7 @@ export {
   type DelegationPort,
   type DelegationResult,
   type DelegationSlot,
+  type TriageDecision,
 } from "./delegation.ts";
 export {
   mayComplete,
@@ -72,7 +75,16 @@ export {
   validatePlan,
   type PlanValidation,
 } from "./plan.ts";
-export { createModelPlanner, renderConsultPrompt, renderPlanningPrompt, type ConsultInput, type Planner, type PlannerInput } from "./planner.ts";
+export {
+  createModelPlanner,
+  renderConsultPrompt,
+  renderPlanningPrompt,
+  renderTriagePrompt,
+  type ConsultInput,
+  type Planner,
+  type PlannerInput,
+  type TriageInput,
+} from "./planner.ts";
 export { createWorkspaceSourceReader, type SourceDigestReader } from "./recorder.ts";
 export {
   createDagScheduler,

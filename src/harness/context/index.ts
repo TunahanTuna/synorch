@@ -30,7 +30,7 @@ export {
   type SummaryV1,
 } from "./compaction.ts";
 export { belongsTo, reconstructHistory, type History, type HistoryFilter, type HistoryMessage } from "./history.ts";
-export { harnessInstructions, type ProjectInstructions } from "./instructions.ts";
+export { harnessInstructions, type ProjectInstructions, type RuntimeFacts } from "./instructions.ts";
 export { createSourceReader, isOwnedPath, type SourceDigestReader } from "./scope.ts";
 export { renderCatalog, triggeredSkills, type SkillCatalog, type SkillEntry } from "./skills.ts";
 export { estimateTokens, messageTokens } from "./tokens.ts";

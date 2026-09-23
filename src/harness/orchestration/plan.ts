@@ -15,6 +15,7 @@ import {
   type TaskContextPacket,
   type TaskId,
 } from "../contracts/index.ts";
+import { roleCapabilityIssues } from "./capabilities.ts";
 
 /**
  * Plan validation and packet compilation. The orchestrator never hands a worker its transcript:
@@ -32,7 +33,10 @@ export interface PlanExpectations {
   readonly version: number;
 }
 
-/** `planSchema` plus the identity the coordinator expects; a plan for another run is rejected. */
+/**
+ * `planSchema`, the identity the coordinator expects (a plan for another run is rejected) and the
+ * role capability rules (`roleCapabilityIssues`: e.g. no verification command on an explorer).
+ */
 export function validatePlan(candidate: unknown, expected: PlanExpectations): PlanValidation {
   const parsed = planSchema.safeParse(candidate);
   if (!parsed.success) {
@@ -46,6 +50,7 @@ export function validatePlan(candidate: unknown, expected: PlanExpectations): Pl
   if (plan.run_id !== expected.runId) issues.push(`run_id: expected ${expected.runId}`);
   if (plan.plan_id !== expected.planId) issues.push(`plan_id: expected ${expected.planId}`);
   if (plan.version !== expected.version) issues.push(`version: expected ${expected.version}`);
+  issues.push(...roleCapabilityIssues(plan));
   if (issues.length > 0) return { ok: false, issues };
   return { ok: true, plan, digest: planDigest(plan) };
 }
@@ -226,6 +231,10 @@ export interface ReviewerPacketInput {
   readonly createdAt: string;
   readonly reviewerTier: TaskContextPacket["model_tier"] | undefined;
   readonly extraCriteria: readonly { readonly id: string; readonly statement: string }[];
+  /** Extra verification commands (from reviewer plan tasks); exact commands the approved plan names. */
+  readonly extraVerification?: readonly string[];
+  /** Criteria the orchestrator waived for a read-only task in triage; they are not reviewed. */
+  readonly waivedCriteria?: readonly string[];
 }
 
 /**
@@ -234,10 +243,12 @@ export interface ReviewerPacketInput {
  */
 export function compileReviewerPacket(input: ReviewerPacketInput): TaskContextPacket {
   const impl = input.implementation;
-  const criteria = [...impl.acceptance_criteria];
+  const waived = new Set(input.waivedCriteria ?? []);
+  const criteria = impl.acceptance_criteria.filter((criterion) => !waived.has(criterion.id));
   for (const extra of input.extraCriteria) {
     if (!criteria.some((criterion) => criterion.id === extra.id)) criteria.push(extra);
   }
+  const commands = [...new Set([...impl.verification.commands, ...(input.extraVerification ?? [])])];
   return taskContextPacketSchema.parse({
     schema_version: 2,
     kind: "full",
@@ -262,7 +273,7 @@ export function compileReviewerPacket(input: ReviewerPacketInput): TaskContextPa
     decisions: [`The artifact under review is pinned at ${input.artifactDigest}; it must not change during review.`],
     relevant_symbols: impl.relevant_symbols,
     acceptance_criteria: criteria,
-    verification: impl.verification,
+    verification: { commands },
     non_goals: ["Modifying the artifact under review"],
     open_questions: [],
     stop_conditions: ["The artifact changes during review"],

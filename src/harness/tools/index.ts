@@ -6,7 +6,10 @@ export {
   type ControlCallbacks,
   type MemoryProposeInput,
   type TaskSpawnInput,
+  type LoadSkillInput,
   type TaskStatusInput,
+  type TaskTriageInput,
+  TRIAGE_DECISIONS,
 } from "./builtin/control-tools.ts";
 export type { CommandClassifierHint, CommandScopeHint } from "./builtin/process-tools.ts";
 export { childEnvironment, INHERITED_ENV_ALLOWLIST, isBlockedEnvName } from "./environment.ts";

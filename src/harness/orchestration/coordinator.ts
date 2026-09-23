@@ -1,4 +1,5 @@
 import {
+  canRunCommands,
   createId,
   deriveProjectId,
   digestOf,
@@ -42,6 +43,7 @@ import {
 } from "../contracts/index.ts";
 import { approvePlan, type PlanApprovalOutcome } from "./approval.ts";
 import { readEvents } from "./attempt-log.ts";
+import { commandMentioned } from "./capabilities.ts";
 import { createBudgetTracker, type BudgetGateSlot, type BudgetTracker } from "./budget.ts";
 import { createControlPlaneWriter, type ControlPlaneWriter } from "./control-plane.ts";
 import type { DelegationResult, DelegationSlot } from "./delegation.ts";
@@ -81,6 +83,8 @@ export type WorkerFactory = (scope: RunScope, budget: BudgetTracker) => Orchestr
 export interface CoordinatorLimits {
   readonly concurrency: ConcurrencyLimits;
   readonly maxPlanAttempts: number;
+  /** Rejected plan candidates the orchestrator may revise (in-turn `plan_propose` rejections included); one more rejection fails the run. */
+  readonly maxPlanRevisions: number;
   readonly maxRetries: number;
   readonly maxRevisions: number;
   readonly maxReviewAttempts: number;
@@ -92,6 +96,7 @@ export interface CoordinatorLimits {
 export const DEFAULT_COORDINATOR_LIMITS: CoordinatorLimits = {
   concurrency: DEFAULT_CONCURRENCY,
   maxPlanAttempts: 2,
+  maxPlanRevisions: 2,
   maxRetries: 1,
   maxRevisions: 2,
   maxReviewAttempts: 2,
@@ -145,6 +150,41 @@ interface TaskEntry {
   summary: string;
   /** The error class of the task's last failure; it selects the run's exit code. */
   failure: HarnessErrorCode | undefined;
+  /** Notes handed to dependent tasks (e.g. criteria the orchestrator waived in triage). */
+  notes: string[];
+}
+
+type TriageOutcome =
+  | { readonly kind: "accept"; readonly waived: readonly string[]; readonly guidance: string | undefined }
+  | { readonly kind: "retry"; readonly guidance: string | undefined }
+  | { readonly kind: "fail"; readonly guidance: string | undefined };
+
+interface PendingTriage {
+  readonly key: string;
+  readonly taskId: TaskId;
+  readonly acceptable: boolean;
+  readonly criteria: readonly string[];
+  readonly retriesLeft: number;
+  decision: TriageOutcome | undefined;
+}
+
+const NOTE_LIMIT = 1000;
+
+/**
+ * What the next attempt learns from the previous one (never an identical retry): its status and
+ * summary, skipped checks, unresolved items, unevidenced criteria and the orchestrator's guidance.
+ */
+export function retryNotes(completion: CompletionPacket, criteria: readonly { readonly id: string }[], guidance: string | undefined, extra: readonly string[] = []): string[] {
+  const evidenced = new Set(completion.acceptance_evidence.map((entry) => entry.criterion_id));
+  const notes = [
+    `Previous attempt ${completion.attempt_id} reported ${completion.status}: ${completion.summary}`,
+    ...(guidance === undefined ? [] : [`Orchestrator guidance: ${guidance}`]),
+    ...criteria.filter((criterion) => !evidenced.has(criterion.id)).map((criterion) => `Previous attempt did not evidence ${criterion.id}`),
+    ...completion.skipped_checks.map((check) => `Previous attempt skipped ${check.check}: ${check.reason}`),
+    ...completion.unresolved_risks.map((risk) => `Previous attempt left unresolved: ${risk}`),
+    ...extra,
+  ];
+  return notes.map((note) => note.slice(0, NOTE_LIMIT)).slice(0, 20);
 }
 
 type TaskResult = "completed" | "failed";
@@ -313,8 +353,37 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
       let plan: Plan | undefined;
       let planDigestValue: Digest | undefined;
       const feedback: string[] = [];
-      for (let attempt = 1; attempt <= limits.maxPlanAttempts && plan === undefined; attempt += 1) {
+      let planRejections = 0;
+      let lastRejection: readonly string[] = [];
+      const revisionsExhausted = (): boolean => planRejections > limits.maxPlanRevisions;
+      // While planning, `plan_propose` is validated in the orchestrator's own turn: an unworkable
+      // plan comes back as a structured rejection it can fix at once, within the revision limit.
+      deps.delegation?.set({
+        runId,
+        spawn: () => ({ ok: false, code: "execution_failed", message: "no approved plan is active yet; propose the plan with plan_propose" }),
+        status: () => ({ ok: false, code: "execution_failed", message: "no approved plan is active yet; propose the plan with plan_propose" }),
+        proposePlan(raw, caller) {
+          if (caller.role !== "orchestrator" || caller.runId !== runId) return { ok: false, code: "policy_denied", message: "only the orchestrator of this run proposes its plan" };
+          if (revisionsExhausted()) {
+            return { ok: false, code: "policy_denied", message: `the plan revision limit (${limits.maxPlanRevisions}) is reached; the run stops without a plan. End your turn.` };
+          }
+          const validation = validatePlan({ ...raw, schema_version: 1, plan_id: planId, run_id: runId, version: 1, created_at: now().toISOString() }, { runId, planId, version: 1 });
+          if (validation.ok) {
+            const approval = request.policyMode === "ask" ? "the runtime now asks the user in its own interface" : "the runtime now approves it under the autonomous policy (audited)";
+            return { ok: true, text: `plan accepted; ${approval}. Do not ask for approval in text. End your turn now.` };
+          }
+          planRejections += 1;
+          lastRejection = validation.issues;
+          notice("warning", `plan_propose rejected (${planRejections}/${limits.maxPlanRevisions + 1}): ${validation.issues.slice(0, 3).join("; ")}`.slice(0, 1000));
+          const next = revisionsExhausted()
+            ? "This was the last allowed revision; the run stops without a plan. End your turn."
+            : `Fix every problem and call plan_propose again with the whole corrected plan (${limits.maxPlanRevisions + 1 - planRejections} revision(s) left).`;
+          return { ok: false, code: "invalid_arguments", message: `plan rejected:\n${validation.issues.slice(0, 10).map((issue) => `- ${issue}`).join("\n")}\n${next}` };
+        },
+      });
+      for (let attempt = 1; attempt <= limits.maxPlanAttempts && plan === undefined && !revisionsExhausted(); attempt += 1) {
         if (signal.aborted) return await finish("cancelled", EXIT_CODES.cancelled, "cancelled while planning", "cancelled");
+        const rejectionsBefore = planRejections;
         const candidate = await deps.planner.propose(
           {
             runId,
@@ -337,8 +406,12 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           plan = validation.plan;
           planDigestValue = validation.digest;
         } else {
-          feedback.splice(0, feedback.length, ...validation.issues);
-          notice("warning", `plan candidate ${attempt} rejected: ${validation.issues.slice(0, 5).join("; ")}`);
+          // A turn whose plan_propose calls were rejected in-turn already counted them; its last rejection is the useful feedback.
+          const rejectedInTurn = planRejections > rejectionsBefore;
+          if (!rejectedInTurn) planRejections += 1;
+          const issues = rejectedInTurn && lastRejection.length > 0 ? lastRejection : validation.issues;
+          feedback.splice(0, feedback.length, ...issues);
+          notice("warning", `plan candidate ${attempt} rejected: ${issues.slice(0, 5).join("; ")}`);
         }
       }
       if (plan === undefined || planDigestValue === undefined) {
@@ -348,7 +421,9 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             ? "the orchestrator needed an answer from the user, but ask_user is unavailable in this run"
             : cause === "provider_failed"
               ? "the orchestrator's model request failed"
-              : feedback.slice(0, 5).join("; ");
+              : revisionsExhausted()
+                ? `the plan was rejected ${planRejections} time(s) (revision limit ${limits.maxPlanRevisions}); last problems: ${feedback.slice(0, 5).join("; ")}`
+                : feedback.slice(0, 5).join("; ");
         return await finish("failed", exitCodeFor(cause ?? "verification_failed"), `no valid plan: ${why}`, "failed");
       }
       await recorder.record("plan/proposed", { plan, digest: planDigestValue });
@@ -439,6 +514,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         integrated: [],
         summary: "",
         failure: undefined,
+        notes: [],
       });
       const createTask = async (entry: TaskEntry): Promise<void> => {
         await recorder.record(
@@ -481,6 +557,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           return [
             `Finding from ${key}: ${dependency.completion.summary}`.slice(0, 2000),
             ...dependency.completion.recommended_context_updates.map((update) => `Context update from ${key}: ${update}`),
+            ...dependency.notes.map((note) => `Note from ${key}: ${note}`.slice(0, 2000)),
           ];
         });
 
@@ -513,8 +590,86 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         return applyDelta(base, delta);
       };
 
+      /** Reviewer plan tasks that configure the mandatory review of `key` (tier, extra criteria, extra verification). */
+      const reviewConfigurations = (key: string): PlanTask[] => approvedPlan.tasks.filter((task) => task.role === "reviewer" && task.depends_on.includes(key));
+
+      /** The reviewer tasks' criteria, renumbered after the implementation's so ids never collide. */
+      const reviewerExtras = (packet: TaskContextPacket, configurations: readonly PlanTask[]): { id: string; statement: string }[] => {
+        let next = Math.max(0, ...packet.acceptance_criteria.map((criterion) => Number(criterion.id.slice(3)))) + 1;
+        return configurations.flatMap((task) => task.acceptance_criteria.map((criterion) => ({ id: `AC-${next++}`, statement: `(reviewer task ${task.key}) ${criterion.statement}` })));
+      };
+
+      /**
+       * A worker's `partial` or self-reported `needs_context` is never retried blindly: the
+       * orchestrator is consulted (one turn, serialized with steering) and decides with
+       * `task_triage`. Without a triage-capable planner, or without a decision, the harness retries
+       * once with the report in the delta packet.
+       */
+      const triageReport = async (entry: TaskEntry, packet: TaskContextPacket, completion: CompletionPacket, attemptId: AttemptId, retriesLeft: number): Promise<TriageOutcome> => {
+        const fallback: TriageOutcome = { kind: "retry", guidance: undefined };
+        if (deps.planner.triage === undefined || deps.delegation === undefined) return fallback;
+        const record = workers.attempt(attemptId);
+        const acceptable = packet.write_mode !== "owned-paths" && (record?.changeSet?.changes.length ?? 0) === 0;
+        const reported = new Set(completion.acceptance_evidence.map((item) => item.criterion_id));
+        const pending: PendingTriage = { key: entry.key, taskId: entry.taskId, acceptable, criteria: packet.acceptance_criteria.map((criterion) => criterion.id), retriesLeft, decision: undefined };
+        await orchestratorTurn(async () => {
+          triaging = pending;
+          consulting = true;
+          try {
+            await deps.planner.triage?.(
+              {
+                runId,
+                goal: request.goal,
+                planVersion: approvedPlan.version,
+                task: { key: entry.key, taskId: entry.taskId, role: packet.role, risk: packet.risk, writeMode: packet.write_mode },
+                attempt: entry.attempts.length,
+                status: completion.status,
+                criteria: packet.acceptance_criteria.map((criterion) => {
+                  const command = canRunCommands(packet.role) ? undefined : commandMentioned(criterion.statement, packet.verification.commands);
+                  return {
+                    id: criterion.id,
+                    statement: criterion.statement,
+                    evidenced: reported.has(criterion.id),
+                    capabilityNote: command === undefined ? undefined : `it needs "${command}" to run, which a ${packet.role} cannot do`,
+                  };
+                }),
+                summary: completion.summary,
+                skippedChecks: completion.skipped_checks.map((check) => `${check.check}: ${check.reason}`),
+                unresolvedRisks: completion.unresolved_risks,
+                acceptable,
+                retriesLeft,
+                tasks: [...entries.values()].map(taskLine),
+                route: orchestratorRoute.route,
+                policy: orchestratorPolicy,
+                events: log,
+                sessionId: log.sessionId,
+              },
+              signal,
+            );
+          } catch (error) {
+            notice("warning", `orchestrator triage of ${entry.key} failed: ${error instanceof Error ? error.message : String(error)}`);
+          } finally {
+            triaging = undefined;
+            consulting = false;
+          }
+          const extra = spawned.splice(0);
+          if (extra.length > 0) await applyRevision([], extra, `follow-up tasks from the triage of ${entry.key}`);
+        });
+        return pending.decision ?? fallback;
+      };
+
       const runTask = async (entry: TaskEntry): Promise<TaskResult> => {
         await move(entry, "ready", "plan approved and dependencies completed");
+        if (entry.plan.role === "reviewer") {
+          // A reviewer plan task never dispatches: each dependency (standard/high-risk by plan validation) already
+          // passed its own independent review, run with this task's tier, extra criteria and verification.
+          const covered = entry.plan.depends_on.join(", ");
+          await move(entry, "running", `no attempt: reviewer task configures the independent review of ${covered}`);
+          await move(entry, "verifying", `dependencies ${covered} completed through an accepting independent review`);
+          entry.summary = `covered by the independent review of ${covered}`;
+          await move(entry, "completed", entry.summary);
+          return "completed";
+        }
         let packet = compileTaskPacket({
           plan: approvedPlan,
           planDigest: approvedDigest,
@@ -581,7 +736,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             return true;
           };
 
-          if (completion.status === "needs_context") {
+          if (completion.status === "needs_context" && workers.attempt(handle.attemptId)?.stale !== undefined) {
             await move(entry, "needs_context", completion.summary);
             if (repackages >= limits.maxRepackages) {
               entry.failure = "stale_packet";
@@ -599,14 +754,47 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             await move(entry, "blocked", completion.summary);
             return "failed";
           }
-          if (completion.status !== "completed") {
+          let waived: readonly string[] | undefined;
+          if (completion.status === "partial" || completion.status === "needs_context") {
+            const claimedContext = completion.status === "needs_context";
+            if (claimedContext) await move(entry, "needs_context", completion.summary);
+            const decision = await triageReport(entry, packet, completion, handle.attemptId, limits.maxRetries - retries);
+            const notes = retryNotes(completion, packet.acceptance_criteria, decision.guidance);
+            if (decision.kind === "accept") {
+              waived = decision.waived;
+              if (claimedContext) await move(entry, "running", "triage: the orchestrator accepted the findings");
+            } else if (decision.kind === "retry" && retries < limits.maxRetries) {
+              if (claimedContext) {
+                retries += 1;
+                await workers.revert(handle.attemptId, signal);
+                await workers.dispose(handle.attemptId);
+                packet = await issueDelta(entry, packet, notes, []);
+                await move(entry, "ready", `retry ${retries} with a new attempt and the previous report`);
+                continue;
+              }
+              await move(entry, "failed", `attempt ${completion.status}: ${completion.summary}`);
+              if (await retry("retrying with the previous report", notes)) continue;
+              return "failed";
+            } else {
+              entry.failure ??= "verification_failed";
+              const why = decision.kind === "fail" ? `triage: the orchestrator failed the task${decision.guidance === undefined ? "" : ` (${decision.guidance})`}` : "no retries left";
+              await move(entry, claimedContext ? "cancelled" : "failed", `attempt ${completion.status}: ${completion.summary} | ${why}`);
+              return "failed";
+            }
+          } else if (completion.status !== "completed") {
             await move(entry, "failed", `attempt ${completion.status}: ${completion.summary}`);
-            if (await retry("retrying after a failed attempt", [`Previous attempt ${completion.status}: ${completion.summary}`])) continue;
+            if (await retry("retrying after a failed attempt", retryNotes(completion, packet.acceptance_criteria, undefined))) continue;
             return "failed";
           }
 
-          await move(entry, "verifying", "completion received");
-          const verification = await workers.verify(handle.attemptId);
+          await move(entry, "verifying", waived === undefined ? "completion received" : `triage accepted the findings${waived.length > 0 ? `; waived ${waived.join(", ")}` : ""}`);
+          const verification = await workers.verify(handle.attemptId, waived === undefined ? undefined : { waivedCriteria: waived });
+          if (waived !== undefined && waived.length > 0 && verification.decision === "pass") {
+            const waivedSet = new Set(waived);
+            entry.notes = packet.acceptance_criteria
+              .filter((criterion) => waivedSet.has(criterion.id))
+              .map((criterion) => `not established by this ${packet.role} (waived by the orchestrator in triage): ${criterion.id} ${criterion.statement}; establish it here if your task depends on it`);
+          }
           if (verification.decision !== "pass") {
             entry.failure = "verification_failed";
             await move(entry, "failed", `verification ${verification.decision}: ${verification.problems.slice(0, 5).join("; ")}`);
@@ -634,7 +822,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             await move(entry, "failed", "no pinned artifact to review");
             return "failed";
           }
-          const reviewerTask = approvedPlan.tasks.find((task) => task.role === "reviewer" && task.depends_on.includes(entry.key));
+          const configurations = reviewConfigurations(entry.key);
           let outcome: "accept" | "revise" | "block" | "invalid" = "invalid";
           let problems: readonly string[] = [];
           let findingsEvidence: Parameters<typeof createDeltaPacket>[0]["evidence"] = [];
@@ -643,8 +831,10 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
               implementation: packet,
               artifactDigest: artifact.artifactDigest,
               createdAt: now().toISOString(),
-              reviewerTier: reviewerTask?.model_tier,
-              extraCriteria: [],
+              reviewerTier: configurations[0]?.model_tier,
+              extraCriteria: reviewerExtras(packet, configurations),
+              extraVerification: configurations.flatMap((task) => task.verification),
+              ...(waived === undefined ? {} : { waivedCriteria: waived }),
             });
             const reviewerRoute = await deps.router.resolve({ tier: reviewerPacket.model_tier, role: "reviewer" }, signal);
             const reviewHandle = await workers.dispatchReview(reviewerPacket, handle.attemptId, signal, { route: reviewerRoute });
@@ -715,12 +905,20 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
       });
       const spawned: PlanTask[] = [];
       let consulting = false;
+      let triaging: PendingTriage | undefined;
+      // Orchestrator turns (steering consultation, triage) share the run session: one at a time.
+      let orchestratorQueue: Promise<unknown> = Promise.resolve();
+      const orchestratorTurn = <T>(work: () => Promise<T>): Promise<T> => {
+        const next = orchestratorQueue.then(work, work);
+        orchestratorQueue = next.catch(() => undefined);
+        return next;
+      };
       const deny = (code: Extract<DelegationResult, { ok: false }>["code"], message: string): DelegationResult => ({ ok: false, code, message });
       deps.delegation?.set({
         runId,
         spawn(raw, caller) {
           if (caller.role !== "orchestrator" || caller.runId !== runId) return deny("policy_denied", "only the orchestrator of this run delegates tasks");
-          if (!consulting) return deny("execution_failed", "task_spawn is accepted while the orchestrator is consulted at a safe boundary (after user steering)");
+          if (!consulting) return deny("execution_failed", "task_spawn is accepted while the orchestrator is consulted at a safe boundary (after user steering or during a triage)");
           if (spawned.length >= limits.maxSpawnedTasks) return deny("policy_denied", `at most ${limits.maxSpawnedTasks} follow-up task(s) may be spawned per run`);
           const admission = budget.exhausted();
           if (!admission.ok) return deny("policy_denied", `the run budget is exhausted (${admission.metric} ${admission.used} of ${admission.limit}); no task can be added`);
@@ -738,41 +936,36 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           if (selected.length === 0) return deny("invalid_arguments", `unknown task ${task ?? ""}`);
           return { ok: true, text: [`plan ${approvedPlan.plan_id} v${approvedPlan.version}`, ...selected.map(taskLine)].join("\n") };
         },
+        triage(input, caller) {
+          if (caller.role !== "orchestrator" || caller.runId !== runId) return deny("policy_denied", "only the orchestrator of this run triages its tasks");
+          const pending = triaging;
+          if (pending === undefined || (input.task !== pending.key && input.task !== pending.taskId)) {
+            return deny("execution_failed", `no report of task ${input.task} is being triaged${pending === undefined ? "" : `; the report under triage is ${pending.key}`}`);
+          }
+          if (pending.decision !== undefined) return deny("invalid_arguments", `task ${pending.key} is already decided (${pending.decision.kind}); end your turn`);
+          const waive = [...new Set(input.waive_criteria ?? [])];
+          if (input.decision === "accept") {
+            if (!pending.acceptable) return deny("invalid_arguments", `accept is only for read-only tasks that changed nothing; ${pending.key} completes only through verification and review. Choose retry or fail.`);
+            const unknown = waive.filter((id) => !pending.criteria.includes(id));
+            if (unknown.length > 0) return deny("invalid_arguments", `unknown criteria ${unknown.join(", ")}; ${pending.key} has ${pending.criteria.join(", ")}`);
+            if (waive.length >= pending.criteria.length) return deny("invalid_arguments", "at least one criterion must stay evidenced; if nothing useful was found, choose retry or fail");
+            pending.decision = { kind: "accept", waived: waive, guidance: input.guidance };
+          } else if (input.decision === "retry") {
+            if (pending.retriesLeft <= 0) return deny("invalid_arguments", `no retries are left for ${pending.key}; choose accept or fail`);
+            pending.decision = { kind: "retry", guidance: input.guidance };
+          } else {
+            pending.decision = { kind: "fail", guidance: input.guidance };
+          }
+          return { ok: true, text: `decision for ${pending.key} recorded: ${input.decision}${waive.length > 0 ? ` (waived ${waive.join(", ")})` : ""}. End your turn now.` };
+        },
       });
 
       /**
-       * Applies queued user steering at a safe boundary (no dispatch in flight for the affected
-       * tasks): the orchestrator is consulted once, then the plan is re-versioned with the steering
-       * (and any spawned follow-up tasks) and re-approved under the run's policy mode. Only an
-       * approved revision supersedes the running plan; tasks that have not started get its packets.
+       * Re-versions the plan with `notes` (user steering) and `extra` follow-up tasks and re-approves
+       * it under the run's policy mode. Only an approved revision supersedes the running plan; tasks
+       * that have not started get its packets, added tasks join the scheduler.
        */
-      const revise = async (): Promise<void> => {
-        const notes = steering.splice(0);
-        if (notes.length === 0) return;
-        if (deps.planner.consult !== undefined) {
-          consulting = true;
-          try {
-            await deps.planner.consult(
-              {
-                runId,
-                goal: request.goal,
-                planVersion: approvedPlan.version,
-                steering: notes,
-                tasks: [...entries.values()].map(taskLine),
-                route: orchestratorRoute.route,
-                policy: orchestratorPolicy,
-                events: log,
-                sessionId: log.sessionId,
-              },
-              signal,
-            );
-          } catch (error) {
-            notice("warning", `orchestrator consultation failed: ${error instanceof Error ? error.message : String(error)}`);
-          } finally {
-            consulting = false;
-          }
-        }
-        const extra = spawned.splice(0);
+      const applyRevision = async (notes: readonly string[], extra: readonly PlanTask[], cause: string): Promise<void> => {
         const pending = [...entries.values()].some((entry) => scheduler.state(entry.key) === "pending");
         if (!pending && extra.length === 0) {
           notice("info", `steering noted, but no task is left to apply it to: ${notes.join("; ")}`.slice(0, 500));
@@ -808,7 +1001,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           digest: approvedDigest,
           from: "approved",
           to: "superseded",
-          reason: `superseded by ${validation.plan.plan_id} v${validation.plan.version} after user steering`,
+          reason: `superseded by ${validation.plan.plan_id} v${validation.plan.version} after ${cause}`,
         });
         await recorder.record("plan/state_changed", {
           plan_id: validation.plan.plan_id,
@@ -827,6 +1020,41 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           scheduler.add({ key: task.key, dependsOn: task.depends_on, ownedPaths: task.owned_paths, provider: entry.route?.route.provider_id, workspace: request.workspaceRoot });
         }
       };
+
+      /**
+       * Applies queued user steering at a safe boundary (no dispatch in flight for the affected
+       * tasks): the orchestrator is consulted once, then the plan is re-versioned with the steering
+       * (and any spawned follow-up tasks) and re-approved under the run's policy mode.
+       */
+      const revise = (): Promise<void> =>
+        orchestratorTurn(async () => {
+          const notes = steering.splice(0);
+          if (notes.length === 0) return;
+          if (deps.planner.consult !== undefined) {
+            consulting = true;
+            try {
+              await deps.planner.consult(
+                {
+                  runId,
+                  goal: request.goal,
+                  planVersion: approvedPlan.version,
+                  steering: notes,
+                  tasks: [...entries.values()].map(taskLine),
+                  route: orchestratorRoute.route,
+                  policy: orchestratorPolicy,
+                  events: log,
+                  sessionId: log.sessionId,
+                },
+                signal,
+              );
+            } catch (error) {
+              notice("warning", `orchestrator consultation failed: ${error instanceof Error ? error.message : String(error)}`);
+            } finally {
+              consulting = false;
+            }
+          }
+          await applyRevision(notes, spawned.splice(0), "user steering");
+        });
 
       const inflight = new Map<string, Promise<void>>();
       let budgetStop = false;

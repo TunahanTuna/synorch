@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  acceptanceCriterionIdSchema,
   AGENT_ROLES,
   memoryIdSchema,
   planProposalSchema,
@@ -35,6 +36,21 @@ const taskStatusInput = z.strictObject({
 });
 export type TaskStatusInput = z.infer<typeof taskStatusInput>;
 
+/** The orchestrator's decision on a worker's `partial`/`needs_context` report (triage consultation only). */
+export const TRIAGE_DECISIONS = ["accept", "retry", "fail"] as const;
+const taskTriageInput = z.strictObject({
+  task: z.string().trim().min(1).max(200),
+  decision: z.enum(TRIAGE_DECISIONS),
+  waive_criteria: z.array(acceptanceCriterionIdSchema).max(20).optional(),
+  guidance: z.string().trim().min(1).max(2000).optional(),
+});
+export type TaskTriageInput = z.infer<typeof taskTriageInput>;
+
+const loadSkillInput = z.strictObject({
+  name: z.string().trim().min(1).max(100),
+});
+export type LoadSkillInput = z.infer<typeof loadSkillInput>;
+
 /** A proposal only; the memory module (I6) decides and persists (`memoryProposalSchema`). */
 const memoryProposeInput = z.strictObject({
   kind: z.enum(PROPOSAL_KINDS),
@@ -54,6 +70,9 @@ export interface ControlCallbacks {
   readonly askUser?: ControlCallback<AskUserInput>;
   readonly taskSpawn?: ControlCallback<TaskSpawnInput>;
   readonly taskStatus?: ControlCallback<TaskStatusInput>;
+  readonly taskTriage?: ControlCallback<TaskTriageInput>;
+  /** Serves a catalog skill allowed for the caller's role; `.ai/skills/**` is never widened into a task's read scope. */
+  readonly loadSkill?: ControlCallback<LoadSkillInput>;
   readonly memoryPropose?: ControlCallback<MemoryProposeInput>;
   /**
    * Report tools need no callback: the recorded, validated call in the attempt log is the report
@@ -108,6 +127,20 @@ export function createControlTools(callbacks: ControlCallbacks): Tool[] {
       callbacks.taskSpawn,
     ),
     controlTool("task_status", "Report the state of one task, or of every task in the run.", ["orchestrator"], taskStatusInput, callbacks.taskStatus),
+    controlTool(
+      "task_triage",
+      "Decide a worker's partial or needs_context report while the harness consults you: accept (read-only tasks only; waive_criteria lists criteria the role could not meet, they go to dependent tasks as notes), retry (guidance reaches the next attempt) or fail.",
+      ["orchestrator"],
+      taskTriageInput,
+      callbacks.taskTriage,
+    ),
+    controlTool(
+      "load_skill",
+      "Load the full instructions of a skill from your role's skill catalog by name (read-only). Skills are served by the runtime; never read .ai/skills files directly.",
+      [...AGENT_ROLES],
+      loadSkillInput,
+      callbacks.loadSkill,
+    ),
     controlTool("memory_propose", "Propose a memory note, relation or status change; persistence is decided by the memory module.", [...AGENT_ROLES], memoryProposeInput, callbacks.memoryPropose),
   ] as Tool[];
 }

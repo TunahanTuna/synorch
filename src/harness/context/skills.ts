@@ -16,11 +16,13 @@ export interface SkillCatalog {
   list(role?: AgentRole): readonly SkillEntry[] | Promise<readonly SkillEntry[]>;
   /** The full SKILL.md text, or undefined when the skill cannot be loaded (or is not for `role`). */
   load(name: string, role?: AgentRole): Promise<string | undefined>;
+  /** Skills always loaded for `role` (e.g. the ones its agent manifest points at); a subset of `list(role)`. */
+  primary?(role: AgentRole): readonly string[] | Promise<readonly string[]>;
 }
 
 export function renderCatalog(entries: readonly SkillEntry[]): string {
   return [
-    "Available skills (catalog only; a skill's full instructions are provided when it is triggered):",
+    "Available skills (catalog only; your role's skills and triggered skills are provided in full in this context; call load_skill with a name for any other listed skill, never read_file a SKILL.md):",
     ...entries.map((entry) => `- ${entry.name}: ${entry.description}`),
   ].join("\n");
 }

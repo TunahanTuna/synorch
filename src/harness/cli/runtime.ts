@@ -449,6 +449,21 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     classifyCommand: (argv, scope) => classifyCommand(argv, scope),
     control: {
       ...delegationCallbacks(delegation),
+      async loadSkill(input, context) {
+        // Only catalog skills the caller's role may use; this never widens a task's read scope to .ai/**.
+        const text = await canonical.skills.load(input.name, context.role);
+        if (text === undefined) {
+          const available = (await canonical.skills.list(context.role)).map((entry) => entry.name);
+          return {
+            status: "error",
+            text: "",
+            truncated: false,
+            redactions: 0,
+            error: { code: "invalid_arguments", message: `skill ${input.name} is not in the ${context.role} catalog; available: ${available.join(", ") || "none"}`.slice(0, 2000) },
+          };
+        }
+        return { status: "ok", text: text.slice(0, 60 * 1024), truncated: text.length > 60 * 1024, redactions: 0 };
+      },
       async askUser(input, context) {
         const prompt = userPrompt;
         if (context.role !== "orchestrator" || prompt === undefined) {

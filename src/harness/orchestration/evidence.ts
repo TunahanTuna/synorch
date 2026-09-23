@@ -77,18 +77,30 @@ export interface CompletionVerification {
   readonly unevidenced: readonly string[];
 }
 
+export interface CompletionVerificationOptions {
+  /**
+   * Triage acceptance of a read-only task (the orchestrator accepted its findings): these criteria
+   * are waived, and a `partial`/`needs_context` status is accepted. Every other check still applies.
+   */
+  readonly waivedCriteria?: readonly string[];
+}
+
 /** Orchestrator-side verification of a completed attempt against the real diff and the log. */
 export async function verifyCompletion(
   packet: TaskContextPacket,
   completion: CompletionPacket,
   index: EvidenceIndex,
   platform: NodeJS.Platform = process.platform,
+  options: CompletionVerificationOptions = {},
 ): Promise<CompletionVerification> {
   const rejections: string[] = [];
   const revisions: string[] = [];
+  const waived = new Set(options.waivedCriteria ?? []);
+  const triaged = options.waivedCriteria !== undefined;
   if (completion.task_id !== packet.task_id) rejections.push("completion belongs to another task");
   if (completion.packet_digest !== packetDigest(packet)) rejections.push("completion answers another packet version");
-  if (completion.status !== "completed") rejections.push(`status is ${completion.status}`);
+  const accepted = completion.status === "completed" || (triaged && packet.write_mode !== "owned-paths" && (completion.status === "partial" || completion.status === "needs_context"));
+  if (!accepted) rejections.push(`status is ${completion.status}`);
 
   const changed = index.changedPaths;
   if (packet.write_mode !== "owned-paths" && changed.length > 0) {
@@ -111,6 +123,7 @@ export async function verifyCompletion(
   const known = new Set(packet.acceptance_criteria.map((criterion) => criterion.id));
   const unevidenced: string[] = [];
   for (const criterion of packet.acceptance_criteria) {
+    if (waived.has(criterion.id)) continue;
     const entry = completion.acceptance_evidence.find((candidate) => candidate.criterion_id === criterion.id);
     const resolved: string[] = [];
     const failures: string[] = [];

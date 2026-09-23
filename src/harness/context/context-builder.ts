@@ -196,7 +196,7 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
 
   const baseBlocks = async (input: ContextBuildInput, history: History, signal: AbortSignal): Promise<{ blocks: DraftBlock[]; memories: RecalledMemory[] }> => {
     const blocks: DraftBlock[] = [
-      { id: `harness:${input.role}`, source: "harness", trust: "harness", text: harnessInstructions(input.role), truncated: false, optional: false },
+      { id: `harness:${input.role}`, source: "harness", trust: "harness", text: harnessInstructions(input.role, { mode: input.policy.mode, route: input.route }), truncated: false, optional: false },
     ];
     const project = deps.instructions;
     if (project?.constitution !== undefined) {
@@ -204,6 +204,9 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
     }
     for (const protocol of project?.protocols ?? []) {
       blocks.push({ id: `protocol:${protocol.id}`, source: "protocol", trust: "project", text: protocol.text, truncated: false, optional: false });
+    }
+    if (project?.entrypoint !== undefined) {
+      blocks.push({ id: `entrypoint:${project.entrypoint.path}`, source: "protocol", trust: "project", text: project.entrypoint.text, truncated: false, optional: true });
     }
     const roleText = project?.roles?.[input.role];
     if (roleText !== undefined) {
@@ -218,7 +221,10 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
       const entries = [...(await deps.skills.list(input.role))].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       if (entries.length > 0) {
         blocks.push({ id: "skill-catalog", source: "skill-catalog", trust: "project", text: renderCatalog(entries), truncated: false, optional: true });
-        for (const entry of triggeredSkills(entries, taskText)) {
+        // The role's own skills (named by its manifest) and triggered ones come through context, never through read_file.
+        const primary = new Set((await deps.skills.primary?.(input.role)) ?? []);
+        const loaded = [...entries.filter((entry) => primary.has(entry.name)), ...triggeredSkills(entries, taskText).filter((entry) => !primary.has(entry.name))];
+        for (const entry of loaded) {
           const text = await deps.skills.load(entry.name, input.role);
           if (text !== undefined) blocks.push({ id: `skill:${entry.name}`, source: "skill", trust: "project", text, truncated: false, optional: true });
         }

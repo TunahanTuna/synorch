@@ -330,16 +330,16 @@ Only the orchestrator speaks to the user. Lead with outcomes and decisions. Ask 
 const openAiProfile = `schema_version: 1
 provider: openai
 defaults:
-  orchestrator: gpt-6-astra
-  complex_worker: gpt-5.6-sol
-  fast_worker: gpt-5.6-luna
+  orchestrator: gpt-6-sol
+  complex_worker: gpt-6-sol
+  fast_worker: gpt-6-luna
 `;
 
 const claudeProfile = `schema_version: 1
 provider: claude
 defaults:
-  orchestrator: fable-5
-  complex_worker: opus-5
+  orchestrator: opus-5.5
+  complex_worker: opus-5.5
   fast_worker: sonnet-5
 `;
 

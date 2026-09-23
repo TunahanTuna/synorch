@@ -1,7 +1,7 @@
 # Synorch — Architecture and Implemented Structure
 
 > Status: The executable core is implemented
-> Last updated: 2026-09-20
+> Last updated: 2026-09-23
 > Purpose: Establish an orchestrator-centric, agent/skill/protocol-based and token-efficient development organization that runs on Codex and Claude Code.
 
 ## 1. Product Definition
@@ -387,23 +387,23 @@ model_tiers:
       - low_cost
 ```
 
-The initial mapping for OpenAI:
+The current default mapping for OpenAI:
 
 ```yaml
 provider: openai
 defaults:
-  orchestrator: gpt-6-astra
-  complex_worker: gpt-5.6-sol
-  fast_worker: gpt-5.6-luna
+  orchestrator: gpt-6-sol
+  complex_worker: gpt-6-sol
+  fast_worker: gpt-6-luna
 ```
 
-The initial mapping for Claude, as determined by the user:
+The current default mapping for Claude, as determined by the user:
 
 ```yaml
 provider: claude
 defaults:
-  orchestrator: fable-5
-  complex_worker: opus-5
+  orchestrator: opus-5.5
+  complex_worker: opus-5.5
   fast_worker: sonnet-5
 ```
 
@@ -428,13 +428,13 @@ Example canonical configuration:
 ```yaml
 model_profiles:
   openai:
-    orchestrator: gpt-6-astra
-    complex_worker: gpt-5.6-sol
-    fast_worker: gpt-5.6-luna
+    orchestrator: gpt-6-sol
+    complex_worker: gpt-6-sol
+    fast_worker: gpt-6-luna
 
   claude:
-    orchestrator: fable-5
-    complex_worker: opus-5
+    orchestrator: opus-5.5
+    complex_worker: opus-5.5
     fast_worker: sonnet-5
 
 routing:
@@ -825,6 +825,11 @@ The system should be considered successful if:
 - Provider constraints are not hidden from the user.
 
 ## 18. Decision Log
+
+### 2026-09-23 — Updated model profiles
+
+- OpenAI default profile: orchestrator and complex worker `gpt-6-sol`, fast worker `gpt-6-luna`.
+- Claude default profile: orchestrator and complex worker `opus-5.5`, fast worker `sonnet-5`.
 
 ### 2026-09-20 — Orchestration and model profiles
 

@@ -98,7 +98,7 @@ function steeringRuntime(workspace: Awaited<ReturnType<typeof createTempWorkspac
     script: async (context) => {
       const key = context.input.packet?.objective.replace("Do ", "") ?? "";
       if (key === "a") {
-        early = slot.current()?.spawn(planTask("x", "docs/x.md", []), { runId: context.input.runId, role: "orchestrator", toolCallId: "call_early" });
+        early = slot.current()?.spawn(planTask("x", "docs/x.md", []), { runId: context.input.runId!, role: "orchestrator", toolCallId: "call_early" });
         runtime?.coordinator.steer("prefer tabs over spaces");
       }
       await context.write(`docs/${key}.md`, `${key} done\n`);

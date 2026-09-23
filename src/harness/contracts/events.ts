@@ -423,6 +423,32 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
       sandbox_enforcement: z.enum(SANDBOX_ENFORCEMENT),
     }),
   ),
+  /**
+   * ADR-21 D6: the conversation agent's per-edit checkpoint. `before` is the pre-image blob (null:
+   * the file did not exist), `after` the workspace digest the edit left (null: deleted). `/undo`
+   * restores `before` only while the file still has the `after` digest.
+   */
+  eventOf(
+    "checkpoint/recorded",
+    z.strictObject({
+      turn_id: turnIdSchema.optional(),
+      tool_call_id: toolCallIdSchema,
+      files: z
+        .array(z.strictObject({ path: pathPatternSchema, before: blobRefSchema.nullable(), after: digestSchema.nullable() }))
+        .min(1)
+        .max(64),
+    }),
+  ),
+  eventOf(
+    "checkpoint/restored",
+    z.strictObject({
+      checkpoint_seq: z.int().min(1),
+      restored: z.array(pathPatternSchema).max(64),
+      skipped: z.array(z.strictObject({ path: pathPatternSchema, reason: z.string().min(1).max(500) })).max(64),
+    }),
+  ),
+  /** `/allow <prefix>`: the user extended the conversation agent's exec allowlist for this workspace (user scope). */
+  eventOf("command/allowed", z.strictObject({ workspace_root: trustRootSchema, prefix: z.string().min(1).max(500) })),
 ]);
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
 export type SessionEventType = SessionEvent["type"];

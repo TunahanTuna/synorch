@@ -148,11 +148,11 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
         ...body,
         event_version: EVENT_VERSIONS[body.type],
         actor: {
-          kind: scope.actor === "system" ? "system" : scope.role === "orchestrator" ? "orchestrator" : "worker",
+          kind: scope.actor === "system" ? "system" : scope.role === "orchestrator" ? "orchestrator" : scope.role === "session" ? "agent" : "worker",
           role: scope.role,
           ...(scope.attemptId === undefined ? {} : { attempt_id: scope.attemptId }),
         },
-        run_id: scope.runId,
+        ...(scope.runId === undefined ? {} : { run_id: scope.runId }),
         ...(scope.taskId === undefined ? {} : { task_id: scope.taskId }),
         ...(scope.attemptId === undefined ? {} : { attempt_id: scope.attemptId }),
         ...(causation === undefined ? {} : { causation_seq: causation }),
@@ -358,7 +358,7 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
   ): Promise<ApprovalDecision> {
     const request = approvalRequestSchema.parse({
       approval_id: createId("approval"),
-      run_id: scope.runId,
+      ...(scope.runId === undefined ? {} : { run_id: scope.runId }),
       task_id: scope.taskId,
       subject_kind: "action",
       subject_digest: decision.action_digest,

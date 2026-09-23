@@ -6,6 +6,7 @@ import {
   type PolicyMode,
   type RenderEvent,
   type RunId,
+  type SessionEvent,
   type SessionHeaderView,
   type SessionId,
   type TerminalRenderer,
@@ -18,8 +19,10 @@ import {
   JsonlRenderer,
   PlainLineRenderer,
   type FrameSink,
+  type GlyphSet,
   type GuardProcess,
   type InputStream,
+  type PiTuiRendererOptions,
   type ResultData,
 } from "../tui/index.ts";
 
@@ -38,6 +41,8 @@ export interface RendererIO {
   readonly platform: NodeJS.Platform;
   /** The real process (signal hooks, terminal restore); absent in tests. */
   readonly process: GuardProcess | undefined;
+  /** A terminal for the interactive renderer instead of the process console (virtual-terminal tests and smoke runs). */
+  readonly terminal?: PiTuiRendererOptions["terminal"];
 }
 
 export interface RendererRequest {
@@ -52,6 +57,10 @@ export interface RendererRequest {
   readonly fallbackSessionId: SessionId | undefined;
   readonly onInterrupt: () => void;
   readonly onExit: () => void;
+  /** `conversation`: the quiet conversation view of `syn agent` (ADR-21). */
+  readonly view?: "events" | "conversation";
+  readonly glyphs?: GlyphSet;
+  readonly debug?: boolean;
 }
 
 export interface SessionRenderer extends TerminalRenderer {
@@ -59,6 +68,8 @@ export interface SessionRenderer extends TerminalRenderer {
   result(data: ResultData): Promise<void>;
   fail(error: HarnessErrorInfo): Promise<void>;
   readonly exitCode: number | undefined;
+  /** Conversation view: draws the earlier messages of a resumed conversation. */
+  replay?(events: readonly SessionEvent[]): void;
 }
 
 export class DeferredJsonlRenderer implements SessionRenderer {
@@ -167,6 +178,10 @@ class HumanRenderer implements SessionRenderer {
     this.inner.render(event);
   }
 
+  public replay(events: readonly SessionEvent[]): void {
+    (this.inner as { replay?: (events: readonly SessionEvent[]) => void }).replay?.(events);
+  }
+
   public async result(): Promise<void> {}
 
   public async fail(): Promise<void> {}
@@ -203,6 +218,10 @@ export async function createSessionRenderer(io: RendererIO, request: RendererReq
         onInterrupt: request.onInterrupt,
         onExit: request.onExit,
         ...(lifecycle === undefined ? {} : { lifecycle }),
+        ...(request.view === undefined ? {} : { view: request.view }),
+        ...(request.glyphs === undefined ? {} : { glyphs: request.glyphs }),
+        ...(request.debug === undefined ? {} : { debug: request.debug }),
+        ...(io.terminal === undefined ? {} : { terminal: io.terminal }),
       }),
     );
   }
@@ -218,6 +237,9 @@ export async function createSessionRenderer(io: RendererIO, request: RendererReq
       onInterrupt: request.onInterrupt,
       onExit: request.onExit,
       ...(lifecycle === undefined ? {} : { lifecycle }),
+      ...(request.view === undefined ? {} : { view: request.view }),
+      ...(request.glyphs === undefined ? {} : { glyphs: request.glyphs }),
+      ...(request.debug === undefined ? {} : { debug: request.debug }),
     }),
   );
 }

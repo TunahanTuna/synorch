@@ -120,7 +120,7 @@ export function createControlTools(callbacks: ControlCallbacks): Tool[] {
     controlTool(
       "ask_user",
       "Ask the user a question and wait for the answer. Unavailable in headless runs.",
-      ["orchestrator"],
+      ["orchestrator", "session"],
       askUserInput,
       callbacks.askUser,
       "approval_unavailable",

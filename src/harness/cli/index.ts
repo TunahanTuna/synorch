@@ -16,7 +16,7 @@ import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createAuthCommand } from "../auth/index.ts";
 import { createMemoryCommand, resolveMemoryRoot } from "../memory/index.ts";
 import { createSessionStore } from "../store/index.ts";
-import { formatHarnessError, JsonlRenderer, PlainLineRenderer, type FrameSink, type GuardProcess, type InputStream } from "../tui/index.ts";
+import { formatHarnessError, JsonlRenderer, PlainLineRenderer, type FrameSink, type GuardProcess, type InputStream, type PiTuiRendererOptions } from "../tui/index.ts";
 import { parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";
 import { loadRuntimeConfig, resolveHome } from "./config.ts";
 import { doctorRuntime } from "./doctor.ts";
@@ -24,6 +24,7 @@ import { commandHelp } from "./help.ts";
 import { runsCommand, showCommand } from "./inspect.ts";
 import { failureInfo } from "./outcome.ts";
 import type { RuntimeOverrides } from "./runtime.ts";
+import { conversationCommand } from "./conversation.ts";
 import { agentCommand, runCommand, type SessionIO } from "./session.ts";
 import { resolveTerminalSettings, streamHasColors, type TerminalSettings } from "./terminal.ts";
 import { trustCommand } from "./trust.ts";
@@ -77,6 +78,8 @@ export interface HarnessProcessIO {
   /** The real process, for signal hooks and terminal restoration. */
   readonly process?: GuardProcess;
   readonly platform?: NodeJS.Platform;
+  /** A terminal for the interactive renderer instead of the process console (virtual-terminal tests and smoke runs). */
+  readonly terminal?: PiTuiRendererOptions["terminal"];
 }
 
 function processIO(): HarnessProcessIO {
@@ -202,8 +205,10 @@ async function dispatch(parsed: Exclude<ParsedCommand, { kind: "help" }>, io: Ha
         platform,
         process: io.process,
         signal: io.signal,
+        ...(io.terminal === undefined ? {} : { terminal: io.terminal }),
       };
-      return parsed.kind === "run" ? runCommand(parsed, sessionIO, overrides) : agentCommand(parsed, sessionIO, overrides);
+      if (parsed.kind === "run") return runCommand(parsed, sessionIO, overrides);
+      return parsed.legacy ? agentCommand(parsed, sessionIO, overrides) : conversationCommand(parsed, sessionIO, overrides);
     }
     case "runs":
     case "show": {

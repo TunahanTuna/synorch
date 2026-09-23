@@ -14,6 +14,7 @@ import type {
 } from "../contracts/index.ts";
 import { WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
 import { HeadlessApprovalBroker, withApprovalDeadline, type ApprovalChoice } from "./approvals.ts";
+import { ConversationPresenter, GLYPH_SETS, headerLines, type GlyphSet, type ViewOp } from "./conversation-view.ts";
 import { HeadlessAuthInteraction, LineAuthInteraction } from "./auth-interaction.ts";
 import { describeEvent, levelPrefix, type EventLine } from "./describe.ts";
 import { INTERRUPT_NOTICES, InterruptController, type InterruptAction, type InterruptKey } from "./interrupt.ts";
@@ -58,6 +59,10 @@ export interface PlainLineRendererOptions {
   readonly clock?: () => Date;
   readonly queueCapacity?: number;
   readonly schedule?: (flush: () => void) => void;
+  /** `conversation`: the labelled conversation lines of `syn agent` (TUI experience §12). Default: the event lines. */
+  readonly view?: "events" | "conversation";
+  readonly glyphs?: GlyphSet;
+  readonly debug?: boolean;
 }
 
 const ANNOUNCED_STATUSES: ReadonlySet<ToolCardStatus> = new Set(["proposed", "denied", "running", "succeeded", "failed", "cancelled", "interrupted"]);
@@ -87,9 +92,14 @@ export class PlainLineRenderer implements TerminalRenderer {
   private requestActive = false;
   private guard: TerminalGuard | undefined;
   private stopped = false;
+  private readonly presenter: ConversationPresenter | undefined;
+  /** Conversation view: characters of each streamed assistant item already written. */
+  private readonly written = new Map<string, number>();
+  private readonly toolsShown = new Set<string>();
 
   public constructor(options: PlainLineRendererOptions) {
     this.options = options;
+    this.presenter = options.view === "conversation" ? new ConversationPresenter({ glyphs: options.glyphs ?? GLYPH_SETS.ascii, echoesUser: false, debug: options.debug === true }) : undefined;
     this.style = createStyler(options.color);
     this.clock = options.clock ?? (() => new Date());
     this.lines = options.input === undefined ? undefined : new LineSource(options.input);
@@ -127,6 +137,23 @@ export class PlainLineRenderer implements TerminalRenderer {
         handleSigint: true,
       });
     }
+    if (this.presenter !== undefined) {
+      const folder = header.workspaceRoot.split(/[\\/]/).filter((part) => part !== "").at(-1) ?? header.workspaceRoot;
+      this.presenter.configure({ model: header.model, contextWindowTokens: header.contextWindowTokens });
+      const { title, warning } = headerLines({
+        version: header.version ?? "",
+        folder,
+        branch: header.gitBranch,
+        model: header.model,
+        mode: header.policyMode,
+        sandboxEnforcement: header.sandboxEnforcement,
+        warnings: header.notices,
+        glyphs: this.presenter.glyphs,
+      });
+      this.writeLine(title);
+      if (warning !== undefined) this.writeErrLine(`warning: ${warning.replace(/^! /, "")}`);
+      return;
+    }
     const out: string[] = [`${this.style.bold("Synorch")} ${header.workspaceRoot}${header.gitBranch === undefined ? "" : ` (${header.gitBranch})`}`];
     out.push(`Policy: ${header.policyMode}; sandbox: ${header.sandboxEnforcement}`);
     for (const route of header.routes) out.push(`Route ${route.tier}: ${route.model} (${route.source})`);
@@ -139,11 +166,49 @@ export class PlainLineRenderer implements TerminalRenderer {
     this.queue.push(event);
   }
 
+  /** Conversation view: prints the earlier messages of a resumed conversation. */
+  public replay(events: readonly SessionEvent[]): void {
+    if (this.presenter === undefined) return;
+    this.queue.flush();
+    for (const op of this.presenter.replay(events)) this.printOp(op);
+  }
+
+  private printOp(op: ViewOp): void {
+    const item = op.item;
+    switch (item.kind) {
+      case "user":
+        this.writeLine(`you: ${item.text.replaceAll("\n", "\n     ")}`);
+        return;
+      case "assistant": {
+        const shown = this.written.get(item.id);
+        if (shown === undefined) {
+          this.closeLine();
+          this.writeText(`synorch: ${item.text}`);
+        } else {
+          this.writeText(item.text.slice(shown));
+        }
+        this.written.set(item.id, item.text.length);
+        if (item.done) this.closeLine();
+        return;
+      }
+      case "tool": {
+        if (item.status === "running" || this.toolsShown.has(`${item.id}:${item.status}:${item.title}`)) return;
+        this.toolsShown.add(`${item.id}:${item.status}:${item.title}`);
+        this.writeLine(`tool: ${item.title}${item.summary === undefined ? "" : ` - ${item.summary}`}`);
+        return;
+      }
+      case "note":
+        if (item.level === "warning" || item.level === "error") this.writeErrLine(`${item.level}: ${item.text.replace(/^[!x] /, "")}`);
+        else this.writeLine(this.style.dim(item.text));
+        return;
+    }
+  }
+
   /** Applies Ctrl+C / Esc (or SIGINT) semantics; exposed for the CLI and tests. */
   public interrupt(key: InterruptKey, now: number = Date.now()): InterruptAction {
     const action = this.interrupts.press(key, now);
     if (action === "cancel-request") {
-      this.notice("warning", INTERRUPT_NOTICES.cancelled);
+      if (this.presenter === undefined) this.notice("warning", INTERRUPT_NOTICES.cancelled);
       this.options.onInterrupt?.();
       this.deliverInterruption({ kind: "interrupt" });
     } else if (action === "offer-exit") {
@@ -166,6 +231,12 @@ export class PlainLineRenderer implements TerminalRenderer {
   }
 
   private consume(event: RenderEvent): void {
+    if (this.presenter !== undefined) {
+      if (event.kind === "session-event" && event.event.type === "turn/started") this.setTurnActive(true);
+      if (event.kind === "session-event" && event.event.type === "turn/ended") this.setTurnActive(false);
+      for (const op of this.presenter.apply(event)) this.printOp(op);
+      return;
+    }
     switch (event.kind) {
       case "session-event":
         this.onSessionEvent(event.event);

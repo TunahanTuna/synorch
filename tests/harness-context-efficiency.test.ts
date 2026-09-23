@@ -120,7 +120,7 @@ async function newSession() {
   return { sessions, blobs, store, sessionId };
 }
 
-async function append(store: EventStore, type: SessionEventDraft["type"], data: unknown, actor: Actor, correlation: { runId: string; taskId?: TaskId; attemptId?: AttemptId }): Promise<void> {
+async function append(store: EventStore, type: SessionEventDraft["type"], data: unknown, actor: Actor, correlation: { runId: string | undefined; taskId?: TaskId; attemptId?: AttemptId }): Promise<void> {
   await store.append({
     type,
     data,

@@ -31,6 +31,10 @@ export interface SessionHeaderView {
   readonly routes: readonly { readonly tier: string; readonly model: string; readonly source: string }[];
   readonly sandboxEnforcement: "full" | "partial" | "unavailable";
   readonly notices: readonly string[];
+  /** Conversation view (ADR-21): harness version, the conversation model's short name and its context window. */
+  readonly version?: string;
+  readonly model?: string;
+  readonly contextWindowTokens?: number;
 }
 
 export type RenderEvent =

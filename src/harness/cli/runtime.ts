@@ -16,6 +16,7 @@ import {
   type BlobStore,
   type Coordinator,
   type CredentialResolver,
+  type EffectivePolicy,
   type EventStore,
   type MemoryStore,
   type ModelRouter,
@@ -173,6 +174,13 @@ export interface Runtime {
   /** The approval broker for a session: the renderer's interactive broker in `ask` mode, the headless one otherwise. */
   brokerFor(interactive: ApprovalBroker | undefined): ApprovalBroker;
   createDriver(broker: ApprovalBroker): (events: EventStore) => AgentDriver;
+  /**
+   * The conversation agent's driver over its session log (ADR-21 D1): the same fixed loop and tool
+   * gateway as every role; `wrap` decorates the gateway (per-edit checkpoints, trust at first exec).
+   */
+  createSessionDriver(broker: ApprovalBroker, events: EventStore, wrap: (gateway: ToolGateway) => ToolGateway): AgentDriver;
+  /** The conversation agent's effective policy (ADR-21 D3); recomputed after a trust decision or an /allow grant. */
+  sessionPolicy(commandGrants: readonly string[]): EffectivePolicy;
   createCoordinator(broker: ApprovalBroker): Coordinator;
   /** Crash recovery of a session and of every attempt session it started; nothing is re-executed. */
   recover(sessionId: SessionId): Promise<readonly RecoveryReport[]>;
@@ -474,7 +482,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       loadSkill: createSkillLoadCallback({ skills: canonical.skills, registry: skillContext }),
       async askUser(input, context) {
         const prompt = userPrompt;
-        if (context.role !== "orchestrator" || prompt === undefined) {
+        if ((context.role !== "orchestrator" && context.role !== "session") || prompt === undefined) {
           return {
             status: "error",
             text: "",
@@ -634,6 +642,32 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       return createHeadlessApprovalBroker({ mode: options.policyMode });
     },
     createDriver,
+    createSessionDriver(broker, events, wrap) {
+      return createAgentDriver({
+        events,
+        blobs,
+        router,
+        context,
+        tools: registry,
+        gateway: wrap(createToolGateway({ events, blobs, registry, policy, approvals: broker, sandbox: runner, redactionValues: () => [...redactionValues], platform })),
+        credentials,
+      });
+    },
+    sessionPolicy(commandGrants) {
+      return policy.compute({
+        mode: options.policyMode,
+        role: "session",
+        runId: undefined,
+        taskId: undefined,
+        workspaceRoot,
+        taskScope: undefined,
+        userConfig,
+        workspaceConfig,
+        sandbox,
+        grants: [],
+        commandGrants,
+      });
+    },
     createCoordinator(broker) {
       const driverFor = createDriver(broker);
       return createCoordinator({

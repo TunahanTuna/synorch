@@ -177,3 +177,32 @@ UI metni İngilizce, cevaplar kullanıcının dilinde; ana ajan büyük işte wo
 3. **Argümansız `syn`:** TTY'de bir depoda argümansız `syn` doğrudan ajanı açsın mı (legacy yardım `syn --help`'te kalır)?
 4. **Ana ajan modeli:** Orchestrator tier modeli mi kullanılsın, yoksa sohbet hızı için ayrı bir `session` route'u (hızlı model) mu önerilsin?
 5. **Arka plan orkestrasyonu (UX-GATE-02):** v1'de run ana ajan turunun içinde sürer (pano canlı, Enter = steer, Esc Esc = durdur; ana ajan run sırasında yazmadığı için yazma sahipliği çakışmaz). Run sürerken serbest sohbet (arka plan run, `/cancel`, run görevlerinin yollarına ana ajan yazma yasağı) K3'e istenir mi?
+
+## HD çözümleri (orchestrator, 2026-09-23)
+
+Statü ürün sahibi dikey dilimi deneyene kadar `Proposed` kalır. [harness-context.yaml](../harness-context.yaml) açık kararları için orchestrator'ın aldığı çözümler (bu ADR'nin D1–D10'uyla aynı yönde, ek olarak):
+
+| Karar | Çözüm |
+| --- | --- |
+| HD-01 | Yeni `session` rolü ürün dosyalarını çalışma alanında doğrudan, policy altında yazar: sahip olunan kapsam = çalışma alanı eksi ayrılmış yollar (ve rol manifestleri); depo kodu çalıştıran exec güven kapısından geçer; rail'ler değişmez. |
+| HD-02 | Her mesaj bir turdur; run yalnız orkestrasyonla açılır. |
+| HD-03 | Açık kalır (Windows OS sandbox'ı sonraki iş, ADR-06). |
+| HD-04 | Doğrudan düzenlemeler "not independently reviewed" olarak etiketlenir; bağımsız review `/review` ile isteğe bağlıdır (K3). |
+| HD-05 / UX-GATE-01 | Güven, açılışta değil depo kodu çalıştıran ilk exec'te sorulur. |
+| UX-GATE-02 | Run sürerken serbest sohbet K3'e ertelendi. |
+
+## Açık sorulara bağlayıcı cevaplar (orchestrator, 2026-09-23)
+
+1. **Komut izni:** otonom modda eylem başına onay sorusu **yok**. Allowlist dışı komut reddedilir ve ret satırı yazılacak tam komutu gösterir (`/allow <önek>`). `/allow` kullanıcı kapsamında kalıcıdır (`<synorch home>/command-grants.json`), `command/allowed` ile denetlenir; hard rail, yıkıcı komut kuralı, git mutasyon reddi ve güven kapısı gevşemez ([policy ve onay §8](../contracts/policy-and-approval.md#8-konuşma-ajanı-session-adr-21)). Güven sorusu ilk depo-kodu exec'inde görünür, açılışta değil.
+2. **`/commit`:** insan onaylı `/commit` K2'de.
+3. **Argümansız `syn`:** etkileşimli TTY'de ajanı açar (`claude` gibi); TTY olmayan çağrı legacy yardımı bayt bayt aynı basar (legacy snapshot değişmez).
+4. **Model:** yeni `session` route tier'ı (`routes: - {tier: session, …}` veya `--profile session=…`); yapılandırılmamışsa orchestrator route'u kullanılır. Bu, D1'deki "yeni tier yok" cümlesinin yerine geçer; plan görevleri `session` tier'ını adlandıramaz (`taskModelTierSchema`).
+5. **Arka plan orkestrasyonu:** K3.
+
+## K0 uygulama notu (dikey dilim)
+
+- `syn agent` yeni yoldadır (`cli/conversation.ts`); `syn agent --legacy` eski orkestre oturumu K0 onayına kadar sunar, mevcut agent e2e testleri `--legacy` ile aynen geçer. `syn run` K0'da değişmez (konuşma eşlemesi ve JSONL `turn` frame'i K1c).
+- Düzenleme başına checkpoint + `/undo` (D6'nın tur yerine düzenleme granülerliği; tekrarlanan `/undo` geriye yürür). Kirli ağaçta kullanıcının değiştirdiği dosya `/undo`'da atlanır ve söylenir.
+- `/plan <hedef>` K0'da mevcut coordinator yolunu ayrı run oturumunda çalıştırır ve kısa bir özet basar; konuşmaya gömülü canlı pano ve `orchestrate` aracı K1/K2.
+- Çalışırken yazılan mesaj TUI'da kuyruğa alınır ve sonraki tur olur (sürücü `steer`'i K1'de); `ask_user` bekleyen soruya yazılan mesaj cevaptır.
+

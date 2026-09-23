@@ -71,7 +71,7 @@ export function createExecTool(options: ProcessToolOptions): Tool<ExecInput> {
     timeout_ms: 600_000,
     cancellable: true,
     concurrency: "sequential",
-    visible_to: ["implementer", "debugger", "reviewer"],
+    visible_to: ["implementer", "debugger", "reviewer", "session"],
   });
   const memo = new NormalizedMemo<string>();
   return defineTool(metadata, execInput, {

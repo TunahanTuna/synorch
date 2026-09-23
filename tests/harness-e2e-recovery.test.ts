@@ -107,7 +107,7 @@ test("crash after tool/execution_started: resume records tool/interrupted and ne
     const attemptSession = crashed.session_id;
 
     const resume = capture({ cwd: sandbox.workspace, stdin: new EndingInput() });
-    const code = await runHarnessCommand(["agent", "--resume", hello.data.session_id, "--plain"], resume.io, overridesFor(sandbox));
+    const code = await runHarnessCommand(["agent", "--legacy", "--resume", hello.data.session_id, "--plain"], resume.io, overridesFor(sandbox));
     assert.equal(code, 0, resume.stderr());
     assert.match(resume.stdout(), /1 tool call\(s\) interrupted with unknown outcome \(not re-run\)/);
 
@@ -125,7 +125,7 @@ test("crash after tool/execution_started: resume records tool/interrupted and ne
     assert.equal(eventsOf(runLog, "run/state_changed").at(-1)?.data.to, "interrupted");
 
     const again = capture({ cwd: sandbox.workspace, stdin: new EndingInput() });
-    assert.equal(await runHarnessCommand(["agent", "--resume", hello.data.session_id, "--plain"], again.io, overridesFor(sandbox)), 0, again.stderr());
+    assert.equal(await runHarnessCommand(["agent", "--legacy", "--resume", hello.data.session_id, "--plain"], again.io, overridesFor(sandbox)), 0, again.stderr());
     assert.equal(eventsOf(await readSession(sandbox.home, attemptSession), "tool/interrupted").length, 1, "a second resume recovers nothing twice");
   } finally {
     if (orphan !== undefined) {

@@ -76,5 +76,5 @@ export const WORKER_REPORT_INSTRUCTIONS = [
 export const REVIEWER_REPORT_INSTRUCTIONS = [
   `Finish by calling the \`${REPORT_TOOL_NAMES.review}\` tool exactly once with a verdict (met|not_met|unverifiable) per criterion,`,
   "findings (F-<n>, blocker|major|minor|info) and decision accept|revise|block. If the tool is unavailable, reply with the same object in one ```json block.",
-  'A met verdict needs independent evidence: a tool call you made in this review (ref "#n", produced_by: reviewer) or a harness record from the completion packet\'s harness_evidence (kind harness-verification or harness-diff, its ref, produced_by: harness). Worker evidence alone is not enough.',
+  'A met verdict needs independent evidence: a tool call you made in this review (ref "#n", produced_by: reviewer) or a passed harness-verification record not marked [supporting only] (its ref, produced_by: harness). Worker evidence, a harness-diff or a read-only check alone is not enough; with no such record, run the check yourself.',
 ].join("\n");

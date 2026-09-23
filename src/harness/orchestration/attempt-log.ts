@@ -109,8 +109,16 @@ export async function buildAttemptLog(sessionId: SessionId, events: readonly Ses
   const argumentsOf = new Map<string, Readonly<Record<string, unknown>>>();
   const ordinals = new Map<number, string>();
   let proposed = 0;
+  // Harness-initiated calls (the verification runs, `actor.kind: system`) are the harness's facts,
+  // recorded as `harness_evidence`; they are never a model's tool calls or evidence.
+  const systemCalls = new Set<string>();
   for (const event of events) {
     eventTypes.set(event.seq, event.type);
+    if (event.type.startsWith("tool/") && "tool_call_id" in event.data) {
+      const id = (event.data as { readonly tool_call_id: string }).tool_call_id;
+      if (event.type === "tool/call_proposed" && event.actor.kind === "system") systemCalls.add(id);
+      if (systemCalls.has(id)) continue;
+    }
     switch (event.type) {
       case "tool/call_proposed": {
         proposed += 1;

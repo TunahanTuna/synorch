@@ -92,6 +92,12 @@ export const effectivePolicySchema = z
      * (verification and build/test commands) need it.
      */
     workspace_trusted: z.boolean().optional(),
+    /**
+     * Dependency directories linked into the attempt worktree from the main tree (ADR-19). They are
+     * in `forbidden` too; while any exist, commands that install, add, remove or update
+     * dependencies are denied (`dependency-mutation-in-linked-worktree`). Absent means none.
+     */
+    dependency_links: z.array(pathPatternSchema).max(64).optional(),
     layers: z
       .array(z.strictObject({ layer: z.enum(POLICY_LAYERS), source: z.string().min(1), digest: digestSchema }))
       .min(1),
@@ -288,6 +294,8 @@ export interface PolicyInputs {
         readonly forbidden: readonly string[];
         /** The packet's exact verification commands; the only exec a partial sandbox allows beyond the vetted list. */
         readonly verification_commands?: readonly string[];
+        /** Dependency directories linked into the attempt worktree (ADR-19); see `EffectivePolicy.dependency_links`. */
+        readonly dependency_links?: readonly string[];
       }
     | undefined;
   readonly userConfig: unknown;

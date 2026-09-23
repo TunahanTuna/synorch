@@ -25,7 +25,7 @@ Accepted
 - **Rol başına protokol ve araç alt kümeleri.** ContextBuilder her role yalnız ilgili protokolleri verir (worker'a orkestrasyon/planlama/delegasyon/model yönlendirme protokolleri gitmez); harness, anayasa ve rol metni arasındaki tekrarlar kısaltılır. Araç listesi rol ve görev biçimine göre daraltılır; `task_report`/`plan_propose` şema açıklamaları kısaltılır; orchestrator'ın ilk mesajındaki plan JSON şablonu (zaten `plan_propose` şemasında) kaldırılır.
 - **Skill'ler bir kez.** Birincil skill sisteme enjekte edilir; zaten bağlamda olan skill için `load_skill` "already in your context" döner ve içeriği tekrar etmez; aynı skill ikinci kez yüklenmez; triyaj turuna skill verilmez.
 - **Kompakt paket ve satır içi kaynaklar.** Model görünümünde paket boş alanları, `expected_report` listesini ve modele gerekmeyen kimlik/digest alanlarını atar; delta notları `decisions`'a kopyalanmaz. Küçük read_paths dosyaları pakete `context.inline_sources` olarak satır içi girer (dosya başına ≤ 8 KiB, toplam ≤ 32 KiB, her biri aynı digest'le `sources`'ta).
-- **Sınırlı araç çıktısı.** Modele gösterilen `read_file`/`exec` metni 32 KiB'la sınırlıdır (baş + son); tamamı blob'ta kalır ve "truncated; use offset/limit" notu eklenir.
+- **Sınırlı araç çıktısı.** Modele gösterilen `read_file`/`exec` metni 16 KiB'la sınırlıdır (`ToolResult.text` üst sınırı) (baş + son); tamamı blob'ta kalır ve "truncated; use offset/limit" notu eklenir.
 - **Adım bütçesi.** Görev başı adım bütçesi yalnız dispatch edilen görevlere bölünür, alt sınır 25'tir; kontrol ve skill çağrıları adım sayılmaz.
 
 ## Alternatives

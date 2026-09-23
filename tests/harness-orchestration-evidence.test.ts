@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
-import { completionPacketSchema, createId, sha256, type SessionEvent } from "../src/harness/contracts/index.ts";
+import { completionPacketSchema, createId, criterionNamesCommand, sha256, verificationProves, type HarnessEvidence, type SessionEvent } from "../src/harness/contracts/index.ts";
+import { classifyVerificationCommand } from "../src/harness/policy/index.ts";
 import {
   commandArgv,
   firstPathToken,
+  harnessCanSubstitute,
   perTaskStepLimit,
   renderTriagePrompt,
   resolvePointer,
@@ -220,7 +222,7 @@ test("ADR-18 harness-substitute: all harness checks passed and an in-scope diff 
     const runtime = createTestRuntime({
       workspace,
       planner,
-      verification: async () => ({ status: "passed", termination: "exited", exitCode: 0, output: "ok", durationMs: 1 }),
+      verification: async () => ({ status: "passed", commandClass: "build-test", termination: "exited", exitCode: 0, output: "ok", durationMs: 1 }),
       script: async (context) => {
         await context.write("docs/a.md", "changed\n");
         await context.reply({ status: "completed", summary: "done", acceptance_evidence: [{ criterion_id: "AC-1", evidence: [{ kind: "file", ref: "trust me", produced_by: "worker" }] }] });
@@ -243,6 +245,67 @@ test("ADR-18 harness-substitute: all harness checks passed and an in-scope diff 
   } finally {
     await workspace.cleanup();
   }
+});
+
+test("review R2: a read-only verification (git status) never substitutes; build/test or criterion-named commands do", async () => {
+  const workspace = await createTempWorkspace({ "docs/a.md": "a\n" }, { git: false });
+  try {
+    const planner = createScriptedPlanner((input) => testPlan(input, [{ key: "doc", owned_paths: ["docs/**"], risk: "trivial", verification: ["git status"] }]));
+    const runtime = createTestRuntime({
+      workspace,
+      planner,
+      verification: async () => ({ status: "passed", commandClass: "read-only", termination: "exited", exitCode: 0, output: "clean", durationMs: 1 }),
+      script: async (context) => {
+        await context.write("docs/a.md", "changed\n");
+        await context.reply({ status: "completed", summary: "done", acceptance_evidence: [{ criterion_id: "AC-1", evidence: [{ kind: "file", ref: "trust me", produced_by: "worker" }] }] });
+      },
+    });
+    const outcome = await runtime.run();
+    const events = runtime.runEvents(outcome);
+    assert.equal(ofType(events, "attempt/verification_ran")[0]?.data.command_class, "read-only", "the class is recorded with the run");
+    const completion = completionPacketSchema.parse(JSON.parse(Buffer.from(await runtime.blobs.get(ofType(events, "attempt/completion_recorded")[0]!.data.blob.digest)).toString("utf8")));
+    assert.equal(completion.evidence_resolution?.filter((entry) => entry.method === "harness-substitute").length ?? 0, 0, "git status proves nothing: no substitution");
+    assert.ok(ofType(events, "attempt/repair_requested").length > 0, "the unevidenced criterion goes to an evidence repair instead");
+  } finally {
+    await workspace.cleanup();
+  }
+
+  const packet = (statement: string, verification: string) =>
+    ({ write_mode: "owned-paths", scope: { owned_paths: ["docs/**"], read_paths: [], forbidden_paths: [] }, acceptance_criteria: [{ id: "AC-1", statement }], verification: { commands: [verification] } }) as unknown as Parameters<typeof harnessCanSubstitute>[0];
+  const harness = (command: string, commandClass: "build-test" | "read-only" | "other" | undefined): HarnessEvidence => ({
+    verification: [{ ordinal: 1, command, ...(commandClass === undefined ? {} : { command_class: commandClass }), status: "passed", termination: "exited", exit_code: 0, evidence: { kind: "harness-verification", ref: "ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4#4", produced_by: "harness" } }],
+    diff: { evidence: { kind: "harness-diff", ref: sha256("artifact"), produced_by: "harness" }, changed_paths: ["docs/a.md"] },
+  });
+  assert.equal(harnessCanSubstitute(packet("docs updated", "git status"), harness("git status", "read-only"), ["docs/a.md"]), false);
+  assert.equal(harnessCanSubstitute(packet("`git status` is clean", "git status"), harness("git status", "read-only"), ["docs/a.md"]), false, "naming a read-only command does not make it proof");
+  assert.equal(harnessCanSubstitute(packet("docs updated", "pnpm test"), harness("pnpm test", "build-test"), ["docs/a.md"]), true);
+  assert.equal(harnessCanSubstitute(packet("docs updated", "node check.mjs"), harness("node check.mjs", "other"), ["docs/a.md"]), false, "an unlisted command proves only what a criterion names");
+  assert.equal(harnessCanSubstitute(packet("`node check.mjs` exits 0", "node check.mjs"), harness("node check.mjs", "other"), ["docs/a.md"]), true);
+  assert.equal(harnessCanSubstitute(packet("docs updated", "pnpm test"), harness("pnpm test", undefined), ["docs/a.md"]), false, "an unclassified run is not build/test proof");
+  assert.equal(criterionNamesCommand("node check.mjs exits 0", "node check.mjs"), true);
+  assert.equal(criterionNamesCommand("run node check.mjsx", "node check.mjs"), false);
+  assert.equal(verificationProves({ status: "failed", command: "pnpm test", command_class: "build-test" }), false);
+});
+
+test("review R2: the policy classifies verification commands; read-only and install commands are never build/test proof", () => {
+  const cases: [string[], string][] = [
+    [["git", "status"], "read-only"],
+    [["git", "diff", "--", "src"], "read-only"],
+    [["git", "log", "-1"], "read-only"],
+    [["ls", "src"], "read-only"],
+    [["cat", "README.md"], "read-only"],
+    [["rg", "TODO", "src"], "read-only"],
+    [["pnpm", "test"], "build-test"],
+    [["npm", "run", "build"], "build-test"],
+    [["node", "--test", "tests/a.test.ts"], "build-test"],
+    [["cargo", "test"], "build-test"],
+    [["pnpm", "install", "--frozen-lockfile"], "other"],
+    [["npm", "ci"], "other"],
+    [["node", "check.mjs"], "other"],
+    [["node", "-e", "1"], "other"],
+    [["git", "commit", "-m", "x"], "other"],
+  ];
+  for (const [argv, expected] of cases) assert.equal(classifyVerificationCommand(argv), expected, argv.join(" "));
 });
 
 test("F10 the triage prompt shows evidence as resolved, unresolved with the reason, or missing", () => {

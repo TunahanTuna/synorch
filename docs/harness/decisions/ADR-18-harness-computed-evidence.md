@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Kısmen değiştirir (Supersedes, kısmen): [ADR-09](./ADR-09-reviewer-independence.md) — `met` hükmünün kanıt kuralı.
+Accepted. Kısmen değiştirir (Supersedes, kısmen): [ADR-09](./ADR-09-reviewer-independence.md) — `met` hükmünün kanıt kuralı. Bağımsız inceleme 4 (R1, R2, R4) ile 2026-09-23'te daraltıldı: `harness-diff` yalnız destekleyicidir; bağımsız ve ikame edici harness kanıtı yalnız kanıtlayan (`passed`, build/test sınıfı veya ölçütün aynen andığı, salt okunur olmayan) doğrulama çalıştırmasıdır; harness doğrulaması gateway üzerinden sistem çağrısı olarak koşar.
 
 ## Date
 
@@ -24,13 +24,14 @@ Gerçek modellerle yapılan iki canlı çalıştırma (`syn-smoke`, run_01M35SSA
 
 **D1 — Harness'in hesapladığı kanıt ve toleranslı çözümleme**
 
-- Worker turu bittikten sonra harness paketin `verification.commands` listesini attempt çalışma alanında kendisi koşar (policy `verification_commands` allowlist'i ve sandbox ile) ve her komut için `attempt/verification_ran` olayı yazar. Sonuçlar completion'da `harness_evidence.verification[]` olur: `kind: harness-verification`, `produced_by: harness`, `ref: <session_id>#<seq>`. Değişiklik varsa sabitlenmiş diff `harness_evidence.diff` olur (`kind: harness-diff`, `ref` = `artifact_digest`). `harness-*` türlerini yalnız harness üretir, harness başka tür üretmez (şema uygular). `commands_run` modelin iddiasından değil attempt günlüğündeki `exec` çağrılarından kurulur.
+- Worker turu bittikten sonra harness paketin `verification.commands` listesini attempt çalışma alanında kendisi koşar ve her komut için `attempt/verification_ran` olayı yazar. Her çalıştırma **tool gateway üzerinden bir sistem çağrısıdır** (`ToolInvocationScope.actor: system`; review R4): `exec` normalizasyonu, argümanda kimlik bilgisi denetimi, policy (`verification_commands` allowlist'i, workspace trust, bağımlılık bağlantısı kuralı), sandbox, redaksiyon ve `tool/*` denetim olayları worker'ın `exec`'iyle aynıdır; olaylar attempt session'ına `actor.kind: system` ile yazılır, kısa ref almaz, onay asla sorulmaz (`ask` → `not-run`) ve attempt günlüğü bu çağrıları modelin kanıtı saymaz. Harness komutu sınıflar (`command_class`: `build-test | read-only | other`, `classifyVerificationCommand`). Sonuçlar completion'da `harness_evidence.verification[]` olur: `kind: harness-verification`, `produced_by: harness`, `ref: <session_id>#<seq>`. Değişiklik varsa sabitlenmiş diff `harness_evidence.diff` olur (`kind: harness-diff`, `ref` = `artifact_digest`). `harness-*` türlerini yalnız harness üretir, harness başka tür üretmez (şema uygular). `commands_run` modelin iddiasından değil attempt günlüğündeki `exec` çağrılarından kurulur.
 - Modele gösterilen her tool sonucu `[#n] ` ile başlar (`renderToolResultText`); `n` attempt içi 1'den başlayan çağrı sırasıdır, gateway atar ve `tool/call_proposed.ref` (v2) olarak kaydeder; `#n` tam bir `ToolCallId`'ye eşlenir.
 - İşaretçi çözümü toleranslıdır ve sırası sabittir: harness `ToolCallId` → `#n` → provider call id → araç adı + argüman örtüşmesi (`functions.`/`mcp__synorch__` öneki atılır) → ilk yol benzeri sözcük. Her çözüm yöntemiyle birlikte `evidence_resolution[]` içinde kaydedilir (`EVIDENCE_RESOLUTION_METHODS`).
 - `task_report` ve `review_report` kanıtı **araç çağrısının içinde** çözer. Çözülmeyen işaretçide `invalid_arguments` döner; metin her sorunu ve geçerli `#n` listesini verir (`formatEvidenceCorrection`). Aynı session'da **bir** düzeltme turu vardır (`REPORT_CORRECTION_ROUNDS = 1`); ikinci ret de kayda geçer ve rapor olduğu gibi kabul edilir. `plan_propose` ve `task_triage` kendi girdi doğrulamasını aynı biçimde (eyleme dönük `invalid_arguments`) yapar.
-- Model işaretçileri düzeltme turundan sonra da çözülmezse ve harness doğrulamasının bütün komutları `passed` ise (en az bir komut varsa) ve yazan görevde diff kapsam içindeyse, ölçüt harness kanıtıyla kanıtlanır (`method: harness-substitute`); reviewer bunu paketinde görür.
-- Reviewer aynı mekanizmayı kullanır. Düzeltmeden sonra çözülmeyen reviewer işaretçisi review'ü `invalid` yapmaz: işaretçi düşer (kayıtlı), bağımsız kanıtı kalmayan `met` hükmü `unverifiable` sayılır ve sonuç `revise` geri bildirimidir. `invalid` yalnız bağ ihlallerinde (başka görev/attempt/artifact/completion) kalır.
-- **ADR-09 değişikliği:** `met` hükmü reviewer'ın kendi ürettiği **veya harness'in hesapladığı** en az bir kanıta dayanır. Harness kanıtı worker'ın iddiası değil, harness'in gözlemidir; worker kanıtı tek başına yine yetmez.
+- **Kanıtlayan çalıştırma** (`verificationProves`, review R1/R2): `passed` ve ya `build-test` sınıfı (vetted build/test listesi, kurulum komutları hariç) ya da ölçüt ifadesinin aynen andığı komut. Salt okunur listedeki komutlar (git status/diff/log/show, listeleme, görüntüleme, arama) her zaman geçer ve hiçbir şey kanıtlamaz; asla sayılmaz.
+- Model işaretçileri düzeltme turundan sonra da çözülmezse, harness doğrulamasının bütün komutları `passed` ise, **en az biri kanıtlayan bir çalıştırmaysa** ve yazan görevde diff kapsam içindeyse, ölçüt harness kanıtıyla kanıtlanır (`method: harness-substitute`; kanıtlayan kayıtlar + diff); reviewer bunu paketinde görür. Plan model çıktısıdır: salt okunur, boş bir doğrulama komutu trivial görevi kanıtsız kabul ettiremez (review R2).
+- Reviewer aynı mekanizmayı kullanır. Düzeltmeden sonra çözülmeyen reviewer işaretçisi review'ü `invalid` yapmaz: işaretçi düşer (kayıtlı), bağımsız kanıtı kalmayan `met` hükmü harness tarafından `unverifiable`'a düşürülür (`note`'ta gerekçe) ve `accept` `revise` geri bildirimine çevrilir. `invalid` yalnız bağ ihlallerinde (başka görev/attempt/artifact/completion) kalır.
+- **ADR-09 değişikliği (review R1 ile daraltılmış):** `met` hükmü reviewer'ın kendi çözülen araç kanıtına **veya o ölçütü kanıtlayan bir harness doğrulama çalıştırmasına** dayanır. `harness-diff` yalnız destekleyicidir, tek başına asla yetmez: diff yalnız bir değişikliğin var olduğunu gösterir ve incelenen şeyin kendisidir. Böylece `verification.commands` boş olan standard/high-risk bir görev, kimse bir şey çalıştırmadan kabul edilemez: reviewer kanıtı kendisi üretir, yalnız diff'e dayanan `met` → `unverifiable` → `revise`. Worker kanıtı tek başına yine yetmez.
 - Triyaj istemi ölçütleri `resolveEvidence` sonrası `[resolved] / [unresolved: neden] / [missing]` olarak gösterir.
 
 **D2 — Doğru iş atılmaz**
@@ -52,6 +53,9 @@ Gerçek modellerle yapılan iki canlı çalıştırma (`syn-smoke`, run_01M35SSA
 - **Sınırsız düzeltme turu:** Bozuk bir model sonsuz döngüye girer ve maliyet artar. Reddedildi; tek tur + session içi onarım bütçesi.
 - **Başarısız kanıtta yeni attempt (mevcut davranış):** Doğru işi geri alır ve bütçeyi tüketir (F3). Reddedildi.
 - **Reviewer'da harness kanıtını bağımsız saymamak:** Her `met` için reviewer'ın doğrulama komutunu yeniden koşmasını ister; harness zaten koşmuş ve kaydetmiştir. Reddedildi; reviewer'ın kendi kanıtı hâlâ kabul edilir ve tercih edilir.
+- **Sabitlenmiş diff'i bağımsız kanıt saymak (ilk ADR-18 metni):** Diff incelenen değişikliğin kendisidir; doğrulama komutu yoksa görev hiçbir şey çalıştırılmadan kabule ulaşır (bağımsız inceleme 4, R1). Reddedildi; diff destekleyici kalır.
+- **Her `passed` doğrulama komutunu ikame için saymak:** Salt okunur komutlar güvenilmeyen çalışma alanında bile koşar ve hep geçer; plan prompt-injection'a açıktır (R2). Reddedildi; yalnız build/test sınıfı veya ölçütün andığı komut sayılır.
+- **Harness doğrulamasını gateway dışında koşmak (ilk uygulama):** Policy ve sandbox uygulanıyordu ama argümanda kimlik bilgisi denetimi ve `tool/*` denetim izi yoktu (R4). Reddedildi; sistem çağrısı olarak gateway'den geçer.
 
 ## Consequences
 
@@ -70,6 +74,7 @@ Gerçek modellerle yapılan iki canlı çalıştırma (`syn-smoke`, run_01M35SSA
 
 ## Verification
 
+- Bağımsız inceleme 4: `tests/harness-orchestration-review.test.ts` (boş doğrulama + yalnız `harness-diff` → `revise`; `verifyReview` sınıfları), `tests/harness-orchestration-evidence.test.ts` (salt okunur doğrulama ikame etmez; `classifyVerificationCommand`), `tests/harness-tools-gateway.test.ts` ve `tests/harness-e2e-dependency-links.test.ts` (sistem çağrısı: kimlik bilgisi denetimi, `tool/*` izi, ref yok, onay yok).
 - `tests/harness-contracts.test.ts`: `[#n]` render ve `#n` ayrıştırma, çözüm sırası, düzeltme metni; `harness-*` üretici kuralı; completion'da kayıtsız harness işaretçisinin reddi; bütçe varsayılanları; yeni olayların sürümleri ve reddedilen biçimleri (çıkış 1 ile `passed`, bütçeyi aşan tur, `ref` taşıyan v1 çağrı); reviewer'ın harness kanıtıyla `met` örneği.
 - W1a/W1c kabul ölçütleri ([uygulama planı §7](../implementation-plan.md#7-canlı-çalıştırma-sağlamlaştırma-dalgası)); W2: sloppy-model scripted adapter ve iki canlı transkriptin replay'i — ikinci run'ın transkripti düzeltme turu olmadan da `completed` + review'e ulaşmalı.
 

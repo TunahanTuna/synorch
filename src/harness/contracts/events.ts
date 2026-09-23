@@ -9,7 +9,7 @@ import {
   HARNESS_SCHEMA_VERSION,
 } from "./common.ts";
 import { digestSchema } from "./digest.ts";
-import { checkVerificationOutcome, HARNESS_VERIFICATION_STATUSES, REPAIR_KINDS, repairProblemsSchema, toolRefOrdinalSchema } from "./evidence.ts";
+import { checkVerificationOutcome, HARNESS_VERIFICATION_STATUSES, REPAIR_KINDS, VERIFICATION_COMMAND_CLASSES, repairProblemsSchema, toolRefOrdinalSchema } from "./evidence.ts";
 import {
   approvalIdSchema,
   attemptIdSchema,
@@ -234,6 +234,8 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
         command: z.string().min(1).max(4000),
         /** The argv the harness ran; absent when the command could not be expressed as argv. */
         argv: z.array(z.string()).min(1).max(256).optional(),
+        /** How the harness classified the command (`VERIFICATION_COMMAND_CLASSES`); absent on older events. */
+        command_class: z.enum(VERIFICATION_COMMAND_CLASSES).optional(),
         status: z.enum(HARNESS_VERIFICATION_STATUSES),
         termination: z.enum(PROCESS_TERMINATIONS).optional(),
         exit_code: z.int().nullable(),

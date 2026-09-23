@@ -54,6 +54,7 @@ import {
   type ToolResult,
   type TurnInput,
   type TurnOutcome,
+  type VerificationCommandClass,
   type WorkerManager,
   type WorkerRole,
   type WorkspaceDigestReader,
@@ -78,6 +79,9 @@ import {
   commandsFromLog,
   evidenceCandidates,
   evidenceProblems,
+  INDEPENDENT_EVIDENCE_HINT,
+  isIndependentReviewEvidence,
+  provingVerification,
   resolveCompletionEvidence,
   resolvePointer,
   unresolvedPointer,
@@ -132,10 +136,18 @@ export interface VerificationRequest {
   readonly attemptId: AttemptId;
   readonly role: WorkerRole;
   readonly signal: AbortSignal;
+  /**
+   * The attempt session's log. The runner invokes `exec` through the tool gateway as a system
+   * call (review R4), so the run leaves the same `tool/*` audit trail as any tool call; the attempt
+   * log never counts system calls as the worker's evidence.
+   */
+  readonly events?: EventStore | undefined;
 }
 
 export interface VerificationResult {
   readonly status: HarnessVerificationStatus;
+  /** How the runner classified the argv (`classifyVerificationCommand`); absent = unclassified. */
+  readonly commandClass?: VerificationCommandClass | undefined;
   /** How the process ended; absent when it was not started (`not-run`). */
   readonly termination?: ProcessTermination | undefined;
   readonly exitCode: number | null;
@@ -295,12 +307,23 @@ export function renderWorkerMessage(packet: TaskContextPacket, notes: readonly s
   ].join("\n\n");
 }
 
-/** The harness records a reviewer may cite as independent evidence (ADR-18 amendment of ADR-09). */
-function harnessLines(harness: HarnessEvidence | undefined): string[] {
+function statementsOf(packet: TaskContextPacket): ReadonlyMap<string, string> {
+  return new Map(packet.acceptance_criteria.map((criterion) => [criterion.id, criterion.statement]));
+}
+
+/**
+ * The harness records a reviewer may cite (ADR-18 amendment of ADR-09, review R1): a passed
+ * build/test run (or one a criterion names) is independent evidence; a read-only or failed run and
+ * the diff are supporting only.
+ */
+function harnessLines(harness: HarnessEvidence | undefined, packet: TaskContextPacket): string[] {
   if (harness === undefined) return [];
+  const proving = new Set(provingVerification(packet, harness).map((record) => record.evidence.ref));
   return [
-    ...harness.verification.map((record) => `  ${record.evidence.ref} harness-verification "${record.command}" -> ${record.status}${record.exit_code === null ? "" : ` (exit ${record.exit_code})`}`),
-    ...(harness.diff === undefined ? [] : [`  ${harness.diff.evidence.ref} harness-diff (${harness.diff.changed_paths.join(", ")})`]),
+    ...harness.verification.map(
+      (record) => `  ${record.evidence.ref} harness-verification "${record.command}" -> ${record.status}${record.exit_code === null ? "" : ` (exit ${record.exit_code})`}${proving.has(record.evidence.ref) ? "" : " [supporting only]"}`,
+    ),
+    ...(harness.diff === undefined ? [] : [`  ${harness.diff.evidence.ref} harness-diff (${harness.diff.changed_paths.join(", ")}) [supporting only]`]),
   ];
 }
 
@@ -339,7 +362,7 @@ export function renderReviewBrief(target: AttemptRecord, completion: CompletionP
     budget -= shown.length;
     files.push(`${header}\n${shown}${shown.length < text.length ? "\n[truncated; read the file with your tools]" : ""}`);
   }
-  const harness = harnessLines(completion.harness_evidence);
+  const harness = harnessLines(completion.harness_evidence, target.packet);
   return [
     `Independent review of attempt ${target.attemptId} for task ${target.taskId}.`,
     `The artifact under review is pinned at ${changeSet.artifactDigest}. Your workspace is that artifact, read-only.`,
@@ -515,9 +538,13 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       taskScope: {
         owned: valid.write_mode === "owned-paths" ? valid.scope.owned_paths : [],
         read: valid.scope.read_paths,
-        // ADR-19: linked dependency directories are readable but never writable.
+        // ADR-19: linked dependency directories are never touched through file tools (the policy has
+        // no write-only forbid, and a path through the link resolves outside the workspace anyway,
+        // `link-escape`); only processes a build or test runs read them. While links exist, commands
+        // that install, add, remove or update dependencies are denied (`dependency_links`).
         forbidden: [...valid.scope.forbidden_paths, ...(workspace.dependencyLinks ?? [])],
         verification_commands: valid.verification.commands,
+        ...(workspace.dependencyLinks === undefined || workspace.dependencyLinks.length === 0 ? {} : { dependency_links: [...workspace.dependencyLinks] }),
       },
       userConfig: deps.userConfig,
       workspaceConfig: deps.workspaceConfig,
@@ -715,6 +742,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
               attemptId: record.attemptId,
               role: record.packet.role,
               signal,
+              events: pendingStores.get(record.attemptId),
             });
           } catch (error) {
             result = { status: "not-run", exitCode: null, output: "", durationMs: Date.now() - started, reason: `the harness could not run it: ${error instanceof Error ? error.message : String(error)}` };
@@ -733,6 +761,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
             ordinal: position + 1,
             command: command.slice(0, 4000),
             ...(argv === undefined || argv.length === 0 ? {} : { argv: argv.slice(0, 256) }),
+            ...(normalized.commandClass === undefined ? {} : { command_class: normalized.commandClass }),
             status: normalized.status,
             ...(normalized.termination === undefined ? {} : { termination: normalized.termination }),
             exit_code: normalized.exitCode,
@@ -747,6 +776,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         verification.push({
           ordinal: position + 1,
           command: command.slice(0, 4000),
+          ...(normalized.commandClass === undefined ? {} : { command_class: normalized.commandClass }),
           status: normalized.status,
           ...(normalized.termination === undefined ? {} : { termination: normalized.termination }),
           exit_code: normalized.exitCode,
@@ -995,21 +1025,22 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     const log = await currentLog(record);
     const indexes = reviewIndexes(target, record, pinned, completion, log);
     const problems: EvidenceProblem[] = [];
+    const statements = statementsOf(target.packet);
     for (const criterion of report.criteria) {
       let independent = 0;
       for (const evidence of criterion.evidence) {
         const resolution = await resolveReviewPointer(evidence, criterion.criterion_id, indexes);
-        if (resolution.status === "resolved" && (evidence.produced_by === "reviewer" || evidence.produced_by === "harness")) independent += 1;
+        if (resolution.status === "resolved" && isIndependentReviewEvidence(evidence, indexes.worker.harness, statements.get(criterion.criterion_id))) independent += 1;
         else if (resolution.status !== "resolved") problems.push({ criterionId: criterion.criterion_id, ref: evidence.ref.slice(0, 200), reason: resolution.reason ?? "does not resolve" });
       }
       if (criterion.verdict === "met" && independent === 0) {
-        problems.push({ criterionId: criterion.criterion_id, ref: "(met)", reason: "needs independent evidence: one of your own tool calls (\"#n\", produced_by: reviewer) or a harness record (produced_by: harness)" });
+        problems.push({ criterionId: criterion.criterion_id, ref: "(met)", reason: INDEPENDENT_EVIDENCE_HINT });
       }
     }
     if (problems.length === 0) return toolOk(REPORT_RECORDED);
     if (record.repairs.report_corrections < REPORT_CORRECTION_ROUNDS) {
       record.repairs.report_corrections += 1;
-      const harness = harnessLines(indexes.worker.harness);
+      const harness = harnessLines(indexes.worker.harness, target.packet);
       const text = [
         formatEvidenceCorrection(problems, evidenceCandidates(log), REPORT_CORRECTION_ROUNDS - record.repairs.report_corrections),
         harness.length > 0 ? `Harness records (kind harness-verification / harness-diff, produced_by: harness):\n${harness.join("\n")}` : "",
@@ -1059,6 +1090,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         if (!claim.ok) return { attemptId: record.attemptId, review: undefined, verification: { decision: "invalid", problems: claim.problems } };
         // ADR-18: unresolved pointers are dropped (and recorded); a met verdict left without independent evidence is unverifiable.
         const indexes = reviewIndexes(target, record, pinned, completion, execution.log);
+        const statements = statementsOf(target.packet);
         const resolution: EvidenceResolution[] = [];
         const downgraded: string[] = [];
         const criteria: ReviewPacket["criteria"] = [];
@@ -1069,10 +1101,10 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
             resolution.push(result);
             if (result.status === "resolved") kept.push(evidence);
           }
-          const independent = kept.some((evidence) => evidence.produced_by === "reviewer" || evidence.produced_by === "harness");
+          const independent = kept.some((evidence) => isIndependentReviewEvidence(evidence, indexes.worker.harness, statements.get(criterion.criterion_id)));
           if (criterion.verdict === "met" && !independent) {
             downgraded.push(criterion.criterion_id);
-            criteria.push({ ...criterion, verdict: "unverifiable", evidence: kept, note: `${criterion.note === undefined ? "" : `${criterion.note} | `}harness: no resolvable reviewer or harness evidence` });
+            criteria.push({ ...criterion, verdict: "unverifiable", evidence: kept, note: `${criterion.note === undefined ? "" : `${criterion.note} | `}harness: no independent evidence (own tool result or passed build/test verification; harness-diff alone is not enough)` });
           } else criteria.push({ ...criterion, evidence: kept });
         }
         const decision = claim.claim.decision === "accept" && downgraded.length > 0 ? "revise" : claim.claim.decision;
@@ -1175,10 +1207,10 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
 /** Enforces the contract's outcome rules on a runner result (passed means exited 0; not-run has a reason and no exit code). */
 function normalizeVerification(result: VerificationResult): VerificationResult {
   if (result.termination === undefined || result.status === "not-run") {
-    return { status: "not-run", exitCode: null, output: result.output, durationMs: result.durationMs, reason: result.reason ?? "the harness did not start the command" };
+    return { status: "not-run", exitCode: null, output: result.output, durationMs: result.durationMs, reason: result.reason ?? "the harness did not start the command", ...(result.commandClass === undefined ? {} : { commandClass: result.commandClass }) };
   }
   const passed = result.termination === "exited" && result.exitCode === 0;
-  return { status: passed ? "passed" : "failed", termination: result.termination, exitCode: result.exitCode, output: result.output, durationMs: result.durationMs };
+  return { status: passed ? "passed" : "failed", termination: result.termination, exitCode: result.exitCode, output: result.output, durationMs: result.durationMs, ...(result.commandClass === undefined ? {} : { commandClass: result.commandClass }) };
 }
 
 class StaleInFlight extends Error {

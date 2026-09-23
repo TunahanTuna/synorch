@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Kısmen değiştirildi: [ADR-18](./ADR-18-harness-computed-evidence.md) (2026-09-23). Değişen madde: her `met` hükmü reviewer'ın kendi ürettiği **veya harness'in hesapladığı** (`produced_by: harness`: harness doğrulama çalıştırması, sabitlenmiş diff) en az bir kanıta dayanır; worker kanıtı tek başına yine yetmez. Reviewer işaretçileri toleranslı çözülür, tek düzeltme turu vardır; düzeltmeden sonra çözülmeyen işaretçi review'ü `invalid` yapmaz, bağımsız kanıtı kalmayan `met` `unverifiable` sayılır ve sonuç `revise` geri bildirimidir. Diğer maddeler geçerlidir.
+Accepted. Kısmen değiştirildi: [ADR-18](./ADR-18-harness-computed-evidence.md) (2026-09-23; bağımsız inceleme R1 ile daraltıldı). Değişen madde: her `met` hükmü reviewer'ın kendi ürettiği **veya o ölçütü kanıtlayan, `passed` bir harness doğrulama çalıştırmasına** (`kind: harness-verification`: build/test sınıfı bir komut ya da ölçütün aynen andığı komut; salt okunur komutlar asla) dayanır. Sabitlenmiş diff (`harness-diff`) yalnız destekleyicidir, tek başına asla yetmez: bir değişikliğin var olduğunu gösterir, incelenen şeyin kendisidir. Worker kanıtı tek başına yine yetmez. Reviewer işaretçileri toleranslı çözülür, tek düzeltme turu vardır; düzeltmeden sonra çözülmeyen işaretçi review'ü `invalid` yapmaz, bağımsız kanıtı kalmayan `met` `unverifiable` sayılır ve sonuç `revise` geri bildirimidir. Diğer maddeler geçerlidir.
 
 ## Date
 
@@ -16,7 +16,7 @@ Bir modelin "bitti" demesi teslim için yeterli değildir; reviewer implementer 
 
 - Reviewer ayrı bir attempt ve ayrı context'te çalışır; girdisi taze bir packet'tir: sabitlenmiş artifact digest'i, completion packet'i ve kabul ölçütleri. Implementer transkripti asla verilmez.
 - Review packet'inde `independence.separate_context` her zaman `true`'dur; bir attempt kendini inceleyemez.
-- Her `met` kararı reviewer'ın kendi ürettiği en az bir kanıta (`produced_by: reviewer`) dayanır — ADR-18 ile harness'in hesapladığı kanıt (`produced_by: harness`) da bağımsız sayılır; `accept` tüm ölçütler `met` ve blocker bulgu yokken mümkündür (şema uygular).
+- Her `met` kararı bağımsız en az bir kanıta dayanır: reviewer'ın kendi ürettiği kanıt (`produced_by: reviewer`; reviewer'ın kendi araç okumaları dahil) veya — ADR-18 ile — o ölçütü kanıtlayan `passed` bir harness doğrulama çalıştırması (`verificationProves`). `harness-diff` yalnız destekleyicidir. `verification.commands` boş olan standard/high-risk görevde reviewer kanıtı kendisi üretir; yalnız diff'e dayanan `met` → `unverifiable` → `revise`. `accept` tüm ölçütler `met` ve blocker bulgu yokken mümkündür (şema tür düzeyinde, orchestration çalıştırma sonucuyla uygular).
 - Router mümkünse farklı model/provider tercih eder; aynıysa `same_provider`/`same_model` kaydedilir.
 - `standard` ve `high-risk` görevlerde review zorunlu; `trivial` görevlerde isteğe bağlıdır.
 
@@ -38,7 +38,8 @@ Bir modelin "bitti" demesi teslim için yeterli değildir; reviewer implementer 
 
 ## Verification
 
-- `tests/harness-contracts.test.ts`: yalnız worker kanıtlı `met` reddi, `not_met` ile `accept` reddi, blocker ile `accept` reddi, self-review reddi, `separate_context: false` reddi.
+- `tests/harness-contracts.test.ts`: yalnız worker kanıtlı `met` reddi, yalnız `harness-diff` kanıtlı `met` reddi (belge örneği), `not_met` ile `accept` reddi, blocker ile `accept` reddi, self-review reddi, `separate_context: false` reddi.
+- `tests/harness-orchestration-review.test.ts` (review R1): doğrulama komutu olmayan standard görevde yalnız diff'e dayanan reviewer `revise` alır, hiçbir şey integrate edilmez; `verifyReview` reviewer kanıtını ve `passed` build/test çalıştırmasını bağımsız sayar, salt okunur veya başarısız çalıştırmayı ve diff'i saymaz.
 - I4: reviewer'a implementer transkriptinin geçmediğini gösteren context testi; standard görevin review olmadan `completed` olamaması.
 
 ## Revisit trigger

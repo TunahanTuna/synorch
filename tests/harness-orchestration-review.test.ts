@@ -236,6 +236,97 @@ test("AC-2 / ADR-18 a reviewer passing off the implementer's tool call as its ow
   }
 });
 
+test("review R1: with no verification commands, a reviewer citing only the harness diff cannot accept: the verdict is unverifiable and the result is revise", async () => {
+  const workspace = await createTempWorkspace({ "src/index.ts": "export {};\n" }, { git: true });
+  try {
+    const planner = createScriptedPlanner((input) => testPlan(input, [{ key: "feature", owned_paths: ["src/feature.ts"], risk: "standard", verification: [] }]));
+    const brief: string[] = [];
+    const runtime = createTestRuntime({
+      workspace,
+      planner,
+      limits: { maxReviewAttempts: 1 },
+      script: async (context) => {
+        if (context.input.role === "reviewer") {
+          brief.push(context.input.userMessage ?? "");
+          const artifact = /pinned at (sha256:[0-9a-f]{64})/.exec(context.input.userMessage ?? "")?.[1] ?? "";
+          await context.reply({
+            criteria: (context.input.packet?.acceptance_criteria ?? []).map((criterion) => ({
+              criterion_id: criterion.id,
+              verdict: "met",
+              evidence: [{ kind: "harness-diff", ref: artifact, produced_by: "harness" }],
+            })),
+            findings: [],
+            decision: "accept",
+          });
+          return;
+        }
+        await context.write("src/feature.ts", "export const feature = true;\n");
+        const call = await context.toolCall("read_file");
+        await context.reply(workerClaim(context, call));
+      },
+    });
+    const outcome = await runtime.run();
+    assert.notEqual(outcome.status, "succeeded", outcome.summary);
+    assert.match(brief[0] ?? "", /harness-diff \(src\/feature\.ts\) \[supporting only\]/, "the reviewer is told the diff is supporting only");
+    const events = runtime.runEvents(outcome);
+    assert.deepEqual(replayTransitions(events), []);
+    assert.equal(ofType(events, "attempt/verification_ran").length, 0, "nothing was run by the harness");
+    const reviews = ofType(events, "review/recorded");
+    assert.ok(reviews.length > 0 && reviews.every((review) => review.data.decision === "revise"), "diff-only evidence never accepts");
+    const review = reviewPacketSchema.parse(JSON.parse(Buffer.from(await runtime.blobs.get(reviews[0]!.data.blob.digest)).toString("utf8")));
+    assert.ok(review.criteria.every((criterion) => criterion.verdict === "unverifiable"), "met on the diff alone is downgraded");
+    assert.ok(review.evidence_resolution?.every((resolution) => resolution.kind === "harness-diff" && resolution.status === "resolved"), "the diff pointer itself resolves; it just is not independent");
+    assert.ok(!taskStates(events).includes("completed"));
+    await assert.rejects(readFile(path.join(workspace.root, "src", "feature.ts"), "utf8"), "nothing is integrated");
+  } finally {
+    await workspace.cleanup();
+  }
+});
+
+test("review R1: verifyReview counts reviewer evidence and passed build/test (or criterion-named) runs as independent, never the diff or a read-only run", async () => {
+  const packet = samplePacket();
+  const done = completion(packet, [
+    { criterion_id: "AC-1", evidence: [{ kind: "tool-call", ref: createId("toolCall"), produced_by: "worker" }] },
+    { criterion_id: "AC-2", evidence: [{ kind: "tool-call", ref: createId("toolCall"), produced_by: "worker" }] },
+  ]);
+  const artifact = sha256("artifact");
+  const run = (ref: string, command: string, commandClass: "build-test" | "read-only" | "other", status: "passed" | "failed" = "passed") => ({
+    ordinal: 1,
+    command,
+    command_class: commandClass,
+    status,
+    termination: "exited" as const,
+    exit_code: status === "passed" ? 0 : 1,
+    evidence: { kind: "harness-verification" as const, ref, produced_by: "harness" as const },
+  });
+  const verification = [run("ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4#1", "pnpm test", "build-test"), { ...run("ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4#2", "git status", "read-only"), ordinal: 2 }, { ...run("ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4#3", "pnpm lint", "build-test", "failed"), ordinal: 3 }];
+  const harness = { verification, diff: { evidence: { kind: "harness-diff" as const, ref: artifact, produced_by: "harness" as const }, changed_paths: [] } };
+  const worker: EvidenceIndex = { log: emptyLog(), artifactDigest: artifact, changedPaths: [], fileDigest: async () => undefined, harness };
+  const reviewer: EvidenceIndex = { log: emptyLog(), artifactDigest: artifact, changedPaths: [], fileDigest: async () => undefined };
+  const verdict = async (evidence: ReviewPacket["criteria"][number]["evidence"]) => {
+    const review = reviewPacketSchema.safeParse({
+      schema_version: 2,
+      task_id: packet.task_id,
+      reviewed_attempt_id: done.attempt_id,
+      reviewer_attempt_id: createId("attempt"),
+      completion_digest: packetDigest(done),
+      reviewed_artifact_digest: artifact,
+      reviewer_route: { provider_id: "anthropic", model_id: "m" },
+      independence: { separate_context: true, same_provider: false, same_model: false },
+      criteria: ["AC-1", "AC-2"].map((id) => ({ criterion_id: id, verdict: "met", evidence })),
+      findings: [],
+      decision: "accept",
+    });
+    if (!review.success) return "schema-rejected";
+    return (await verifyReview(review.data, packet, done, { worker, reviewer })).decision;
+  };
+  const diff = { kind: "harness-diff" as const, ref: artifact, produced_by: "harness" as const };
+  assert.equal(await verdict([diff]), "schema-rejected", "the review packet schema refuses a met resting on the diff alone");
+  assert.equal(await verdict([verification[0]!.evidence, diff]), "accept", "a passed build/test run is independent; the diff may support it");
+  assert.equal(await verdict([verification[1]!.evidence, diff]), "revise", "a read-only run proves nothing");
+  assert.equal(await verdict([verification[2]!.evidence]), "revise", "a failed run is not evidence");
+});
+
 test("AC-2 mayComplete: standard and high-risk need an accepting review, trivial does not", () => {
   const standard = { risk: "standard", role: "implementer" } as const;
   assert.equal(reviewRequired(standard), true);

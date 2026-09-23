@@ -421,7 +421,7 @@ export function createScriptedDriverFactory(script: TurnScript, options: { reado
         },
         async toolCall(name, result = {}) {
           const toolCallId = createId("toolCall");
-          await append("tool/call_proposed", { tool_call_id: toolCallId, provider_call_id: `p-${toolCallId}`, tool_name: name, args_digest: digestOf({ name }) }, { kind: "system" });
+          await append("tool/call_proposed", { tool_call_id: toolCallId, provider_call_id: `p-${toolCallId}`, tool_name: name, args_digest: digestOf({ name }) });
           const ok = result.ok ?? true;
           await append(
             "tool/result_recorded",

@@ -41,6 +41,13 @@ import {
 } from "../src/harness/contracts/index.ts";
 import { compileTaskPacket } from "../src/harness/orchestration/index.ts";
 import { createFakePolicyEngine, createMemoryBlobStore, createMemorySessionStore, createStaticToolRegistry, TEST_SANDBOX, testRoute } from "../src/harness/orchestration/testing.ts";
+import { createControlTools } from "../src/harness/tools/index.ts";
+
+/** The recorded tool list with the report tools replaced by today's descriptors (their schemas shrink in W2). */
+function withCurrentReportTools(tools: readonly ToolDescriptor[]): ToolDescriptor[] {
+  const current = new Map(createControlTools({}).map((tool) => [tool.metadata.name, tool.descriptor()]));
+  return tools.map((tool) => (tool.name === "task_report" || tool.name === "review_report" ? (current.get(tool.name) ?? tool) : tool));
+}
 
 /**
  * ADR-20 (W1d): role-scoped, cacheable, compact model context. The last test replays the second
@@ -244,6 +251,8 @@ test("AC-d4 protocols and tools are cut to the role and the task shape", async (
   const original = fixture.tools.implementer.find((tool) => tool.name === "task_report");
   assert.ok(report !== undefined && original !== undefined);
   assert.ok(JSON.stringify(report).length < JSON.stringify(original).length * 0.9, "the task_report schema is compacted");
+  const current = createControlTools({}).find((tool) => tool.metadata.name === "task_report")?.descriptor();
+  assert.equal(JSON.stringify(compactSchema(current?.input_schema)).match(/"produced_by"/g)?.length, 2, "the evidence object is defined once ($defs) and referenced");
   assert.ok(!JSON.stringify(worker.request.tools).includes("$schema"));
 });
 
@@ -397,7 +406,7 @@ test("measurement: the live run 2 replay needs fewer, smaller requests and a sma
     const builder = createContextBuilder({
       readSession: (id) => sessions.openForRead(id),
       blobs,
-      tools: createStaticToolRegistry(fixture.tools[role === "orchestrator" ? "orchestrator" : "implementer"]),
+      tools: createStaticToolRegistry(withCurrentReportTools(fixture.tools[role === "orchestrator" ? "orchestrator" : "implementer"])),
       instructions: fixture.instructions,
       skills: catalog,
       skillContext: registry,
@@ -490,8 +499,9 @@ test("measurement: the live run 2 replay needs fewer, smaller requests and a sma
   const stable = requestTokens(implementerFirst).stable;
   const calibrated = Math.round((stable * 4) / charsPerToken);
   t.diagnostic(`implementer cacheable prefix: ${stable} est. tokens (4 chars/token), ${calibrated} provider-calibrated (${charsPerToken.toFixed(2)} chars/token)`);
-  assert.ok(stable <= 3_400, `implementer cacheable prefix (stable system + tools) is at most 3,400 est. tokens (was about 5,000; now ${stable})`);
-  assert.ok(calibrated <= 2_900, `about 2.5-2.9k provider tokens (${calibrated})`);
+  // W2 (report schemas: evidence defined once, concise descriptions): 3,261 -> 3,150 est. tokens, 2,830 -> 2,733 calibrated.
+  assert.ok(stable <= 3_200, `implementer cacheable prefix (stable system + tools) is at most 3,200 est. tokens (was about 5,000; now ${stable})`);
+  assert.ok(calibrated <= 2_780, `about 2.5-2.8k provider tokens (${calibrated})`);
   const system = implementerFirst.system.filter((block) => block.trust !== "untrusted").reduce((sum2, block) => sum2 + block.text.length, 0);
   const stableSystem = implementerFirst.system.slice(0, implementerFirst.cache?.stable_system_blocks ?? 0).reduce((sum2, block) => sum2 + block.text.length, 0);
   t.diagnostic(`implementer system prompt: ${system} characters (stable part ${stableSystem}); live run: 16,973`);

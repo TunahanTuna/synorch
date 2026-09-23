@@ -14,6 +14,7 @@ import {
   type HarnessEvidence,
   type ReviewPacket,
   type TaskContextPacket,
+  verificationProves,
 } from "../contracts/index.ts";
 import type { AttemptLog, RecordedToolCall } from "./attempt-log.ts";
 import { findScopeViolations, normalizeWorkspacePath } from "./paths.ts";
@@ -343,18 +344,29 @@ export function commandsFromLog(log: AttemptLog): CompletionPacket["commands_run
   });
 }
 
-/** Whether harness facts may stand in for pointers that stayed unresolved (ADR-18 D1). */
+/**
+ * The passed harness verification runs that prove behaviour (review R2): build/test-class
+ * commands, or commands a criterion statement names exactly; read-only commands (git
+ * status/diff/log/show, listing, viewing, search) never count.
+ */
+export function provingVerification(packet: Pick<TaskContextPacket, "acceptance_criteria">, harness: HarnessEvidence | undefined): HarnessEvidence["verification"] {
+  return (harness?.verification ?? []).filter((record) => verificationProves(record) || packet.acceptance_criteria.some((criterion) => verificationProves(record, criterion.statement)));
+}
+
+/** Whether harness facts may stand in for pointers that stayed unresolved (ADR-18 D1, review R2). */
 export function harnessCanSubstitute(packet: TaskContextPacket, harness: HarnessEvidence | undefined, changedPaths: readonly string[], platform: NodeJS.Platform = process.platform): boolean {
   if (harness === undefined || harness.verification.length === 0) return false;
   if (!harness.verification.every((record) => record.status === "passed")) return false;
+  if (provingVerification(packet, harness).length === 0) return false;
   if (packet.write_mode !== "owned-paths") return changedPaths.length === 0;
   if (harness.diff === undefined || changedPaths.length === 0) return false;
   return findScopeViolations(changedPaths, { owned: packet.scope.owned_paths, forbidden: packet.scope.forbidden_paths }, platform).length === 0;
 }
 
-/** The harness pointers that evidence a criterion by substitution. */
-export function harnessPointers(harness: HarnessEvidence): EvidenceRef[] {
-  return [...harness.verification.map((record) => record.evidence), ...(harness.diff === undefined ? [] : [harness.diff.evidence])];
+/** The harness pointers that evidence a criterion by substitution: the proving runs, then the diff. */
+export function harnessPointers(harness: HarnessEvidence, packet?: Pick<TaskContextPacket, "acceptance_criteria">): EvidenceRef[] {
+  const verification = packet === undefined ? harness.verification : provingVerification(packet, harness);
+  return [...verification.map((record) => record.evidence), ...(harness.diff === undefined ? [] : [harness.diff.evidence])];
 }
 
 export interface CompletionEvidence {
@@ -388,7 +400,7 @@ export async function resolveCompletionEvidence(
   const substituted: string[] = [];
   let acceptanceEvidence = claimed.map((entry) => ({ criterion_id: entry.criterion_id, evidence: [...entry.evidence] }));
   if (index.harness !== undefined && harnessCanSubstitute(packet, index.harness, index.changedPaths, platform)) {
-    const pointers = harnessPointers(index.harness);
+    const pointers = harnessPointers(index.harness, packet);
     for (const criterion of packet.acceptance_criteria) {
       if (evidenced.has(criterion.id)) continue;
       substituted.push(criterion.id);
@@ -523,8 +535,22 @@ export interface ReviewVerification {
   readonly resolution?: readonly EvidenceResolution[];
 }
 
-/** Evidence that is independent of the reviewed worker (ADR-09 as amended by ADR-18). */
-const INDEPENDENT = new Set(["reviewer", "harness"]);
+/**
+ * Whether a resolved review pointer is independent evidence for a criterion (ADR-09 as amended by
+ * ADR-18 and review R1): the reviewer's own tool evidence, or a passed harness verification run
+ * that proves the criterion (`verificationProves`). The pinned diff (`harness-diff`) only shows
+ * that a change exists, which is the thing under review: it is supporting evidence, never enough.
+ */
+export function isIndependentReviewEvidence(evidence: EvidenceRef, harness: HarnessEvidence | undefined, statement: string | undefined): boolean {
+  if (evidence.produced_by === "reviewer") return true;
+  if (evidence.kind !== "harness-verification") return false;
+  const record = harness?.verification.find((candidate) => candidate.evidence.ref === evidence.ref.trim());
+  return record !== undefined && verificationProves(record, statement);
+}
+
+/** What a met verdict lacks when it has no independent evidence (shown to the reviewer and recorded). */
+export const INDEPENDENT_EVIDENCE_HINT =
+  "needs independent evidence: one of your own tool results (\"#n\", produced_by: reviewer) or a passed harness-verification run of a build/test command (or one the criterion names); harness-diff alone only shows that a change exists";
 
 export async function verifyReview(
   review: ReviewPacket,
@@ -539,7 +565,9 @@ export async function verifyReview(
   if (review.reviewed_attempt_id !== completion.attempt_id) invalid.push("review names another attempt");
   if (review.reviewed_artifact_digest !== indexes.worker.artifactDigest) invalid.push("review is not bound to the pinned artifact");
   if (review.completion_digest !== packetDigest(completion)) invalid.push("review is bound to another completion packet");
-  const harnessIndex: EvidenceIndex = { ...indexes.worker, harness: indexes.worker.harness ?? completion.harness_evidence };
+  const harness = indexes.worker.harness ?? completion.harness_evidence;
+  const harnessIndex: EvidenceIndex = { ...indexes.worker, harness };
+  const statements = new Map<string, string>(packet.acceptance_criteria.map((criterion) => [criterion.id, criterion.statement]));
   const independent = new Map<string, string[]>();
   for (const criterion of review.criteria) {
     const reasons: string[] = [];
@@ -548,7 +576,7 @@ export async function verifyReview(
       const index = evidence.produced_by === "reviewer" ? indexes.reviewer : evidence.produced_by === "worker" ? indexes.worker : evidence.produced_by === "harness" ? harnessIndex : undefined;
       const result = index === undefined ? unresolved(evidence, criterion.criterion_id, `${evidence.produced_by} evidence is not accepted in a review`) : await resolvePointer(evidence, index, criterion.criterion_id);
       resolution.push(result);
-      if (result.status === "resolved" && INDEPENDENT.has(evidence.produced_by)) count += 1;
+      if (result.status === "resolved" && isIndependentReviewEvidence(evidence, harness, statements.get(criterion.criterion_id))) count += 1;
       if (result.status !== "resolved") reasons.push(result.reason ?? "does not resolve");
     }
     if (count === 0) independent.set(criterion.criterion_id, reasons);
@@ -559,7 +587,7 @@ export async function verifyReview(
     else if (verdict.verdict !== "met") revise.push(`${criterion.id} is ${verdict.verdict}`);
     else if (independent.has(criterion.id)) {
       const reasons = independent.get(criterion.id) ?? [];
-      revise.push(`${criterion.id} is unverifiable: no resolvable reviewer or harness evidence${reasons.length > 0 ? ` (${reasons.slice(0, 3).join("; ")})` : ""}`);
+      revise.push(`${criterion.id} is unverifiable: it ${INDEPENDENT_EVIDENCE_HINT}${reasons.length > 0 ? ` (${reasons.slice(0, 3).join("; ")})` : ""}`);
     }
   }
   if (invalid.length > 0) return { decision: "invalid", problems: invalid, resolution };

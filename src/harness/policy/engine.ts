@@ -152,6 +152,7 @@ function computePolicy(inputs: PolicyInputs, workspaceTrusted: boolean): Effecti
     exec_confinement: execConfinementFor(inputs.sandbox.enforcement, mode),
     verification_commands: unique((inputs.taskScope?.verification_commands ?? []).map((command) => command.trim()).filter((command) => command.length > 0)),
     workspace_trusted: workspaceTrusted,
+    ...((inputs.taskScope?.dependency_links ?? []).length === 0 ? {} : { dependency_links: unique([...(inputs.taskScope?.dependency_links ?? [])]) }),
     layers,
   });
 }
@@ -259,6 +260,7 @@ function evaluateCommand(action: NormalizedAction, policy: EffectivePolicy, deny
     cwd: action.command.cwd,
     writeScope: policy.write_scope,
     forbidden: policy.forbidden,
+    dependencyLinks: (policy.dependency_links ?? []).length > 0,
   });
   for (const finding of classification.findings) deny("platform", finding.code, finding.message, finding.rail);
   if (action.destructive && !classification.destructive) {

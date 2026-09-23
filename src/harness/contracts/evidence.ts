@@ -124,6 +124,15 @@ export function checkVerificationOutcome(outcome: VerificationShape, context: z.
 }
 
 /**
+ * What kind of check a verification command is, classified by the harness when it runs it:
+ * `build-test` (the vetted build/test allowlist, installs excluded), `read-only` (git
+ * status/diff/log/show, listing, viewing, search: always passes, proves nothing about behaviour)
+ * or `other`. Absent on records written before the classification existed (treated as `other`).
+ */
+export const VERIFICATION_COMMAND_CLASSES = ["build-test", "read-only", "other"] as const;
+export type VerificationCommandClass = (typeof VERIFICATION_COMMAND_CLASSES)[number];
+
+/**
  * A harness verification result as the completion packet carries it. `evidence` is its pointer:
  * kind `harness-verification`, produced by `harness`, `ref` = `<session_id>#<seq>` of the
  * `attempt/verification_ran` event, `digest` = the output blob digest when output was stored.
@@ -133,6 +142,7 @@ export const harnessVerificationSchema = z
     /** 1-based position of the command in the packet's `verification.commands`. */
     ordinal: z.int().min(1).max(100),
     command: z.string().min(1).max(4000),
+    command_class: z.enum(VERIFICATION_COMMAND_CLASSES).optional(),
     status: z.enum(HARNESS_VERIFICATION_STATUSES),
     termination: z.enum(PROCESS_TERMINATIONS).optional(),
     exit_code: z.int().nullable(),
@@ -146,6 +156,29 @@ export const harnessVerificationSchema = z
     }
   });
 export type HarnessVerification = z.infer<typeof harnessVerificationSchema>;
+
+function commandPattern(command: string): RegExp | undefined {
+  const words = command.trim().split(/\s+/).filter((word) => word !== "");
+  if (words.length === 0 || words.join(" ").length < 2) return undefined;
+  const body = words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+  return new RegExp(`(^|[\\s\`'"(])${body}($|[\\s\`'".,;:)])`);
+}
+
+/** Whether a criterion statement names the verification command exactly (whitespace-insensitive). */
+export function criterionNamesCommand(statement: string, command: string): boolean {
+  return commandPattern(command)?.test(statement) === true;
+}
+
+/**
+ * Whether a harness verification run proves a criterion (review R1/R2): it passed, it is not a
+ * read-only command, and it is either a build/test-class command or one the criterion statement
+ * names exactly. Without `statement`, only build/test-class runs qualify for every criterion.
+ */
+export function verificationProves(record: Pick<HarnessVerification, "status" | "command" | "command_class">, statement?: string): boolean {
+  if (record.status !== "passed" || record.command_class === "read-only") return false;
+  if (record.command_class === "build-test") return true;
+  return statement !== undefined && criterionNamesCommand(statement, record.command);
+}
 
 /**
  * Everything the harness proved about an attempt without asking the model: the verification
@@ -188,6 +221,11 @@ export const REPORT_CORRECTION_ROUNDS = 1 as const;
 
 /** Repair accounting a completion or review packet carries. */
 export const repairCountsSchema = z.strictObject({
+  /**
+   * In-tool report corrections used in the attempt's session. Counted per session, not per turn:
+   * the one correction round is spent once for the whole attempt and is not renewed by a later
+   * evidence or verification repair round.
+   */
   report_corrections: z.int().min(0).max(REPORT_CORRECTION_ROUNDS),
   evidence_repairs: z.int().min(0).max(10),
   verification_repairs: z.int().min(0).max(10),

@@ -92,7 +92,7 @@ export function createControlTools(callbacks: ControlCallbacks): Tool[] {
   return [
     controlTool(
       REPORT_TOOL_NAMES.task,
-      "Finish the attempt: status, summary and evidence per acceptance criterion. Cite a tool result by the [#n] shown before it (ref \"#n\"). The harness resolves every ref in the call and says which refs are valid if one does not resolve. Call it last.",
+      "End the attempt: status, summary, evidence per criterion (ref \"#n\" = the [#n] before a tool result, produced_by worker). Call it last.",
       ["explorer", "implementer", "debugger"],
       taskReportInputSchema,
       callbacks.taskReport,
@@ -101,7 +101,7 @@ export function createControlTools(callbacks: ControlCallbacks): Tool[] {
     ),
     controlTool(
       REPORT_TOOL_NAMES.review,
-      "Finish the review: a verdict per acceptance criterion with independent evidence (your own tool results as \"#n\", produced_by reviewer, or harness records, produced_by harness), findings and accept|revise|block. Call it last.",
+      "End the review: verdict per criterion, findings, accept|revise|block. met needs your own \"#n\" (produced_by reviewer) or a passed harness-verification not marked [supporting only]. Call it last.",
       ["reviewer"],
       reviewReportInputSchema,
       callbacks.reviewReport,

@@ -331,6 +331,46 @@ test("AC-7: arguments carrying a live credential value are denied as secret-egre
   assertLegal(harness);
 });
 
+test("review R4: a system call (harness verification) gets the credential check and the tool/* audit trail, no short ref, and never asks", async (t) => {
+  const root = await workspace(t);
+  const script = await nodeScript(root, "check.mjs", "console.log('SUPERSECRET-VALUE-42 ok')\n");
+  const harness = setup(root, { redactionValues: ["SUPERSECRET-VALUE-42"], verification: [script], trusted: true });
+  const invoke = (args: Record<string, unknown>, actor?: "system") => {
+    const effective = harness.ofType("policy/snapshot")[0]?.data.policy;
+    return harness.gateway.invoke(
+      { tool_call_id: createId("toolCall"), provider_call_id: `harness-${createId("toolCall")}`, tool_name: "exec", arguments: args },
+      { runId: effective!.run_id, taskId: effective!.task_id, attemptId: undefined, role: "implementer", policy: effective!, ...(actor === undefined ? {} : { actor }) },
+      new AbortController().signal,
+    );
+  };
+  await harness.call("read_file", { path: "check.mjs" });
+  const leak = await invoke({ argv: ["node", "check.mjs", "SUPERSECRET-VALUE-42"] }, "system");
+  assert.equal(leak.state, "denied", "the credential-in-arguments check applies to system calls");
+  assert.equal(leak.decision?.rail, "secret-egress");
+  const ran = await invoke({ argv: script }, "system");
+  assert.equal(ran.state, "succeeded", JSON.stringify(ran.result));
+  assert.equal(ran.ref, undefined, "a system call takes no short ref");
+  assert.doesNotMatch(ran.result.text, /SUPERSECRET-VALUE-42/, "its output is redacted like any tool output");
+  const system = harness.ofType("tool/call_proposed").filter((event) => event.actor.kind === "system");
+  assert.equal(system.length, 2);
+  assert.ok(system.every((event) => event.data.ref === undefined));
+  const next = await harness.call("read_file", { path: "check.mjs" });
+  assert.equal(next.ref, 2, "the model's numbering continues densely around system calls");
+
+  const asking = setup(root, { mode: "ask", verification: [script], trusted: true });
+  await asking.call("read_file", { path: "check.mjs" });
+  const askPolicy = asking.ofType("policy/snapshot")[0]!.data.policy;
+  const refused = await asking.gateway.invoke(
+    { tool_call_id: createId("toolCall"), provider_call_id: "harness-ask", tool_name: "exec", arguments: { argv: script } },
+    { runId: askPolicy.run_id, taskId: askPolicy.task_id, attemptId: undefined, role: "implementer", policy: askPolicy, actor: "system" },
+    new AbortController().signal,
+  );
+  assert.equal(refused.state, "denied");
+  assert.equal(refused.result.error?.code, "approval_unavailable");
+  assert.equal(asking.ofType("approval/requested").length, 0, "a system call never asks the user");
+  assertLegal(harness);
+});
+
 test("a refused append starts nothing: no record means no side effect", async (t) => {
   const root = await workspace(t);
   const harness = setup(root);

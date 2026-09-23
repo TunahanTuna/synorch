@@ -1,5 +1,5 @@
-import { WORKSPACE_UNTRUSTED_CODE, type ExecConfinement, type PolicyMode } from "../contracts/index.ts";
-import { gitInvocation } from "./command-rules.ts";
+import { WORKSPACE_UNTRUSTED_CODE, type ExecConfinement, type PolicyMode, type VerificationCommandClass } from "../contracts/index.ts";
+import { dependencyMutation, gitInvocation } from "./command-rules.ts";
 import { parseShellScript, programName } from "./shell-parser.ts";
 
 /**
@@ -88,6 +88,19 @@ export function evaluateExecAllowlist(input: ExecAllowlistInput): ExecAllowlistD
     return { decision: "ask", code: "exec-unconfined", layer, message: `${shown} would run without a full sandbox (${why}); it needs approval` };
   }
   return { decision: "deny", code: "exec-not-allowlisted", layer, message: `${shown} cannot run without a full sandbox: ${why}` };
+}
+
+/**
+ * What kind of check a verification argv is (ADR-18, review R1/R2): `build-test` for the vetted
+ * build/test list (minus installs), `read-only` for the read-only list (git status/diff/log/show,
+ * listing, viewing, search), `other` for anything else. Only a passed `build-test` run (or one a
+ * criterion names exactly, never a `read-only` one) proves behaviour.
+ */
+export function classifyVerificationCommand(argv: readonly string[]): VerificationCommandClass {
+  if (argv.length === 0 || unrecognised(argv) !== undefined || hardRefusal(argv) !== undefined || gitIntegration(argv) !== undefined) return "other";
+  if (isReadOnlyCommand(argv)) return "read-only";
+  if (isBuildCommand(argv) && dependencyMutation(programName(argv[0] ?? ""), argv.slice(1)) === undefined) return "build-test";
+  return "other";
 }
 
 /** Why an argv cannot be recognised at all, or undefined when it is plain enough to look up. */

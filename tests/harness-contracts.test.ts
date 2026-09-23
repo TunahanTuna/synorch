@@ -571,6 +571,8 @@ test("ADR-18 events: attempt/verification_ran and attempt/repair_requested are v
   const ran = (data: Record<string, unknown>) => envelopeOf("attempt/verification_ran", 1, { ...attempt, ordinal: 1, command: "node check.mjs", duration_ms: 120, output_excerpt: "ok", ...data });
   assert.equal(parseSessionEvent(ran({ argv: ["node", "check.mjs"], status: "passed", termination: "exited", exit_code: 0 })).status, "ok");
   assert.equal(parseSessionEvent(ran({ argv: ["node", "check.mjs"], status: "passed", termination: "exited", exit_code: 1 })).status, "invalid");
+  assert.equal(parseSessionEvent(ran({ argv: ["pnpm", "test"], command_class: "build-test", status: "passed", termination: "exited", exit_code: 0 })).status, "ok", "the harness records how it classified the command");
+  assert.equal(parseSessionEvent(ran({ argv: ["pnpm", "test"], command_class: "trusted", status: "passed", termination: "exited", exit_code: 0 })).status, "invalid");
   assert.equal(parseSessionEvent(ran({ status: "not-run", exit_code: null, reason: "not expressible as argv" })).status, "ok");
   assert.equal(parseSessionEvent(ran({ status: "not-run", exit_code: null })).status, "invalid", "not-run needs a reason");
   const repair = (round: number) => envelopeOf("attempt/repair_requested", 1, { ...attempt, kind: "evidence-repair", round, budget: 2, problems: ["AC-1 has no resolvable evidence"] });

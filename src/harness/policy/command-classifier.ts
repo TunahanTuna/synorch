@@ -1,5 +1,7 @@
 import { FORBIDDEN_CREDENTIAL_SOURCES, type HardRail } from "../contracts/index.ts";
 import {
+  DEPENDENCY_MUTATION_CODE,
+  dependencyMutation,
   DESTRUCTIVE_COMMAND_RULES,
   DOWNLOAD_PROGRAMS,
   DOWNLOAD_REFERENCE,
@@ -217,6 +219,10 @@ function analyzeArgv(argv: readonly string[], scope: CommandScope, depth: number
     const args = current.slice(1);
     applyRules(program, args, scope, analysis);
     inspectCredentials(program, current, analysis);
+    if (scope.dependencyLinks === true) {
+      const mutation = dependencyMutation(program, args);
+      if (mutation !== undefined) analysis.findings.push({ rail: "write-outside-scope", code: DEPENDENCY_MUTATION_CODE, message: mutation });
+    }
     const script = inlineScriptOf(program, args);
     if (script !== undefined) {
       analysis.mutating = true;

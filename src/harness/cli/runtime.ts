@@ -30,6 +30,7 @@ import {
   type SessionEventDraft,
   type SessionId,
   type SessionStore,
+  type ToolGateway,
   type ToolRegistry,
   type TrustGrantSource,
   type WorkspaceTrustState,
@@ -67,7 +68,7 @@ import {
   type CoordinatorLimits,
   type VerificationRunner,
 } from "../orchestration/index.ts";
-import { classifyCommand, createHeadlessApprovalBroker, createPolicyEngine, createWorkspaceTrustStore } from "../policy/index.ts";
+import { classifyCommand, classifyVerificationCommand, createHeadlessApprovalBroker, createPolicyEngine, createWorkspaceTrustStore } from "../policy/index.ts";
 import {
   createAnthropicMessagesAdapter,
   createClaudeCodeAdapter,
@@ -78,7 +79,7 @@ import {
   type FetchLike,
 } from "../providers/index.ts";
 import { createBlobStore, createSessionStore } from "../store/index.ts";
-import { createRedactor, createSandboxRunner, createToolGateway, createToolRegistry, probeSandbox } from "../tools/index.ts";
+import { createSandboxRunner, createToolGateway, createToolRegistry, probeSandbox } from "../tools/index.ts";
 import type { RouteOverride } from "./args.ts";
 import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts";
 import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
@@ -536,45 +537,48 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   });
 
   /**
-   * ADR-18 D1: the harness runs a packet's verification commands itself after the worker's turn,
-   * through the `exec` tool's own normalization, the policy engine (the packet's exact
-   * verification commands, workspace trust) and the sandbox runner; output is redacted like any
-   * tool output. A command the policy does not allow outright is not run (`not-run` + reason).
+   * ADR-18 D1 / review R4: the harness runs a packet's verification commands itself after the
+   * worker's turn, as a system call through the tool gateway into the attempt's session log: the
+   * same pipeline as any `exec` (normalization, the credential-in-arguments check, the policy
+   * engine with the packet's exact verification commands, workspace trust and dependency-link
+   * rules, the sandbox runner, redaction) and the same `tool/*` audit events, with `actor.kind:
+   * system` and no short ref. A command the policy does not allow outright is not run (a system
+   * call never asks): `not-run` + reason. The class (`classifyVerificationCommand`) says whether a
+   * passed run can prove behaviour (review R1/R2).
    */
+  const verificationGateways = new WeakMap<EventStore, ToolGateway>();
+  const verificationBroker = createHeadlessApprovalBroker({ mode: options.policyMode });
   const verification: VerificationRunner = async (request) => {
     const started = Date.now();
-    const exec = registry.get("exec");
-    const notRun = (reason: string) => ({ status: "not-run" as const, exitCode: null, output: "", durationMs: Date.now() - started, reason: reason.slice(0, 500) });
-    if (exec === undefined) return notRun("no exec tool is registered");
-    const parsed = exec.input.safeParse({ argv: [...request.argv] });
-    if (!parsed.success) return notRun("the command is not a valid exec argv");
-    const context = {
-      toolCallId: createId("toolCall"),
-      runId: request.runId,
-      taskId: request.taskId,
-      attemptId: request.attemptId,
-      role: request.role,
-      workspaceRoot: request.workspaceRoot,
-      policy: request.policy,
-      sandbox: runner,
-      blobs,
-      signal: request.signal,
-      onUpdate: () => undefined,
-    };
+    const commandClass = classifyVerificationCommand(request.argv);
+    const notRun = (reason: string) => ({ status: "not-run" as const, commandClass, exitCode: null, output: "", durationMs: Date.now() - started, reason: reason.slice(0, 500) });
+    const events = request.events;
+    if (events === undefined) return notRun("no attempt log is open to record the run");
+    let gateway = verificationGateways.get(events);
+    if (gateway === undefined) {
+      gateway = createToolGateway({ events, blobs, registry, policy, approvals: verificationBroker, sandbox: runner, redactionValues: () => [...redactionValues], platform });
+      verificationGateways.set(events, gateway);
+    }
     try {
-      const action = await exec.normalize(parsed.data, context);
-      const decision = policy.evaluate(action, request.policy);
-      if (decision.decision !== "allow") {
-        return notRun(`policy ${decision.decision}: ${decision.reasons.map((reason) => reason.message).join("; ")}`);
+      const toolCallId = createId("toolCall");
+      const outcome = await gateway.invoke(
+        { tool_call_id: toolCallId, provider_call_id: `harness-verification-${toolCallId}`, tool_name: "exec", arguments: { argv: [...request.argv] } },
+        { runId: request.runId, taskId: request.taskId, attemptId: request.attemptId, role: request.role, policy: request.policy, actor: "system" },
+        request.signal,
+      );
+      const result = outcome.result;
+      if (result.exit_code === undefined && (outcome.state === "denied" || (outcome.state === "cancelled" && outcome.decision?.decision !== "allow"))) {
+        return notRun(`${outcome.state === "denied" ? "refused" : "cancelled"}: ${result.error?.message ?? "the gateway did not run it"}`);
       }
-      const result = await exec.execute(parsed.data, context);
-      const redact = createRedactor(() => [...redactionValues]);
-      const output = redact(`${result.text}${result.error === undefined ? "" : `
-${result.error.message}`}`).text;
+      let full = result.text;
+      if (result.blob !== undefined && result.blob.media_type.startsWith("text/")) {
+        full = await blobs.get(result.blob.digest).then((bytes) => Buffer.from(bytes).toString("utf8"), () => result.text);
+      }
+      const output = `${full}${result.error === undefined ? "" : `\n${result.error.message}`}`;
       const termination = result.exit_code !== undefined ? "exited" : result.error?.code === "timeout" ? "timeout" : result.error?.code === "cancelled" ? "cancelled" : "spawn-failed";
       const exitCode = result.exit_code ?? null;
       const passed = termination === "exited" && exitCode === 0;
-      return { status: passed ? ("passed" as const) : ("failed" as const), termination, exitCode, output, durationMs: Date.now() - started };
+      return { status: passed ? ("passed" as const) : ("failed" as const), commandClass, termination, exitCode, output, durationMs: Date.now() - started };
     } catch (error) {
       return notRun(`the harness could not run it: ${error instanceof Error ? error.message : String(error)}`);
     }

@@ -22,6 +22,8 @@ tool/result_recorded    → model'e tool_result (`renderToolResultText(ref, resu
 
 `ToolGateway` olayları kendisi yazar; hiçbir modül kayıtsız tool çalıştıramaz. Gateway reddedilen veya başarısız çağrı için throw etmez; `ToolCallOutcome` döner ve model bir hata sonucu görür. Hook veya model metni hattın hiçbir adımını atlayamaz.
 
+**Sistem çağrıları.** Harness'in kendi başlattığı çağrılar — paketin doğrulama komutları (ADR-18, bağımsız inceleme R4) — aynı hattan `ToolInvocationScope.actor: "system"` ile geçer: normalizasyon, argümanda kimlik bilgisi denetimi (`credential-in-arguments`), policy (rolün policy'si; `verification_commands`, workspace trust, `dependency_links`), sandbox, redaksiyon ve `tool/*` olayları aynıdır. Farklar: olayların `actor.kind`'ı `system`'dir (`role` ve `attempt_id` korunur); kısa ref atanmaz (`tool/call_proposed.ref` yok, modelin `[#n]` sırası bozulmaz); `ask` kararı onay istemeden `denied` + `approval_unavailable` olur; attempt günlüğü bu çağrıları modelin araç çağrısı veya kanıtı saymaz (sonuç `harness_evidence` olarak kaydedilir).
+
 ## 2. Metadata
 
 | Alan | Kural |
@@ -43,7 +45,7 @@ tool/result_recorded    → model'e tool_result (`renderToolResultText(ref, resu
 
 | Ad | Etki | Roller | Not |
 | --- | --- | --- | --- |
-| `read_file` | read | hepsi | read_scope; binary/boyut sınırı; secret redaksiyonu. İlk satır başlıktır: `<path> · digest sha256:<hex> · lines <a>-<b> of <n>`; digest attempt çalışma alanındaki ham baytların `workspaceDigest`'idir (`ToolResult.digest`), aynen `expected_digest` olarak kullanılabilir. Modele gösterilen metin 32 KiB'la sınırlıdır (baş + son; tamamı blob'ta, "truncated; use offset/limit" notu) |
+| `read_file` | read | hepsi | read_scope; binary/boyut sınırı; secret redaksiyonu. İlk satır başlıktır: `<path> · digest sha256:<hex> · lines <a>-<b> of <n>`; digest attempt çalışma alanındaki ham baytların `workspaceDigest`'idir (`ToolResult.digest`), aynen `expected_digest` olarak kullanılabilir. Modele gösterilen metin 16 KiB'la sınırlıdır (`ToolResult.text` üst sınırı; baş + son; tamamı blob'ta, "truncated; use offset/limit" notu) |
 | `search` | read | hepsi | ripgrep benzeri; read_scope |
 | `list_dir` | read | hepsi | |
 | `git_status`, `git_diff` | read | hepsi | Kullanıcı değişikliklerini ayrı gösterir |
@@ -65,7 +67,7 @@ tool/result_recorded    → model'e tool_result (`renderToolResultText(ref, resu
 
 - Gateway her çağrıya attempt içinde (attempt yoksa session içinde) 1'den başlayan bir sıra verir, `tool/call_proposed.ref` (v2) olarak yazar ve `ToolCallOutcome.ref` ile döner. Resume sonrası sayaç, o attempt'in kayıtlı `tool/call_proposed` olaylarından devam eder; aynı sayı iki çağrıya verilmez.
 - Driver model mesajındaki tool sonucunu yalnız `renderToolResultText(ref, result)` ile kurar: `[#n] ` + metin (+ hata satırı `Error [<code>]: <message>`; boş başarılı sonuç `ok`). Adapter'lar metni aynen gönderir; `provider_call_id` yalnız sağlayıcı eşlemesi içindir.
-- Araç çağrısı sırasında `ToolExecutionContext.ref` ve `ToolExecutionContext.files` (`AttemptFileLedger`: attempt'in yol başına son okunan/yazılan digest'i; anahtar NFC + platform katlama politikası) araçlara verilir. Ledger bir kolaylıktır, izin değildir.
+- Araç çağrısı sırasında `ToolExecutionContext.ref` ve `ToolExecutionContext.files` (`AttemptFileLedger`: attempt'in yol başına son okunan/yazılan digest'i; anahtar NFC + platform katlama politikası) araçlara verilir. Ledger bir kolaylıktır, izin değildir. Ledger bellekte, gateway örneği başına tutulur ve olaylardan **yeniden kurulmaz**: session resume'dan (ve yeni driver/gateway örneğiyle başlayan bir onarım turundan) sonra boş başlar; model dosyayı yeniden okur veya `expected_digest` verir (bilinmeyen yol → "read the file first").
 - Rapor araçları (`task_report`, `review_report`) kanıtı çağrı içinde çözer; çözülmeyen işaretçide `invalid_arguments` döner, `text` alanı `formatEvidenceCorrection` çıktısıdır (geçerli `#n` listesi) ve aynı session'da bir düzeltme hakkı vardır ([task-packets §8](./task-packets.md#8-harness-kanıtı-çözümleme-ve-onarım-adr-18)).
 
 ## 4. İptal, crash ve idempotency

@@ -446,10 +446,15 @@ export type CompletionPacket = z.infer<typeof completionPacketSchema>;
 export const FINDING_SEVERITIES = ["blocker", "major", "minor", "info"] as const;
 
 /**
- * Evidence that is independent of the reviewed worker (ADR-09 as amended by ADR-18): what the
- * reviewer produced itself, or what the harness computed (never the worker's claim).
+ * Evidence that can carry a met verdict on its own (ADR-09 as amended by ADR-18 and review R1):
+ * what the reviewer produced itself, or a harness verification run. The pinned diff
+ * (`harness-diff`) only shows that a change exists and is supporting evidence; the worker's claim
+ * never counts. Orchestration additionally requires the run to have passed and to prove the
+ * criterion (`verificationProves`), which the packet alone cannot show.
  */
-const INDEPENDENT_REVIEW_PRODUCERS: ReadonlySet<string> = new Set(["reviewer", "harness"]);
+function isIndependentKind(evidence: { readonly kind: string; readonly produced_by: string }): boolean {
+  return evidence.produced_by === "reviewer" || evidence.kind === "harness-verification";
+}
 export const REVIEW_DECISIONS = ["accept", "revise", "block"] as const;
 
 const reviewCriterionSchema = z.strictObject({
@@ -496,11 +501,11 @@ export const reviewPacketSchema = z
     }
     report(context, checkUniqueCriteria(review.criteria.map((criterion) => ({ id: criterion.criterion_id })), ["criteria"]));
     for (const [index, criterion] of review.criteria.entries()) {
-      if (criterion.verdict === "met" && !criterion.evidence.some((evidence) => INDEPENDENT_REVIEW_PRODUCERS.has(evidence.produced_by))) {
+      if (criterion.verdict === "met" && !criterion.evidence.some(isIndependentKind)) {
         context.addIssue({
           code: "custom",
           path: ["criteria", index, "evidence"],
-          message: "a met verdict needs at least one piece of evidence the reviewer produced itself or the harness computed",
+          message: "a met verdict needs evidence the reviewer produced itself or a harness verification run (harness-diff alone is not enough)",
         });
       }
     }
@@ -526,13 +531,19 @@ export type ReviewPacket = z.infer<typeof reviewPacketSchema>;
 export const REPORT_TOOL_NAMES = { task: "task_report", review: "review_report", plan: "plan_propose" } as const;
 export type ReportToolName = (typeof REPORT_TOOL_NAMES)[keyof typeof REPORT_TOOL_NAMES];
 
+/**
+ * The evidence pointer as the report tools show it to the model: defined once (`$defs/evidence`
+ * in the tool's JSON schema) instead of repeated per use; `digest` stays optional (ADR-20).
+ */
+const reportEvidenceSchema = evidenceRefSchema.meta({ id: "evidence" });
+
 export const taskReportInputSchema = z.strictObject({
   status: z.enum(COMPLETION_STATUSES),
   summary: nonEmptyTextSchema,
   acceptance_evidence: z
-    .array(z.strictObject({ criterion_id: acceptanceCriterionIdSchema, evidence: z.array(evidenceRefSchema).min(1) }))
+    .array(z.strictObject({ criterion_id: acceptanceCriterionIdSchema, evidence: z.array(reportEvidenceSchema).min(1) }))
     .default([]),
-  commands_run: z.array(z.strictObject({ command: z.string().min(1), exit_code: z.int(), evidence: evidenceRefSchema })).default([]),
+  commands_run: z.array(z.strictObject({ command: z.string().min(1), exit_code: z.int(), evidence: reportEvidenceSchema })).default([]),
   decisions_made: z.array(nonEmptyTextSchema).default([]),
   skipped_checks: z.array(z.strictObject({ check: z.string().min(1), reason: nonEmptyTextSchema })).default([]),
   unresolved_risks: z.array(nonEmptyTextSchema).default([]),
@@ -542,7 +553,7 @@ export const taskReportInputSchema = z.strictObject({
 export type TaskReportInput = z.infer<typeof taskReportInputSchema>;
 
 export const reviewReportInputSchema = z.strictObject({
-  criteria: z.array(reviewCriterionSchema).min(1),
+  criteria: z.array(reviewCriterionSchema.extend({ evidence: z.array(reportEvidenceSchema) })).min(1),
   findings: z.array(reviewFindingSchema).default([]),
   decision: z.enum(REVIEW_DECISIONS),
 });

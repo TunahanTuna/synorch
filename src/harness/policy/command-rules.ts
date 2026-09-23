@@ -15,6 +15,93 @@ export interface CommandScope {
   readonly cwd: string;
   readonly writeScope: readonly string[];
   readonly forbidden: readonly string[];
+  /**
+   * The attempt workspace links dependency directories from the main tree (ADR-19). Commands that
+   * install, add, remove or update dependencies would write through the link into the main tree,
+   * outside the change set, so they are refused (`dependency-mutation-in-linked-worktree`).
+   */
+  readonly dependencyLinks?: boolean;
+}
+
+export const DEPENDENCY_MUTATION_CODE = "dependency-mutation-in-linked-worktree";
+
+const NODE_PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
+/** Package-manager subcommands (and aliases) that write `node_modules` or the lockfile. */
+const NODE_DEPENDENCY_SUBS = new Set([
+  "install",
+  "i",
+  "in",
+  "isntall",
+  "add",
+  "a",
+  "ci",
+  "clean-install",
+  "install-test",
+  "it",
+  "install-ci-test",
+  "cit",
+  "remove",
+  "rm",
+  "r",
+  "uninstall",
+  "un",
+  "unlink",
+  "link",
+  "ln",
+  "update",
+  "up",
+  "upgrade",
+  "prune",
+  "dedupe",
+  "ddp",
+  "rebuild",
+  "rb",
+  "import",
+  "fetch",
+  "patch-commit",
+]);
+const PYTHON_PROGRAMS = new Set(["python", "python3", "py"]);
+const PIP_SUBS = new Set(["install", "uninstall"]);
+const DEPENDENCY_SUBS: Readonly<Record<string, ReadonlySet<string>>> = {
+  pip: PIP_SUBS,
+  pip3: PIP_SUBS,
+  uv: new Set(["sync", "add", "remove", "venv"]),
+  poetry: new Set(["install", "add", "remove", "update", "sync"]),
+  pipenv: new Set(["install", "uninstall", "update", "sync", "clean"]),
+  cargo: new Set(["fetch", "add", "remove", "rm", "update", "install", "uninstall", "vendor"]),
+  go: new Set(["get", "install"]),
+  dotnet: new Set(["restore", "add", "remove"]),
+  composer: new Set(["install", "update", "require", "remove"]),
+  bundle: new Set(["install", "update", "add", "remove"]),
+  gem: new Set(["install", "uninstall", "update"]),
+};
+
+/**
+ * Why `program args…` mutates dependencies (install/add/remove/update, `pip install`, `npm ci`,
+ * `pnpm install`, bare `yarn`, `cargo fetch`, `go mod download`, `python -m venv` …), or undefined.
+ * Only consulted while dependency directories are linked into the attempt workspace.
+ */
+export function dependencyMutation(program: string, args: readonly string[]): string | undefined {
+  const words = args.filter((argument) => !argument.startsWith("-"));
+  const sub = (words[0] ?? "").toLowerCase();
+  const shown = `${program}${sub === "" ? "" : ` ${sub}`}`;
+  const why = `${shown} changes dependencies, and the dependency directories of this worktree are linked to the main tree`;
+  if (NODE_PACKAGE_MANAGERS.has(program)) {
+    if (program === "yarn" && sub === "") return `bare yarn installs dependencies, and the dependency directories of this worktree are linked to the main tree`;
+    return NODE_DEPENDENCY_SUBS.has(sub) ? why : undefined;
+  }
+  if (PYTHON_PROGRAMS.has(program) || program.startsWith("python3.")) {
+    const module = args.indexOf("-m");
+    const name = module === -1 ? undefined : args[module + 1]?.toLowerCase();
+    const rest = module === -1 ? [] : args.slice(module + 2).filter((argument) => !argument.startsWith("-"));
+    if (name === "pip" && PIP_SUBS.has((rest[0] ?? "").toLowerCase())) return `${program} -m pip ${rest[0]} changes dependencies, and the dependency directories of this worktree are linked to the main tree`;
+    if (name === "venv" || name === "virtualenv") return `${program} -m ${name} creates an environment, and the dependency directories of this worktree are linked to the main tree`;
+    return undefined;
+  }
+  if (program === "virtualenv") return `virtualenv creates an environment, and the dependency directories of this worktree are linked to the main tree`;
+  if (program === "uv" && sub === "pip" && PIP_SUBS.has((words[1] ?? "").toLowerCase())) return why;
+  if (program === "go" && sub === "mod" && ["download", "tidy", "vendor"].includes((words[1] ?? "").toLowerCase())) return why;
+  return DEPENDENCY_SUBS[program]?.has(sub) === true ? why : undefined;
 }
 
 export interface CommandRule {

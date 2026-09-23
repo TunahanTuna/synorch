@@ -39,7 +39,7 @@ Alanlar: `schema_version: 1`, `plan_id`, `run_id`, `version`, `goal`, `risk`, `s
 
 ## 3. Delta packet (`kind: delta`)
 
-Aynı task'a ek iş: `extends_digest` (önceki paketin digest'i), `plan_digest`, `delta{new_acceptance_criteria, new_known_facts, new_evidence, notes}`. Delta **scope, rol, limit veya write_mode içeremez** (strict şema); yetki genişletmek yeni tam paket ister. Boş delta reddedilir.
+Aynı task'a ek iş: `extends_digest` (önceki paketin digest'i), `plan_digest`, `delta{new_acceptance_criteria, new_known_facts, new_evidence, notes}`. Delta **scope, rol, limit veya write_mode içeremez** (strict şema); yetki genişletmek yeni tam paket ister. Boş delta reddedilir. `notes` pakete (`decisions`'a) kopyalanmaz; attempt'in **görev mesajına** ("Notes for this attempt …") yazılır (ADR-20, §8).
 
 ## 4. Completion packet
 
@@ -53,7 +53,7 @@ Completion'ın anlatı kısmı (status, summary, kanıt işaretçileri, kararlar
 
 `task_id`, `reviewed_attempt_id`, `reviewer_attempt_id` (farklı olmalı), `completion_digest`, `reviewed_artifact_digest`, `reviewer_route{provider_id, model_id}`, `independence{separate_context: true, same_provider, same_model}`, `criteria[]{criterion_id, verdict (met|not_met|unverifiable), evidence[], note?}`, `findings[]{id: F-n, severity (blocker|major|minor|info), summary, path?, line?, reproduction?, recommendation?}`, `decision (accept|revise|block)`.
 
-Kurallar: her `met` hükmü reviewer'ın **kendi ürettiği** veya **harness'in hesapladığı** (`produced_by: harness`; ADR-09'un ADR-18 değişikliği) en az bir kanıta dayanır — worker'ın iddiası hiçbir zaman yetmez; `accept` tüm ölçütlerin `met` olmasını ve blocker olmamasını gerektirir; `separate_context` her zaman `true`. Opsiyonel `evidence_resolution[]` ve `repairs{report_corrections}` reviewer işaretçilerinin çözümünü kaydeder. Reviewer'a implementer transkripti verilmez; sabitlenmiş artifact + completion + kriterler verilir (ADR-09). Implementer'ın raporu tek başına nihai kabul değildir.
+Kurallar: her `met` hükmü **bağımsız** en az bir kanıta dayanır: reviewer'ın **kendi ürettiği** kanıt (`produced_by: reviewer`) veya bir **harness doğrulama çalıştırması** (`kind: harness-verification`; ADR-09'un ADR-18 değişikliği, review R1). Sabitlenmiş diff (`harness-diff`) yalnız bir değişikliğin var olduğunu gösterir — incelenen şeyin kendisidir — ve **yalnız destekleyici** kanıttır, tek başına asla yetmez; worker'ın iddiası hiçbir zaman yetmez. Şema tür düzeyinde uygular; orchestration ayrıca çalıştırmanın `passed` olmasını ve ölçütü kanıtlamasını (`verificationProves`, §8) şart koşar; `accept` tüm ölçütlerin `met` olmasını ve blocker olmamasını gerektirir; `separate_context` her zaman `true`. Opsiyonel `evidence_resolution[]` ve `repairs{report_corrections}` reviewer işaretçilerinin çözümünü kaydeder. Reviewer'a implementer transkripti verilmez; sabitlenmiş artifact + completion + kriterler verilir (ADR-09). Implementer'ın raporu tek başına nihai kabul değildir.
 
 ## 6. Durum eşlemesi
 
@@ -617,13 +617,21 @@ Harness doğruyu hesaplar, model anlatıyı verir. Şemalar: `src/harness/contra
 
 **Rapor aracında tek düzeltme turu.** `task_report` ve `review_report` kanıtı **araç çağrısının içinde** çözer. Çözülmeyen işaretçi varsa araç `invalid_arguments` döner: `error.message` tek satırlık özet, `text` `formatEvidenceCorrection` çıktısıdır (her sorunlu işaretçi ve geçerli `#n` listesi, ör. `#5 exec node check.mjs -> exit 0`). Model aynı session'da `REPORT_CORRECTION_ROUNDS` (= 1) kez düzeltebilir; ikinci ret de kayda geçer ve rapor olduğu gibi kabul edilir (çözülmeyenler `evidence_resolution`'da `unresolved` olarak durur). Başarılı rapor turu bitirir (ADR-20, `ends_turn`).
 
-**Harness doğrulaması.** Worker turu bitince harness, paketin `verification.commands` listesini attempt çalışma alanında policy'nin `verification_commands` allowlist'i ve sandbox'la kendisi koşar; her komut için `attempt/verification_ran` yazar ve completion'a `harness_evidence.verification[]` kaydı ekler (`evidence`: `kind: harness-verification`, `produced_by: harness`, `ref: <session_id>#<seq>`). Değişiklik varsa `harness_evidence.diff` (`kind: harness-diff`, `ref` = `artifact_digest`, `changed_paths` = gerçek diff) eklenir. Worker'ın `commands_run`/`skipped_checks` iddiası tavsiye niteliğindedir; zorunlu komutun sonucu harness kaydıdır.
+**Harness doğrulaması.** Worker turu bitince harness, paketin `verification.commands` listesini attempt çalışma alanında kendisi koşar: her komut **tool gateway üzerinden bir sistem çağrısıdır** (`ToolInvocationScope.actor: system`, review R4) — `exec`'in normalizasyonu, argümanda kimlik bilgisi denetimi, policy (`verification_commands` allowlist'i, workspace trust, bağımlılık bağlantısı kuralı), sandbox ve redaksiyon aynen uygulanır; attempt session'ına `actor.kind: system` ile `tool/*` olayları yazılır, kısa ref verilmez, onay asla sorulmaz (`ask` kararı reddedilir → `not-run`) ve bu çağrılar hiçbir zaman modelin kanıtı sayılmaz (attempt günlüğü onları atlar). Harness her komut için `attempt/verification_ran` yazar ve completion'a `harness_evidence.verification[]` kaydı ekler (`evidence`: `kind: harness-verification`, `produced_by: harness`, `ref: <session_id>#<seq>`; `command_class`: `build-test | read-only | other`, `classifyVerificationCommand`). Değişiklik varsa `harness_evidence.diff` (`kind: harness-diff`, `ref` = `artifact_digest`, `changed_paths` = gerçek diff) eklenir. Worker'ın `commands_run`/`skipped_checks` iddiası tavsiye niteliğindedir; zorunlu komutun sonucu harness kaydıdır.
 
-**Ölçüt kararı.** Bir ölçüt, modelin işaretçilerinden en az biri çözülürse kanıtlıdır. Düzeltme turundan sonra hiçbiri çözülmezse ve harness doğrulamasının tüm komutları `passed` ise (en az bir komut varsa) ve yazan görevde diff kapsam içindeyse, ölçüt harness kanıtıyla kanıtlanır: `acceptance_evidence`'a harness kayıtları eklenir, `evidence_resolution`'da `method: harness-substitute` görünür ve reviewer bunu paketinde görür. Aksi halde doğrulama `revise` (yalnız kanıt) verir ve **aynı attempt** onarılır.
+**Kanıtlayan çalıştırma (`verificationProves`, review R1/R2).** Bir harness çalıştırması bir ölçütü ancak `passed` ise ve ya `command_class: build-test` ise (vetted build/test listesi; kurulum komutları hariç) ya da ölçüt ifadesi komutu **aynen** anıyorsa (`criterionNamesCommand`, boşluk duyarsız) kanıtlar. Salt okunur listedeki komutlar (`git status/diff/log/show`, listeleme, görüntüleme, arama) her zaman geçer ve davranış hakkında hiçbir şey kanıtlamaz: ölçüt onları ansa bile **asla** sayılmaz. Sınıfı olmayan (eski) kayıt `other` gibi ele alınır.
+
+**Ölçüt kararı.** Bir ölçüt, modelin işaretçilerinden en az biri çözülürse kanıtlıdır. Düzeltme turundan sonra hiçbiri çözülmezse, harness doğrulamasının tüm komutları `passed` ise, **en az biri kanıtlayan bir çalıştırmaysa** (yukarıda; `git status` gibi bir komut tek başına yetmez) ve yazan görevde diff kapsam içindeyse, ölçüt harness kanıtıyla kanıtlanır: `acceptance_evidence`'a kanıtlayan harness kayıtları ve diff eklenir, `evidence_resolution`'da `method: harness-substitute` görünür ve reviewer bunu paketinde görür. Aksi halde doğrulama `revise` (yalnız kanıt) verir ve **aynı attempt** onarılır.
 
 **Onarım ve bütçeler.** `evidence-repair` (iş sağlam, işaretçi eksik) ve `verification-repair` (harness doğrulaması `failed`) aynı attempt session'ını sorunlar listesiyle sürdürür, çalışma alanı ve artifact korunur, `attempt/repair_requested` yazılır. Bütçeler görev başınadır ve ayrıdır (`orchestrationBudgetsSchema`): `triage_retries` (yeni attempt, varsayılan 1), `evidence_repairs` (session içi onarım, varsayılan 2), `review_revisions` (review sonrası revizyon, varsayılan 2). Bir bütçe bitince orchestrator `task_triage` ile danışılır; görev kendiliğinden `failed` olmaz.
 
-**Reviewer.** Aynı mekanizma: `review_report` işaretçileri tolerant çözülür, tek düzeltme turu vardır. Düzeltmeden sonra çözülmeyen reviewer işaretçisi review'ü `invalid` yapmaz; işaretçi düşer (kayıtlı) ve reviewer/harness kanıtı kalmayan `met` hükmü `unverifiable` sayılır → review sonucu `revise` geri bildirimidir. `invalid` yalnız bağ ihlallerinde (başka görev/attempt/artifact/completion) kalır.
+**Reviewer.** Aynı mekanizma: `review_report` işaretçileri tolerant çözülür, tek düzeltme turu vardır. Bağımsız kanıt = reviewer'ın kendi çözülen araç kanıtı (`produced_by: reviewer`; reviewer'ın `read_file`/`git_diff`/`exec` çağrıları dahil) **veya** o ölçütü kanıtlayan `passed` bir `harness-verification` çalıştırması. `harness-diff` yalnız destekleyicidir. Reviewer brifinde harness kayıtları listelenir; kanıtlamayanlar (diff, salt okunur veya başarısız çalıştırma) `[supporting only]` işaretlidir. `verification.commands` boş olan standard/high-risk görevde reviewer kanıtı **kendisi üretmelidir**; yalnız diff'e dayanan `met` → `unverifiable` → `revise`.
+
+**Reviewer hükmünün düşürülmesi.** Düzeltmeden sonra çözülmeyen reviewer işaretçisi review'ü `invalid` yapmaz; işaretçi düşer (`evidence_resolution`'da `unresolved` olarak kayıtlı). Ardından bağımsız kanıtı kalmayan her `met` hükmü harness tarafından `unverifiable`'a düşürülür (`note`'a gerekçe eklenir: "harness: no independent evidence …"), `accept` kararı `revise`'a çevrilir ve review sonucu implementer'a `revise` geri bildirimidir. `invalid` yalnız bağ ihlallerinde (başka görev/attempt/artifact/completion) kalır.
+
+**Onarım sayaçları.** `repairs.report_corrections` attempt **session'ı başına** sayılır: rapor aracının çağrı içi düzeltme turu (`REPORT_CORRECTION_ROUNDS` = 1) session boyunca bir kez kullanılır, sonraki `evidence-repair`/`verification-repair` turlarında yenilenmez. `evidence_repairs` ve `verification_repairs` o attempt'te istenen session içi onarım turlarıdır (görev bütçesi `evidence_repairs`'ı paylaşır).
+
+**Delta notları.** Review `revise`'ı veya triyaj `retry`'ı sonraki attempt'e delta notu olarak gider; notlar pakete (`decisions`) kopyalanmaz, attempt'in **görev mesajına** yazılır ("Notes for this attempt (from the previous attempt and the orchestrator)").
 
 ```yaml example=evidence-resolution
 - { criterion_id: AC-1, kind: test-run, ref: "#5", produced_by: worker, status: resolved, method: short-ref, tool_call_id: call_01K5T3Q8Z4X9V2M6N7P0R1S2TE }
@@ -643,6 +651,7 @@ Harness doğruyu hesaplar, model anlatıyı verir. Şemalar: `src/harness/contra
 verification:
   - ordinal: 1
     command: node check.mjs
+    command_class: other
     status: passed
     termination: exited
     exit_code: 0
@@ -749,7 +758,7 @@ Reddedilenler: `harness_evidence`'ta olmayan harness işaretçisi; artifact'a ba
     diff: { evidence: { kind: harness-diff, ref: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", produced_by: harness }, changed_paths: [src-add.mjs] }
 ```
 
-Harness kanıtı reviewer için bağımsızdır (ADR-09 değişikliği):
+Kanıtlayan bir harness doğrulama çalıştırması reviewer için bağımsızdır (ADR-09 değişikliği): AC-2'nin ifadesi ("node check.mjs exits 0") komutu aynen andığı için `passed` çalıştırma onu kanıtlar; diff yalnız destekler:
 
 ```yaml example=review-packet
 schema_version: 2
@@ -766,12 +775,33 @@ criteria:
     evidence: [{ kind: tool-call, ref: "#2", produced_by: reviewer }]
   - criterion_id: AC-2
     verdict: met
-    evidence: [{ kind: harness-verification, ref: "ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4#41", produced_by: harness }]
+    evidence:
+      - { kind: harness-verification, ref: "ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4#41", produced_by: harness }
+      - { kind: harness-diff, ref: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", produced_by: harness }
 findings: []
 decision: accept
 evidence_resolution:
   - { criterion_id: AC-1, kind: tool-call, ref: "#2", produced_by: reviewer, status: resolved, method: short-ref, tool_call_id: call_01K5T3Q8Z4X9V2M6N7P0R1S2TW }
 repairs: { report_corrections: 0 }
+```
+
+Reddedilen: yalnız sabitlenmiş diff'e dayanan `met` (review R1) — diff incelenen değişikliğin kendisidir, kimsenin bir şey çalıştırdığını göstermez:
+
+```yaml example=review-packet invalid
+schema_version: 2
+task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+reviewed_attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+reviewer_attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T9
+completion_digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+reviewed_artifact_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+reviewer_route: { provider_id: openai, model_id: gpt-6-astra }
+independence: { separate_context: true, same_provider: true, same_model: false }
+criteria:
+  - criterion_id: AC-1
+    verdict: met
+    evidence: [{ kind: harness-diff, ref: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", produced_by: harness }]
+findings: []
+decision: accept
 ```
 
 Bütçeler (`orchestrationBudgetsSchema`; eksik alanlar varsayılanı alır):

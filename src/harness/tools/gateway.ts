@@ -147,7 +147,11 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
       dependencies.events.append({
         ...body,
         event_version: EVENT_VERSIONS[body.type],
-        actor: { kind: scope.role === "orchestrator" ? "orchestrator" : "worker", role: scope.role, ...(scope.attemptId === undefined ? {} : { attempt_id: scope.attemptId }) },
+        actor: {
+          kind: scope.actor === "system" ? "system" : scope.role === "orchestrator" ? "orchestrator" : "worker",
+          role: scope.role,
+          ...(scope.attemptId === undefined ? {} : { attempt_id: scope.attemptId }),
+        },
         run_id: scope.runId,
         ...(scope.taskId === undefined ? {} : { task_id: scope.taskId }),
         ...(scope.attemptId === undefined ? {} : { attempt_id: scope.attemptId }),
@@ -199,7 +203,8 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
       if (Buffer.byteLength(argsJson) > INLINE_PAYLOAD_MAX_BYTES) {
         argsBlob = await dependencies.blobs.put(new Uint8Array(Buffer.from(redact(argsJson).text, "utf8")), "application/json");
       }
-      const ordinal = await nextRef(scope);
+      // A system call is not the model's: it takes no short ref, so the model's numbering stays dense.
+      const ordinal = scope.actor === "system" ? undefined : await nextRef(scope);
       const proposed = await append({
         type: "tool/call_proposed",
         data: {
@@ -208,7 +213,7 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
           tool_name: request.tool_name,
           args_digest: sha256(argsJson),
           ...(argsBlob === undefined ? {} : { args_blob: argsBlob }),
-          ref: ordinal,
+          ...(ordinal === undefined ? {} : { ref: ordinal }),
         },
       });
       ref = ordinal;
@@ -269,6 +274,9 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
       return refuseUnlogged("the event log refused the policy decision; nothing was started");
     }
     if (decision.decision === "deny") return finish("denied", errorResult(denialCode(decision), denialMessage(decision)));
+    if (decision.decision === "ask" && scope.actor === "system") {
+      return finish("denied", errorResult("approval_unavailable", `a harness-initiated call never asks for approval: ${decision.reasons.map((reason) => reason.message).join("; ")}`));
+    }
 
     if (decision.decision === "ask") {
       const grantKey = `${decision.action_digest}|${decision.policy_digest}`;

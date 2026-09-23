@@ -226,6 +226,13 @@ export interface ToolInvocationScope {
   readonly attemptId: AttemptId | undefined;
   readonly role: AgentRole;
   readonly policy: EffectivePolicy;
+  /**
+   * `system`: a call the harness makes itself under `role`'s policy (the harness-run verification
+   * commands, ADR-18). Its `tool/*` events carry `actor.kind: system`, it gets no short ref, it
+   * never asks for approval (an `ask` decision is refused) and it is never a model's evidence.
+   * Absent: the call comes from the model of `role`.
+   */
+  readonly actor?: "system";
 }
 
 /**

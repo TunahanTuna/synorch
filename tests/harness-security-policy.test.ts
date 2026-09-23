@@ -331,3 +331,43 @@ test("SEC-L3 writes into the Synorch home are denied, the worker's own worktree 
     assert.equal(engine.evaluate(exec(argv), full).rail, undefined, argv.join(" "));
   }
 });
+
+test("review R3: while dependency directories are linked, install/add/remove/update commands are denied for every sandbox and through wrappers", () => {
+  const linked = (sandbox: SandboxReport) =>
+    engine.compute(inputs({ sandbox, taskScope: { owned: ["src/**"], read: [], forbidden: ["node_modules"], verification_commands: ["pnpm install --frozen-lockfile"], dependency_links: ["node_modules"] } }));
+  const plain = engine.compute(inputs({ sandbox: FULL }));
+  const full = linked(FULL);
+  const partial = linked(PARTIAL);
+  assert.deepEqual(full.dependency_links, ["node_modules"]);
+  assert.equal(plain.dependency_links, undefined);
+  const mutators = [
+    ["pnpm", "install", "--frozen-lockfile"],
+    ["pnpm", "add", "left-pad"],
+    ["npm", "ci"],
+    ["npm", "uninstall", "x"],
+    ["yarn"],
+    ["yarn", "upgrade"],
+    ["bun", "install"],
+    ["pip", "install", "requests"],
+    ["python", "-m", "pip", "install", "-r", "requirements.txt"],
+    ["python3", "-m", "venv", ".venv"],
+    ["uv", "sync"],
+    ["uv", "pip", "install", "x"],
+    ["poetry", "install"],
+    ["cargo", "fetch"],
+    ["go", "mod", "download"],
+    ["sh", "-c", "cd src && npm install"],
+    ["npx", "pnpm", "install"],
+  ];
+  for (const argv of mutators) {
+    for (const policy of [full, partial]) {
+      const decision = engine.evaluate(exec(argv), policy);
+      assert.equal(decision.decision, "deny", `${argv.join(" ")} (${policy.sandbox.enforcement})`);
+      assert.ok(codes(decision).includes("dependency-mutation-in-linked-worktree"), `${argv.join(" ")}: ${codes(decision).join(", ")}`);
+    }
+  }
+  for (const argv of [["pnpm", "test"], ["npm", "run", "build"], ["node", "--test"], ["pip", "list"], ["cargo", "test"]]) {
+    assert.ok(!codes(engine.evaluate(exec(argv), full)).includes("dependency-mutation-in-linked-worktree"), argv.join(" "));
+  }
+  assert.ok(!codes(engine.evaluate(exec(["pnpm", "install", "--frozen-lockfile"]), plain)).includes("dependency-mutation-in-linked-worktree"), "without links an install is judged by the ordinary rules");
+});

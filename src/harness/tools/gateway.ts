@@ -365,6 +365,11 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
       summary: redact(summarize(action)).text.slice(0, 2000),
       effect: action.effect,
       scope: "once",
+      ...(action.command === undefined ? {} : { command: action.command.argv.slice(0, 256).map((word) => redact(word).text.slice(0, 2000)) }),
+      details: {
+        why: redact(decision.reasons.filter((reason) => reason.code !== "permission-prompt" && reason.code !== "approval-required").map((reason) => reason.message).join("; ") || `${action.effect} needs your approval`).text.slice(0, 1000),
+        consequence: CONSEQUENCES[action.effect],
+      },
       requested_at: now().toISOString(),
     });
     await append({ type: "approval/requested", data: { request } });
@@ -455,6 +460,15 @@ function denialMessage(decision: PolicyDecision): string {
   const prefix = decision.rail === undefined ? "denied" : `hard rail ${decision.rail}`;
   return `${prefix}: ${decision.reasons.map((reason) => `${reason.code} (${reason.layer}): ${reason.message}`).join("; ")}`.slice(0, 2000);
 }
+
+/** What allowing an asked action does (UX-03 action card), per effect. */
+const CONSEQUENCES: Readonly<Record<NormalizedAction["effect"], string>> = {
+  read: "reads files in the workspace",
+  "workspace-write": "changes files in the workspace (/undo reverts Synorch's edits)",
+  exec: "runs with your user permissions; without a full sandbox it can change files outside the workspace",
+  "external-write": "writes to a system outside this machine; it may not be reversible",
+  control: "changes the session's own state",
+};
 
 function summarize(action: NormalizedAction): string {
   const target = action.command === undefined ? action.paths.map((entry) => `${entry.access} ${entry.path}`).join(", ") : `${action.command.argv.join(" ")} (cwd ${action.command.cwd})`;

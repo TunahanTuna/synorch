@@ -12,6 +12,12 @@ const COMMON = `Common options:
 
 const SESSION = `Session options:
       --policy autonomous|ask  Approval mode for this session (default: autonomous).
+      --permission-mode ask|auto|full|plan
+                               agent: ask prompts for edits and commands; auto (the
+                               interactive default, ui.permission_mode) asks only for
+                               risky commands; full prompts for nothing (hard rails stay);
+                               plan is read-only. Shift+Tab cycles them. run: auto|full;
+                               headless auto turns every question into a refusal.
       --profile <tier>=<route> Session-only model route override; repeatable, never persisted.`;
 
 const EXIT_CODES = `Exit codes:

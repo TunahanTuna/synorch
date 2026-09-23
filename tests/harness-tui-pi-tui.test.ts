@@ -295,8 +295,8 @@ test("the approval dialog answers from the keyboard and Esc rejects", async () =
 
   const allowed = tui.approvals.request(base, new AbortController().signal);
   await settle(tui, terminal);
-  assert.match(terminal.text(), /Approval needed \(action\)/);
-  assert.match(terminal.text(), /Allow for this plan/);
+  assert.match(terminal.text(), /Allow Synorch to edit files\?/);
+  assert.match(terminal.text(), /2\. Allow all edits \(switch to auto mode\)/);
   terminal.type("\x1b[B");
   terminal.type("\r");
   const first = await allowed;
@@ -309,6 +309,34 @@ test("the approval dialog answers from the keyboard and Esc rejects", async () =
   await new Promise((resolve) => setTimeout(resolve, 80));
   const second = await rejected;
   assert.equal(second.outcome, "rejected");
+
+  // UX-03 action card: a command offers "Always allow <prefix>"; 1-9 pick a row; "Deny and tell Synorch why" carries the reason.
+  const command: ApprovalRequest = {
+    ...base,
+    approval_id: approvalIdSchema.parse(createId("approval")),
+    summary: "exec [exec] npm run lint (cwd .)",
+    effect: "exec",
+    scope: "once",
+    command: ["npm", "run", "lint", "--fix"],
+    details: { why: "npm run lint --fix is not on the build/test allowlist", consequence: "runs with your user permissions" },
+  };
+  const once = tui.approvals.request(command, new AbortController().signal);
+  await settle(tui, terminal);
+  assert.match(terminal.text(), /Allow Synorch to run this command\?/);
+  assert.match(terminal.text(), /why +npm run lint --fix is not on the build\/test allowlist/);
+  assert.match(terminal.text(), /2\. Always allow `npm run lint` in this folder/);
+  terminal.type("1");
+  assert.equal((await once).outcome, "allowed-once");
+
+  const why = tui.approvals.request({ ...command, approval_id: approvalIdSchema.parse(createId("approval")) }, new AbortController().signal);
+  await settle(tui, terminal);
+  terminal.type("4");
+  await settle(tui, terminal);
+  for (const char of "use pnpm") terminal.type(char);
+  terminal.type("\r");
+  const refused = await why;
+  assert.equal(refused.outcome, "rejected");
+  assert.equal(refused.reason, "the user said: use pnpm");
 
   const cancelled = tui.approvals.request({ ...base, approval_id: approvalIdSchema.parse(createId("approval")) }, new AbortController().signal);
   await settle(tui, terminal);

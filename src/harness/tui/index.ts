@@ -5,7 +5,18 @@ import type { PiTuiRenderer, PiTuiRendererOptions } from "./pi-tui-renderer.ts";
  * The pi-tui adapter is loaded lazily, so the plain and JSONL paths never load pi-tui.
  */
 export type { TerminalRenderer } from "../contracts/index.ts";
-export { brokerDecision, HeadlessApprovalBroker, userDecision, withApprovalDeadline, type ApprovalChoice } from "./approvals.ts";
+export {
+  actionChoices,
+  actionTitle,
+  brokerDecision,
+  HeadlessApprovalBroker,
+  suggestedCommandPrefix,
+  userDecision,
+  withApprovalDeadline,
+  type ActionChoice,
+  type ApprovalAnswer,
+  type ApprovalChoice,
+} from "./approvals.ts";
 export { deviceCodeText, HeadlessAuthInteraction, LineAuthInteraction } from "./auth-interaction.ts";
 export {
   allowPrefixFor,

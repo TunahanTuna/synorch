@@ -128,15 +128,19 @@ test("typing / opens the palette; Enter on a command with a required argument co
   await tui.stop("completed");
 });
 
-test("Shift+Tab toggles plan mode in the footer and notifies the session", async () => {
+test("Shift+Tab cycles ask -> auto -> full -> plan in the footer and notifies the session", async () => {
   const { tui, terminal } = await open();
-  const seen: boolean[] = [];
-  tui.controls.onPlanModeChange((on) => seen.push(on));
+  const seen: string[] = [];
+  tui.controls.onPermissionModeChange((mode) => seen.push(mode));
+  assert.equal(tui.controls.permissionMode, "auto");
   terminal.type("\x1b[Z");
-  assert.equal(tui.controls.planMode, true);
+  assert.equal(tui.controls.permissionMode, "full");
+  assert.match(await screen(tui, terminal), /gpt-6-sol · full access/);
+  terminal.type("\x1b[Z");
   assert.match(await screen(tui, terminal), /gpt-6-sol · plan mode/);
   terminal.type("\x1b[Z");
-  assert.deepEqual(seen, [true, false]);
+  terminal.type("\x1b[Z");
+  assert.deepEqual(seen, ["full", "plan", "ask", "auto"]);
   await tui.stop("completed");
 });
 

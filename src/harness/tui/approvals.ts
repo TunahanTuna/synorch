@@ -7,6 +7,63 @@ import type { ApprovalBroker, ApprovalDecision, ApprovalRequest, PolicyMode } fr
  */
 
 export type ApprovalChoice = "allowed-once" | "allowed-for-scope" | "rejected";
+/** What a human answered: a choice, or a denial with a reason the agent is told. */
+export type ApprovalAnswer = ApprovalChoice | { readonly choice: "rejected"; readonly reason: string };
+
+/** One row of the action prompt (UX-03): Allow once · Always allow <prefix> · Deny · Deny and say why. */
+export interface ActionChoice {
+  readonly value: ApprovalChoice | "rejected-why";
+  readonly label: string;
+  /** The number key that picks it (1-based). */
+  readonly key: string;
+}
+
+const PLAIN_WORD = /^[A-Za-z0-9._+\-=:/@\\]+$/;
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "cmd", "powershell", "pwsh", "env", "sudo", "doas", "xargs", "npx", "pnpx", "bunx"]);
+
+/**
+ * The prefix "Always allow" would persist for a command: the program and up to two leading
+ * non-flag words (`npm run lint`, `python scripts/build.py`, `cargo clippy`). Undefined for git
+ * (never granted), for a bare shell or runner, and for words that are not plain.
+ */
+export function suggestedCommandPrefix(argv: readonly string[] | undefined): string | undefined {
+  if (argv === undefined || argv.length === 0) return undefined;
+  const words: string[] = [];
+  for (const word of argv) {
+    if (words.length > 0 && (word.startsWith("-") || words.length >= 3)) break;
+    if (!PLAIN_WORD.test(word)) break;
+    words.push(word);
+  }
+  const program = (words[0] ?? "").replaceAll("\\", "/").split("/").pop()?.toLowerCase().replace(/\.(exe|cmd|bat|com|ps1)$/, "") ?? "";
+  if (words.length === 0 || program === "git" || (words.length === 1 && SHELLS.has(program))) return undefined;
+  return words.join(" ");
+}
+
+/** The action card's question for a request. */
+export function actionTitle(request: ApprovalRequest): string {
+  if (request.subject_kind !== "action") return `Approval needed (${request.subject_kind})`;
+  switch (request.effect) {
+    case "exec":
+      return "Allow Synorch to run this command?";
+    case "workspace-write":
+      return "Allow Synorch to edit files?";
+    case "external-write":
+      return "Allow Synorch to write outside this machine?";
+    default:
+      return "Allow this action?";
+  }
+}
+
+/** The rows the action prompt offers for a request, in order; the first is pre-selected. */
+export function actionChoices(request: ApprovalRequest): ActionChoice[] {
+  const rows: { value: ActionChoice["value"]; label: string }[] = [{ value: "allowed-once", label: "Allow once" }];
+  const prefix = request.subject_kind === "action" ? suggestedCommandPrefix(request.command) : undefined;
+  if (prefix !== undefined) rows.push({ value: "allowed-for-scope", label: `Always allow \`${prefix}\` in this folder` });
+  else if (request.subject_kind === "action" && request.effect === "workspace-write") rows.push({ value: "allowed-for-scope", label: "Allow all edits (switch to auto mode)" });
+  else if (request.scope !== "once") rows.push({ value: "allowed-for-scope", label: `Allow for this ${request.scope}` });
+  rows.push({ value: "rejected", label: "Deny" }, { value: "rejected-why", label: "Deny and tell Synorch why" });
+  return rows.map((row, index) => ({ ...row, key: String(index + 1) }));
+}
 
 export function brokerDecision(
   request: ApprovalRequest,
@@ -27,15 +84,18 @@ export function brokerDecision(
   };
 }
 
-export function userDecision(request: ApprovalRequest, choice: ApprovalChoice, mode: PolicyMode, now: Date): ApprovalDecision {
+export function userDecision(request: ApprovalRequest, answer: ApprovalAnswer, mode: PolicyMode, now: Date): ApprovalDecision {
+  const outcome = typeof answer === "string" ? answer : answer.choice;
+  const reason = typeof answer === "string" ? undefined : answer.reason.trim().slice(0, 1000);
   return {
     approval_id: request.approval_id,
     subject_kind: request.subject_kind,
     subject_digest: request.subject_digest,
-    outcome: choice,
+    outcome,
     decided_by: "user",
     mode,
     decided_at: now.toISOString(),
+    ...(reason === undefined || reason === "" ? {} : { reason: `the user said: ${reason}`.slice(0, 1000) }),
   };
 }
 
@@ -63,7 +123,7 @@ export async function withApprovalDeadline(
   mode: PolicyMode,
   signal: AbortSignal,
   clock: () => Date,
-  ask: (signal: AbortSignal) => Promise<ApprovalChoice>,
+  ask: (signal: AbortSignal) => Promise<ApprovalAnswer>,
 ): Promise<ApprovalDecision> {
   const controller = new AbortController();
   const onAbort = (): void => controller.abort();

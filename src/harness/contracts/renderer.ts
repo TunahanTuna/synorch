@@ -1,7 +1,7 @@
 import type { AuthInteraction } from "./auth.ts";
 import type { SessionEvent } from "./events.ts";
 import type { ModelStreamEvent } from "./model.ts";
-import type { ApprovalBroker } from "./policy.ts";
+import type { ApprovalBroker, PermissionMode } from "./policy.ts";
 
 /**
  * The terminal port (ADR-04). Renderers only consume events; they never own task state. The
@@ -35,6 +35,8 @@ export interface SessionHeaderView {
   readonly version?: string;
   readonly model?: string;
   readonly contextWindowTokens?: number;
+  /** The conversation's interactive permission mode (ADR-08 revision 2026-09-24); absent outside one. */
+  readonly permissionMode?: PermissionMode;
 }
 
 export type RenderEvent =
@@ -121,10 +123,13 @@ export interface InteractiveInputControls {
   onAttachment(listener: (attachment: Attachment) => void): () => void;
   /** Resolves with the chosen row, or undefined on Esc / abort. */
   openModelPicker(entries: readonly ModelPickerEntry[], signal?: AbortSignal): Promise<ModelPickerEntry | undefined>;
-  /** Plan mode (Shift+Tab, Alt+M): the renderer shows it; the session applies the policy narrowing. */
-  readonly planMode: boolean;
-  setPlanMode(on: boolean): void;
-  onPlanModeChange(listener: (on: boolean) => void): () => void;
+  /**
+   * Permission mode (Shift+Tab / Alt+M cycles ask -> auto -> full -> plan): the renderer shows it in
+   * the footer; the session applies the policy and announces the change.
+   */
+  readonly permissionMode: PermissionMode;
+  setPermissionMode(mode: PermissionMode): void;
+  onPermissionModeChange(listener: (mode: PermissionMode) => void): () => void;
   /** SGR mouse reporting (wheel scroll, click to expand). Off by default: it disables native selection. */
   readonly mouseMode: boolean;
   setMouseMode(on: boolean): void;

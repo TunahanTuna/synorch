@@ -3,6 +3,7 @@ import { closestMatch } from "../../domain/suggest.ts";
 import {
   AUTH_METHODS,
   modelTierSchema,
+  PERMISSION_MODES,
   POLICY_MODES,
   profileNameSchema,
   providerIdSchema,
@@ -10,6 +11,7 @@ import {
   sessionIdSchema,
   type AuthMethodKind,
   type ModelTier,
+  type PermissionMode,
   type PolicyMode,
   type ProviderId,
   type RunId,
@@ -52,6 +54,12 @@ export interface RouteOverride {
 
 export interface SessionFlags {
   readonly policy: PolicyMode;
+  /**
+   * `--permission-mode` (ADR-08 revision 2026-09-24): `syn agent` takes ask, auto, full or plan;
+   * `syn run` takes auto or full (headless auto prompts nothing: its questions are refusals).
+   * Undefined: the user configuration's `ui.permission_mode` (interactive) or default-deny (headless).
+   */
+  readonly permission: PermissionMode | undefined;
   readonly profiles: readonly RouteOverride[];
 }
 
@@ -89,6 +97,7 @@ const COMMON_OPTIONS = {
 
 const SESSION_OPTIONS = {
   policy: { type: "string" },
+  "permission-mode": { type: "string" },
   profile: { type: "string", multiple: true },
 } as const;
 
@@ -176,7 +185,9 @@ function common(command: string, values: { target?: string | undefined; plain?: 
   };
 }
 
-function session(command: string, values: { policy?: string | undefined; profile?: string[] | undefined }): SessionFlags {
+const RUN_PERMISSION_MODES = ["auto", "full"] as const;
+
+function session(command: string, values: { policy?: string | undefined; profile?: string[] | undefined; "permission-mode"?: string | undefined }): SessionFlags {
   const profiles = (values.profile ?? []).map((entry) => {
     const separator = entry.indexOf("=");
     const tier = modelTierSchema.safeParse(separator === -1 ? entry : entry.slice(0, separator));
@@ -189,7 +200,9 @@ function session(command: string, values: { policy?: string | undefined; profile
   const tiers = profiles.map((profile) => profile.tier);
   const duplicate = tiers.find((tier, index) => tiers.indexOf(tier) !== index);
   if (duplicate !== undefined) throw new UsageError(`--profile sets tier ${duplicate} more than once.`, command);
-  return { policy: oneOf(command, "--policy", values.policy, POLICY_MODES, "autonomous"), profiles };
+  const raw = values["permission-mode"];
+  const permission = raw === undefined ? undefined : command === "run" ? oneOf(command, "--permission-mode", raw, RUN_PERMISSION_MODES, "auto") : oneOf(command, "--permission-mode", raw, PERMISSION_MODES, "auto");
+  return { policy: oneOf(command, "--policy", values.policy, POLICY_MODES, "autonomous"), permission, profiles };
 }
 
 function noPositionals(command: string, positionals: readonly string[]): void {

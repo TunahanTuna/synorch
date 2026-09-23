@@ -12,9 +12,11 @@ import {
   memoryConfigSchema,
   modelIdSchema,
   modelTierSchema,
+  permissionModeSchema,
   profileNameSchema,
   providerIdSchema,
   type MemoryConfig,
+  type PermissionMode,
   type ModelRouterConfig,
   type RouteRule,
   type RouteSource,
@@ -105,7 +107,7 @@ const configFileSchema = z.strictObject({
   memory: memoryConfigSchema.optional(),
   routes: z.array(routeEntrySchema).optional(),
   adapters: z.array(adapterEntrySchema).optional(),
-  ui: z.strictObject({ color: z.boolean().optional() }).optional(),
+  ui: z.strictObject({ color: z.boolean().optional(), permission_mode: permissionModeSchema.optional() }).optional(),
   budget: z
     .strictObject({
       max_wall_time_seconds: z.int().positive().optional(),
@@ -151,6 +153,8 @@ export interface RuntimeConfig {
   readonly workspacePolicy: PolicyConfig | undefined;
   readonly memory: MemoryConfig | undefined;
   readonly color: boolean | undefined;
+  /** `ui.permission_mode` (user layer only): the interactive conversation's starting permission mode. */
+  readonly permissionMode: PermissionMode | undefined;
   readonly budget: { readonly maxWallTimeSeconds: number | undefined; readonly maxCostUsd: number | undefined };
 }
 
@@ -427,6 +431,7 @@ export async function loadRuntimeConfig(
     workspacePolicy: narrowPolicies(workspace?.policy, project?.policy),
     memory: user?.memory,
     color: user?.ui?.color,
+    permissionMode: user?.ui?.permission_mode,
     budget: {
       maxWallTimeSeconds: smallest(layers.map((layer) => layer?.budget?.max_wall_time_seconds)),
       maxCostUsd: smallest(layers.map((layer) => layer?.budget?.max_cost_usd)),

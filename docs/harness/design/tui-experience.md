@@ -608,7 +608,7 @@ Toplam 6 satır.
 | `Esc` | Autocomplete'i kapat | Etkin isteği kes. Orkestrasyonda ikinci `Esc` worker'ları durdurmayı önerir. | ADR-04; bugünkü `InterruptController` |
 | `Ctrl+C` | Editör doluysa temizle; boşsa `Press Ctrl+C again to exit` | Kes; ikinci basış çıkışı önerir | ADR-04, değişmez |
 | `Ctrl+D` | Editör boşsa çık | — | Bugünkü davranış |
-| `Shift+Tab` | Doğrudan ↔ plan modu | Aynı (sonraki turdan itibaren) | Claude Code plan mode tuşu. Yalnız daraltır, policy genişletmez. Windows'ta VT input yoksa `Alt+M`. |
+| `Shift+Tab` | İzin modu döngüsü `ask → auto → full → plan` (ADR-08 revizyonu 2026-09-24) | Aynı (hemen uygulanır) | Claude Code mod tuşu. Alt bilgi modu renkle gösterir (`full` kırmızı/kalın, `plan` camgöbeği); hard rail'ler her modda sürer. Windows'ta VT input yoksa `Alt+M`. |
 | `Ctrl+O` | L0 ↔ L1 | L0 ↔ L1 | Claude Code ve pi ile aynı |
 | `Ctrl+T` | Son panoyu göster/gizle | Canlı panoyu katla | Claude Code task list tuşu |
 | `Ctrl+L` | Ekranı yeniden çiz | Aynı | Claude Code ile aynı; pi'de model seçici |

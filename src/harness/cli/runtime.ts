@@ -21,6 +21,7 @@ import {
   type MemoryStore,
   type ModelRouter,
   type PolicyEngine,
+  type PermissionMode,
   type PolicyMode,
   type ProjectId,
   type RecoveryReport,
@@ -122,6 +123,12 @@ export interface RuntimeOptions {
   readonly overrides?: RuntimeOverrides;
   /** `--trust-workspace`: trust the workspace for this runtime only; never persisted (SEC-N1). */
   readonly trustWorkspace?: boolean;
+  /**
+   * The starting permission mode (ADR-08 revision 2026-09-24): a flag, `ui.permission_mode` or the
+   * interactive default. Undefined keeps the headless default-deny policy. `full` implies trust for
+   * this runtime only (never persisted).
+   */
+  readonly permissionMode?: PermissionMode;
 }
 
 export type RuntimeListener = (event: RenderEvent) => void;
@@ -134,6 +141,8 @@ export interface RuntimeTrust {
   grant(source: TrustGrantSource): Promise<WorkspaceTrustState>;
   /** Trusts the workspace for this runtime only ("Trust for this session only"); nothing is persisted. */
   grantSession(): WorkspaceTrustState;
+  /** The trust recorded for the workspace, ignoring what full access implies. */
+  recorded(): WorkspaceTrustState;
 }
 
 /** Asks the human attached to the session a question (the `ask_user` tool); resolves with the answer. */
@@ -182,8 +191,12 @@ export interface Runtime {
    * gateway as every role; `wrap` decorates the gateway (per-edit checkpoints, trust at first exec).
    */
   createSessionDriver(broker: ApprovalBroker, events: EventStore, wrap: (gateway: ToolGateway) => ToolGateway): AgentDriver;
-  /** The conversation agent's effective policy (ADR-21 D3); recomputed after a trust decision or an /allow grant. */
+  /** The conversation agent's effective policy (ADR-21 D3); recomputed after a trust decision, an /allow grant or a mode change. */
   sessionPolicy(commandGrants: readonly string[]): EffectivePolicy;
+  /** The current permission mode; undefined in a headless default-deny session. */
+  permissionMode(): PermissionMode | undefined;
+  /** Switches the permission mode (Shift+Tab, /permissions); workers started later inherit `full` only. */
+  setPermissionMode(mode: PermissionMode | undefined): void;
   createCoordinator(broker: ApprovalBroker): Coordinator;
   /** Crash recovery of a session and of every attempt session it started; nothing is re-executed. */
   recover(sessionId: SessionId): Promise<readonly RecoveryReport[]>;
@@ -445,9 +458,13 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const trustStore = createWorkspaceTrustStore(home, { platform });
   const stored = trustStore.status(workspaceRoot);
   let trustState: WorkspaceTrustState = !stored.trusted && options.trustWorkspace === true ? { ...stored, trusted: true, source: "flag", reason: undefined } : stored;
+  let permission: PermissionMode | undefined = options.permissionMode;
+  // Full access implies trust for this runtime only; leaving full access returns to the recorded trust.
+  const effectiveTrust = (): WorkspaceTrustState => (trustState.trusted || permission !== "full" ? trustState : { ...trustState, trusted: true, source: "session", reason: undefined });
   const trust: RuntimeTrust = {
     file: trustStore.file,
-    state: () => trustState,
+    state: effectiveTrust,
+    recorded: () => trustState,
     async grant(source) {
       const granted = await trustStore.grant(workspaceRoot, source);
       if (granted.trusted) {
@@ -461,7 +478,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       return trustState;
     },
   };
-  const policy = withRoleDefinitions(createPolicyEngine({ synorchHome: home, workspaceTrusted: () => trustState.trusted }), canonical.roles);
+  const policy = withRoleDefinitions(createPolicyEngine({ synorchHome: home, workspaceTrusted: () => effectiveTrust().trusted, permissionMode: () => permission }), canonical.roles);
   const sandbox = overrides.sandbox ?? (await probeSandbox({ platform }));
   const runner = createSandboxRunner(sandbox, { untrustedRoots: [workspaceRoot, home] });
   const userConfig = config.userPolicy === undefined ? undefined : { policy: config.userPolicy };
@@ -673,7 +690,12 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         sandbox,
         grants: [],
         commandGrants,
+        ...(permission === undefined ? {} : { permissionMode: permission }),
       });
+    },
+    permissionMode: () => permission,
+    setPermissionMode(mode) {
+      permission = mode;
     },
     createCoordinator(broker) {
       const driverFor = createDriver(broker);
@@ -704,7 +726,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         userConfig,
         workspaceConfig,
         platform,
-        workspaceTrust: () => trustState,
+        workspaceTrust: effectiveTrust,
         ...(overrides.limits === undefined ? {} : { limits: overrides.limits }),
       });
     },

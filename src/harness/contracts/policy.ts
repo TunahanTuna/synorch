@@ -25,6 +25,36 @@ export const SESSION_WRITE_SCOPE = "**";
 export type PolicyMode = (typeof POLICY_MODES)[number];
 export const DEFAULT_POLICY_MODE: PolicyMode = "autonomous";
 
+/**
+ * Interactive permission modes (ADR-08 owner revision 2026-09-24), cycled with Shift+Tab like
+ * Claude Code: `ask` prompts for edits and commands; `auto` (the interactive default) runs edits and
+ * allowlisted/trusted commands and turns every allowlist refusal into a prompt; `full` prompts for
+ * nothing and allows everything in the workspace except the hard rails; `plan` is read-only.
+ * Absent on a policy means the pre-revision behaviour: default-deny without prompts (headless).
+ * Hard rails deny in every mode.
+ */
+export const PERMISSION_MODES = ["ask", "auto", "full", "plan"] as const;
+export const permissionModeSchema = z.enum(PERMISSION_MODES);
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
+export const DEFAULT_PERMISSION_MODE: PermissionMode = "auto";
+
+/** The policy mode a permission mode computes with: only `ask` prompts per effect. */
+export function policyModeForPermission(mode: PermissionMode): PolicyMode {
+  return mode === "ask" ? "ask" : "autonomous";
+}
+
+/** Shift+Tab order: ask -> auto -> full -> plan -> ask. */
+export function nextPermissionMode(mode: PermissionMode): PermissionMode {
+  return PERMISSION_MODES[(PERMISSION_MODES.indexOf(mode) + 1) % PERMISSION_MODES.length] ?? "auto";
+}
+
+/**
+ * Policy reason codes a permission mode may lift: an allowlist refusal, an untrusted workspace, an
+ * external write or a host outside the allowlist. `auto` turns a decision denied only by these into
+ * `ask`, `full` into `allow`; a hard rail or any other denial is never lifted.
+ */
+export const PERMISSION_LIFTABLE_CODES = ["exec-not-allowlisted", "workspace-untrusted", "external-write-not-allowlisted", "network-denied", "host-not-allowlisted"] as const;
+
 export const POLICY_LAYERS = ["platform", "user", "workspace", "role", "task", "sandbox", "approval"] as const;
 
 /**
@@ -108,6 +138,11 @@ export const effectivePolicySchema = z
      * full sandbox; hard rails and destructive-command rules are never relaxed by them.
      */
     command_grants: z.array(z.string().min(1).max(500)).max(256).optional(),
+    /**
+     * The interactive permission mode (ADR-08 revision 2026-09-24). `session` carries any mode;
+     * a worker carries only `full` (the user ran with full access). Absent: default-deny, no prompts.
+     */
+    permission_mode: permissionModeSchema.optional(),
     layers: z
       .array(z.strictObject({ layer: z.enum(POLICY_LAYERS), source: z.string().min(1), digest: digestSchema }))
       .min(1),
@@ -118,6 +153,17 @@ export const effectivePolicySchema = z
     }
     if (policy.command_grants !== undefined && policy.role !== "session") {
       context.addIssue({ code: "custom", path: ["command_grants"], message: "command grants apply to the conversation agent only" });
+    }
+    if (policy.permission_mode !== undefined) {
+      if (policy.role !== "session" && policy.permission_mode !== "full") {
+        context.addIssue({ code: "custom", path: ["permission_mode"], message: "only the conversation agent has interactive permission modes; workers carry full access only" });
+      }
+      if (policy.mode !== policyModeForPermission(policy.permission_mode)) {
+        context.addIssue({ code: "custom", path: ["mode"], message: `permission mode ${policy.permission_mode} computes in ${policyModeForPermission(policy.permission_mode)} mode` });
+      }
+      if (policy.permission_mode === "plan" && (["workspace-write", "exec", "external-write"] as const).some((effect) => policy.effects[effect] !== "deny")) {
+        context.addIssue({ code: "custom", path: ["effects"], message: "plan mode is read-only" });
+      }
     }
     const readOnly = (READ_ONLY_ROLES as readonly AgentRole[]).includes(policy.role);
     if (readOnly && (policy.write_scope.length > 0 || policy.effects["workspace-write"] !== "deny")) {
@@ -148,7 +194,8 @@ export const effectivePolicySchema = z
         }
       }
     }
-    if (policy.mode === "autonomous" && policy.effects["external-write"] === "allow" && policy.external_write_allowlist.length === 0) {
+    const lifts = policy.permission_mode === "auto" || policy.permission_mode === "full";
+    if (policy.mode === "autonomous" && !lifts && policy.effects["external-write"] === "allow" && policy.external_write_allowlist.length === 0) {
       context.addIssue({
         code: "custom",
         path: ["external_write_allowlist"],
@@ -256,6 +303,10 @@ export const approvalRequestSchema = z.strictObject({
   summary: z.string().min(1).max(2000),
   effect: toolEffectSchema.optional(),
   scope: z.enum(["once", "plan", "session"]),
+  /** The command an `action` approval would run (argv, redacted); the prompt offers "always allow <prefix>" from it. */
+  command: z.array(z.string().max(2000)).min(1).max(256).optional(),
+  /** Why the policy asks and what allowing does (UX-03 action card). */
+  details: z.strictObject({ why: z.string().min(1).max(1000), consequence: z.string().min(1).max(1000) }).optional(),
   requested_at: timestampSchema,
   expires_at: timestampSchema.optional(),
 });
@@ -309,6 +360,8 @@ export interface PolicyInputs {
   readonly workspaceRoot: string;
   /** `/allow` prefixes from the user scope; used for the `session` role only. */
   readonly commandGrants?: readonly string[];
+  /** The interactive permission mode; `session` only (a worker inherits only `full` from the engine). */
+  readonly permissionMode?: PermissionMode;
   readonly taskScope:
     | {
         readonly owned: readonly string[];

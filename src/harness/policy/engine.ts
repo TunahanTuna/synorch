@@ -15,7 +15,9 @@ import {
   isWholeWorkspacePattern,
   matchesAnyPathPattern as matchesAny,
   PATH_ESCAPE_REASON_CODE,
+  PERMISSION_LIFTABLE_CODES,
   pathPatternSchema,
+  policyModeForPermission,
   policyDecisionSchema,
   READ_ONLY_ROLES,
   type AgentRole,
@@ -26,6 +28,7 @@ import {
   type PolicyDecision,
   type PolicyEngine,
   type PolicyInputs,
+  type PermissionMode,
   type PolicyMode,
   type ToolEffect,
   foldPathCase,
@@ -79,6 +82,12 @@ export interface PolicyEngineOptions {
    * configuration layers or a model message can. Absent means untrusted.
    */
   readonly workspaceTrusted?: () => boolean;
+  /**
+   * The session's current permission mode, from the composition root (a CLI flag, the user-scope
+   * `ui.permission_mode` or Shift+Tab). Workers (`implementer`, `debugger`) inherit only `full`;
+   * every other mode, and every read-only role or the orchestrator, keeps the default-deny policy.
+   */
+  readonly permissionMode?: () => PermissionMode | undefined;
 }
 
 /**
@@ -87,7 +96,7 @@ export interface PolicyEngineOptions {
  * through the typed inputs, and no input can relax a hard rail.
  */
 export function createPolicyEngine(options: PolicyEngineOptions = {}): PolicyEngine {
-  return { compute: (inputs) => computePolicy(inputs, options.workspaceTrusted?.() === true), evaluate: (action, policy) => evaluateAction(action, policy, options) };
+  return { compute: (inputs) => computePolicy(inputs, options.workspaceTrusted?.() === true, options.permissionMode?.()), evaluate: (action, policy) => evaluateAction(action, policy, options) };
 }
 
 /**
@@ -99,11 +108,16 @@ export function explainPermission(action: NormalizedAction, policy: EffectivePol
   return evaluateAction(action, policy, options);
 }
 
-function computePolicy(inputs: PolicyInputs, workspaceTrusted: boolean): EffectivePolicy {
+function computePolicy(inputs: PolicyInputs, workspaceTrusted: boolean, enginePermission: PermissionMode | undefined): EffectivePolicy {
   const user = readPolicyConfig(inputs.userConfig, "user");
   const workspace = readPolicyConfig(inputs.workspaceConfig, "workspace");
-  const mode = strictestMode([inputs.mode, user.mode, workspace.mode]);
   const role = inputs.role;
+  const requested = role === "session" ? inputs.permissionMode : WORKER_FULL_ROLES.has(role) && enginePermission === "full" ? "full" : undefined;
+  const configured = strictestMode([inputs.mode, user.mode, workspace.mode]);
+  // A configuration layer that asks (`policy.mode: ask`) narrows auto/full to ask (workers: no full); nothing widens.
+  const permission: PermissionMode | undefined =
+    requested === undefined || requested === "plan" || configured !== "ask" ? requested : role === "session" ? "ask" : undefined;
+  const mode = permission === undefined ? configured : policyModeForPermission(permission);
   const readOnly = (READ_ONLY_ROLES as readonly AgentRole[]).includes(role);
   const forbidden = unique([
     ...strictPatterns(inputs.taskScope?.forbidden ?? [], "task forbidden path"),
@@ -129,6 +143,14 @@ function computePolicy(inputs: PolicyInputs, workspaceTrusted: boolean): Effecti
   if (requireFullSandbox && inputs.sandbox.enforcement !== "full") {
     effects["workspace-write"] = "deny";
     effects.exec = "deny";
+  }
+  if (permission === "plan") {
+    effects["workspace-write"] = "deny";
+    effects.exec = "deny";
+    effects["external-write"] = "deny";
+  } else if ((permission === "auto" || permission === "full") && effects["external-write"] === "deny" && ceiling["external-write"] === "allow") {
+    // Without an allowlist entry an external write is asked for (auto) or allowed (full) at evaluation; rails still deny.
+    effects["external-write"] = "allow";
   }
 
   const layers: EffectivePolicy["layers"] = [
@@ -163,6 +185,7 @@ function computePolicy(inputs: PolicyInputs, workspaceTrusted: boolean): Effecti
     verification_commands: unique((inputs.taskScope?.verification_commands ?? []).map((command) => command.trim()).filter((command) => command.length > 0)),
     workspace_trusted: workspaceTrusted,
     ...((inputs.taskScope?.dependency_links ?? []).length === 0 ? {} : { dependency_links: unique([...(inputs.taskScope?.dependency_links ?? [])]) }),
+    ...(permission === undefined ? {} : { permission_mode: permission }),
     ...(role === "session" ? { command_grants: unique((inputs.commandGrants ?? []).map((entry) => entry.trim().split(/\s+/).join(" ")).filter((entry) => entry.length > 0)).slice(0, 256) } : {}),
     layers,
   });
@@ -172,13 +195,21 @@ interface DecisionBuilder {
   decision: EffectDecision;
   rail: HardRail | undefined;
   readonly reasons: { code: string; layer: PolicyLayer; message: string }[];
+  /** Whether every denial so far is one a permission mode may lift (see `PERMISSION_LIFTABLE_CODES`). */
+  liftable: boolean;
 }
 
+/** Roles that inherit `full` access from the session's permission mode; read-only roles and the orchestrator never do. */
+const WORKER_FULL_ROLES: ReadonlySet<AgentRole> = new Set(["implementer", "debugger"]);
+
 function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, options: PolicyEngineOptions): PolicyDecision {
-  const builder: DecisionBuilder = { decision: "allow", rail: undefined, reasons: [] };
+  const builder: DecisionBuilder = { decision: "allow", rail: undefined, reasons: [], liftable: true };
   const deny = (layer: PolicyLayer, code: string, message: string, rail?: HardRail): void => {
     builder.decision = "deny";
     if (rail !== undefined && builder.rail === undefined) builder.rail = rail;
+    // An allowlist refusal is liftable only on the partial-sandbox list; the read-only list and hard refusals (layer role) never are.
+    const liftable = rail === undefined && (PERMISSION_LIFTABLE_CODES as readonly string[]).includes(code) && !(code === "exec-not-allowlisted" && layer === "role");
+    if (!liftable) builder.liftable = false;
     builder.reasons.push({ code, layer, message: message.slice(0, 500) });
   };
 
@@ -206,6 +237,8 @@ function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, optio
     builder.reasons.push({ code: confinement.code, layer: confinement.layer, message: confinement.message.slice(0, 500) });
   }
 
+  liftByPermission(builder, policy, isReadOnlyWorker(action.role, policy));
+
   if (builder.reasons.length === 0) {
     const writes = action.paths.filter((entry) => entry.access === "write");
     builder.reasons.push(
@@ -224,6 +257,23 @@ function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, optio
 }
 
 type Deny = (layer: PolicyLayer, code: string, message: string, rail?: HardRail) => void;
+
+/**
+ * ADR-08 revision (2026-09-24): in `auto` a decision denied only by liftable reasons becomes a prompt
+ * (`ask`), in `full` it is allowed. Hard rails, reserved paths, escapes, git integration, module
+ * injection, configured effect denials and read-only roles are never lifted.
+ */
+function liftByPermission(builder: DecisionBuilder, policy: EffectivePolicy, readOnly: boolean): void {
+  const mode = policy.permission_mode;
+  if ((mode !== "auto" && mode !== "full") || readOnly || builder.decision !== "deny" || builder.rail !== undefined || !builder.liftable) return;
+  if (mode === "auto") {
+    builder.decision = "ask";
+    builder.reasons.push({ code: "permission-prompt", layer: "approval", message: "auto mode asks you before anything outside the allowlist runs" });
+    return;
+  }
+  builder.decision = "allow";
+  builder.reasons.push({ code: "permission-full-access", layer: "user", message: "full access mode: allowed without a prompt; it runs with your user permissions" });
+}
 
 function evaluatePaths(action: NormalizedAction, policy: EffectivePolicy, options: PolicyEngineOptions, deny: Deny): void {
   // Repository-relative layer sources (e.g. the canonical `.ai/agents/<role>/AGENT.md` role layer) are policy sources no tool may write.

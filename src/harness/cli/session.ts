@@ -83,6 +83,14 @@ async function reportError(renderer: SessionRenderer | undefined, io: SessionIO,
   return exitCodeFor(error.code);
 }
 
+/** The one-line red notice of `--permission-mode full` (ADR-08 revision 2026-09-24). */
+export const FULL_ACCESS_RUN_NOTICE =
+  "Full access: workers edit and run any command in their worktree without asking (hard rails still apply); the workspace is trusted for this run only (not saved)";
+
+function noticeFullAccess(runtime: Runtime, renderer: SessionRenderer): void {
+  if (runtime.permissionMode() === "full") renderer.render({ kind: "notice", level: "error", message: FULL_ACCESS_RUN_NOTICE });
+}
+
 function describeOutcome(outcome: RunOutcome): string {
   return `Run ${outcome.runId} ${outcome.status} (exit ${outcome.exitCode}); session ${outcome.sessionId}\n${outcome.summary}\n`;
 }
@@ -175,6 +183,8 @@ async function openSession(
       routes: parsed.session.profiles,
       overrides,
       trustWorkspace: parsed.kind === "run" && parsed.trustWorkspace,
+      // Headless auto asks nothing, so it equals the default-deny policy; only full access changes a run.
+      ...(parsed.session.permission === "full" ? { permissionMode: "full" as const } : {}),
     });
     requireOrchestratorRoute(runtime);
   } catch (error) {
@@ -239,6 +249,7 @@ export async function runCommand(parsed: RunCommand, io: SessionIO, overrides: R
   (sigintProcess as NodeJS.Process | undefined)?.on?.("SIGINT", onSigint);
   try {
     await renderer.start(headerFor(runtime));
+    noticeFullAccess(runtime, renderer);
     const goal = parsed.goalFromStdin && io.stdin !== undefined ? (await readAll(io.stdin)).trim() : parsed.goal;
     if (goal === "") return await reportError(renderer, io, { code: "usage_invalid", message: "the goal read from stdin is empty", workspace_effect: "none", retry_safe: true });
     await promptWorkspaceTrust(runtime, renderer, controller.signal);
@@ -359,6 +370,7 @@ export async function agentCommand(parsed: AgentCommand, io: SessionIO, override
       notices.push(`forked ${parsed.fork.sessionId}@${upTo} into ${forked.sessionId}`);
     }
     await renderer.start(headerFor(runtime, notices));
+    noticeFullAccess(runtime, renderer);
     const input = renderer.input;
     if (input === undefined) {
       notify(["syn agent needs input: attach a terminal or pipe goals on stdin, one per line"], "warning");

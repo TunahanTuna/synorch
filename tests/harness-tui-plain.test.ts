@@ -202,7 +202,7 @@ test("an interactive plain terminal asks [y/N]; the default and a timeout refuse
   const yes = renderer.approvals.request(approval("once"), new AbortController().signal);
   input.type("y\n");
   assert.equal((await yes).outcome, "allowed-once");
-  assert.match(stdout(), /Allow\? \[y\/N\] /);
+  assert.match(stdout(), /1\. Allow once\n {2}2\. Deny\n {2}3\. Deny and tell Synorch why\nChoose \[1-3\]/);
 
   const always = renderer.approvals.request(approval("session"), new AbortController().signal);
   input.type("a\r\n");

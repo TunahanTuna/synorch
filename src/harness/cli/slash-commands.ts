@@ -224,7 +224,7 @@ export interface SlashCommand {
 
 export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/help", description: "commands and keys", whileBusy: true, run: async (host) => host.print(conversationHelp()) },
-  { name: "/plan", argsHint: "[goal]", description: "plan mode: read-only, discuss and plan before changing anything (Shift+Tab)", whileBusy: true, run: (host, argument) => host.planMode(argument) },
+  { name: "/plan", argsHint: "[goal]", description: "plan mode: read-only, discuss and plan before changing anything (Shift+Tab cycles modes)", whileBusy: true, run: (host, argument) => host.planMode(argument) },
   { name: "/go", argsHint: "[workers]", description: "leave plan mode and carry out the plan here, or with workers", run: (host, argument) => host.go(argument) },
   { name: "/workers", argsHint: "<goal>", description: "run a large goal with parallel workers and an independent reviewer", run: (host, argument) => host.workers(argument) },
   { name: "/model", argsHint: "[tier] [--save]", description: "models per tier; switch the conversation model (--save makes it the default)", run: (host, argument) => host.model(argument) },
@@ -246,7 +246,7 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/diff", description: "files changed by Synorch in this conversation", whileBusy: true, run: (host, argument) => host.report("diff", argument) },
   { name: "/graph", description: "the plan graph of the current or last worker run", whileBusy: true, run: (host) => host.graph() },
   { name: "/tasks", description: "tasks of this conversation's worker runs", whileBusy: true, run: (host, argument) => host.report("tasks", argument) },
-  { name: "/permissions", description: "what Synorch may do here", whileBusy: true, run: (host, argument) => host.report("permissions", argument) },
+  { name: "/permissions", argsHint: "[ask|auto|full|plan | allow <prefix> | remove <prefix>]", description: "permission mode, allow rules and trust; switch mode or edit rules", whileBusy: true, run: (host, argument) => host.report("permissions", argument) },
   { name: "/log", argsHint: "[n]", description: "raw event log of this conversation (debug)", whileBusy: true, run: (host, argument) => host.report("log", argument) },
   { name: "/cancel", description: "stop the current work (the conversation stays resumable)", whileBusy: true, run: async (host) => host.cancel() },
   { name: "/exit", aliases: ["/quit"], description: "leave (resume with syn agent --continue)", whileBusy: true, rendererLocal: true, run: async () => true },
@@ -279,6 +279,6 @@ export function conversationHelp(): string[] {
   const width = Math.max(...CONVERSATION_COMMANDS.map((command) => label(command).length));
   return [
     ...CONVERSATION_COMMANDS.map((command) => `${label(command).padEnd(width + 2)}${command.description}`),
-    "Keys: Esc interrupts (twice stops workers) · Shift+Tab plan mode · Enter while working steers · @path attaches a file · Ctrl+C twice exits",
+    "Keys: Esc interrupts (twice stops workers) · Shift+Tab cycles ask/auto/full/plan · Enter while working steers · @path attaches a file · Ctrl+C twice exits",
   ];
 }

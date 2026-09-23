@@ -26,6 +26,22 @@ Mevcut Synorch protokolü her görev planı için kullanıcı onayı öngörür 
 - Bu karar runtime için statik `execution_requires_user_approval` invariant'ının yerini alır; `.ai/` canonical dosyaları host agent'lar için değişmeden kalır.
 - Etkin yetki: `platform ∩ user ∩ workspace ∩ role ∩ task ∩ sandbox ∩ approval`; model metni, repo dosyası veya tool çıktısı yetki kaynağı değildir.
 
+## 2026-09-24 owner revision — etkileşimli izin modları
+
+Ürün sahibi geri bildirimi (bağlayıcı; "otonom = asla sorma, sadece reddet" yorumunun yerine geçer): *"CLI'mın yetkisi yok gibi; Claude Code'da ask / auto-accept / full access var; önemli şeylerde sor; izinlerde cömert ol yoksa iş yapamaz."* Windows'ta (kısmi sandbox) build/test allowlist'i dışındaki her komut doğrudan reddediliyordu ve kullanıcının `/allow` dışında yapabileceği bir şey yoktu. Bu bölüm ekleyicidir; yukarıdaki kararlar headless için aynen geçerlidir.
+
+- **Modlar** (`PERMISSION_MODES`, `EffectivePolicy.permission_mode`, yalnız `session`; işçiler yalnız `full`'u miras alır):
+  - `ask`: düzenleme ve komutlar sorulur (`mode: ask`).
+  - `auto` (**etkileşimli oturumun varsayılanı**, kullanıcı config'i `ui.permission_mode`): düzenlemeler ve allowlist'teki/güvenilen komutlar kendiliğinden çalışır; allowlist dışı komut, güvenilmeyen çalışma alanında depo kodu, dış yazma ve allowlist dışı host **ret yerine etkileşimli soru** üretir.
+  - `full`: soru yok; çalışma alanında her şey serbest, yalnız hard rail'ler (kimlik bilgisi/Synorch home depoları, `.git` iç yapısı, çalışma alanı dışını hedefleyen yıkıcı komutlar, sır sızdırma, git entegrasyonu) kalır. Güveni yalnız oturum için ima eder (kalıcı değil) ve kırmızı tek satırla söylenir.
+  - `plan`: salt okur.
+- **Motor:** allowlist retleri (`PERMISSION_LIFTABLE_CODES`) `auto`'da `ask`, `full`'da `allow` olur; hard rail her modda `deny`'dir ("rail prompt değildir" kuralı değişmedi). Repo katmanları yalnız daraltabilir: `policy.mode: ask` `auto`/`full`'u `ask`'e indirir, `ui` anahtarı repo katmanında yok sayılır.
+- **Soru arayüzü (UX-03):** eylem kartı (ne / neden / sonuç) ve seçimler *Allow once* · *Always allow `<önek>`* (çalışma alanı başına, kullanıcı kapsamı, `command/allowed` ile denetlenir) · *Deny* (isteğe bağlı gerekçe ajana iletilir). 1/2/3 veya oklar + Enter; Esc = ret; TTY'de zaman aşımı yok. `Shift+Tab` `ask → auto → full → plan` döngüsüdür (`/plan` sürer); alt bilgi modu renkle gösterir (`full` kırmızı/kalın). `/permissions` modu, kalıcı kuralları ve güven durumunu gösterir; kural ekler/siler, mod değiştirir; `/allow` kısayol olarak kalır.
+- **Güven kapısı** `auto`/`ask`'te aynı soru akışının parçasıdır (depo kodu çalıştıran ilk komutta "trust this workspace?").
+- **Headless** (`syn run`, JSONL, TTY yok): `--permission-mode full|auto` açıkça verilmedikçe bugünkü varsayılan-ret aynen sürer; headless `auto`'da sorular rettir.
+- Önceki "Alternatives" maddesindeki *"Otonom modda dış yazma için prompt: reddedildi"* kararı etkileşimli `auto` için tersine çevrildi; headless ve mod yokken geçerlidir.
+- Kanıt: `src/harness/contracts/policy.ts` (`PERMISSION_MODES`, `PERMISSION_LIFTABLE_CODES`, `approvalRequestSchema.command/details`), `src/harness/policy/engine.ts` (`liftByPermission`), `src/harness/cli/conversation.ts` (broker, `/permissions`), `tests/harness-policy-permission-modes.test.ts`, `tests/harness-e2e-permission-modes.test.ts`; sözleşme: [policy ve onay §9](../contracts/policy-and-approval.md).
+
 ## Alternatives
 
 - **Her plan için zorunlu kullanıcı onayı:** Ürün sahibinin otonom çalışma kararına aykırı; trivial işte gereksiz onay. Reddedildi.

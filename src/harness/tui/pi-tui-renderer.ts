@@ -5,6 +5,7 @@ import {
   CURSOR_MARKER,
   Editor,
   getNativeClipboard,
+  Input,
   Markdown,
   matchesKey,
   ProcessTerminal,
@@ -31,6 +32,7 @@ import type {
   InteractiveInputControls,
   ModelPickerEntry,
   ModelStreamEvent,
+  PermissionMode,
   PolicyMode,
   RenderEvent,
   SessionEvent,
@@ -39,8 +41,8 @@ import type {
   TerminalRenderer,
   UserInputSource,
 } from "../contracts/index.ts";
-import { WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
-import { withApprovalDeadline, type ApprovalChoice } from "./approvals.ts";
+import { nextPermissionMode, WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
+import { actionChoices, actionTitle, withApprovalDeadline, type ApprovalAnswer, type ApprovalChoice } from "./approvals.ts";
 import {
   activityText,
   ConversationPresenter,
@@ -477,10 +479,12 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private readonly viewport: TranscriptViewport;
   private readonly expandedItems = new Set<string>();
   private readonly attachmentListeners = new Set<(attachment: Attachment) => void>();
-  private readonly planListeners = new Set<(on: boolean) => void>();
+  private readonly permissionListeners = new Set<(mode: PermissionMode) => void>();
   private tray: AttachmentTray;
   private inputRoot = process.cwd();
-  private planModeOn = false;
+  /** The session's permission mode (Shift+Tab); shown in the footer once the session reports one. */
+  private permission: PermissionMode = "auto";
+  private permissionShown = false;
   private mouseOn = false;
   private selectMode = false;
   private mousePress: MouseInput | undefined;
@@ -544,13 +548,13 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         return () => this.attachmentListeners.delete(listener);
       },
       openModelPicker: (entries, signal) => this.openModelPicker(entries, signal),
-      get planMode() {
-        return self.planModeOn;
+      get permissionMode() {
+        return self.permission;
       },
-      setPlanMode: (on) => this.setPlanMode(on),
-      onPlanModeChange: (listener) => {
-        this.planListeners.add(listener);
-        return () => this.planListeners.delete(listener);
+      setPermissionMode: (mode) => this.setPermissionMode(mode),
+      onPermissionModeChange: (listener) => {
+        this.permissionListeners.add(listener);
+        return () => this.permissionListeners.delete(listener);
       },
       get mouseMode() {
         return self.mouseOn;
@@ -641,7 +645,12 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private startConversation(header: SessionHeaderView, presenter: ConversationPresenter): void {
     const folder = header.workspaceRoot.split(/[\\/]/).filter((part) => part !== "").at(-1) ?? header.workspaceRoot;
     presenter.configure({ model: header.model, contextWindowTokens: header.contextWindowTokens });
-    this.footerLabel = { folder, branch: header.gitBranch, mode: header.policyMode === "ask" ? "ask mode" : "" };
+    this.footerLabel = { folder, branch: header.gitBranch, mode: header.permissionMode === undefined && header.policyMode === "ask" ? "ask mode" : "" };
+    if (header.permissionMode !== undefined) {
+      this.permission = header.permissionMode;
+      this.permissionShown = true;
+      this.editor.borderColor = this.borderFor(this.permission);
+    }
     const { title, warning } = headerLines({
       version: header.version ?? "",
       folder,
@@ -717,9 +726,11 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   public setBoard(view: OrchestrationView | undefined): void {
     if (this.stopped) return;
     if (view === undefined || view.done) {
+      // A done board is pinned once: only the live board it replaces is collapsed; later done updates are ignored.
+      const live = this.board !== undefined;
       this.boardSlot.clear();
       this.board = undefined;
-      if (view !== undefined) this.transcript.addChild(new StaticViewComponent(view, this.viewStyle()));
+      if (view !== undefined && live) this.transcript.addChild(new StaticViewComponent(view, this.viewStyle()));
     } else if (this.board === undefined) {
       this.board = new LiveBoardComponent(view, this.viewStyle());
       this.boardSlot.addChild(this.board);
@@ -842,10 +853,28 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private modeLabel(sep: string): string | undefined {
     const parts: string[] = [];
     if (this.selectMode) parts.push("select mode (esc to exit)");
-    if (this.planModeOn) parts.push("plan mode");
+    if (this.permissionShown) parts.push(this.permissionLabel());
     if (this.footerLabel.mode !== "") parts.push(this.footerLabel.mode);
     if (this.mouseOn && !this.selectMode) parts.push("mouse");
     return parts.length === 0 ? undefined : parts.join(` ${sep} `);
+  }
+
+  /** The footer's permission field: full access red and bold, plan cyan, ask yellow, auto plain. */
+  private permissionLabel(): string {
+    switch (this.permission) {
+      case "full":
+        return this.style.red(this.style.bold("full access"));
+      case "plan":
+        return this.style.cyan("plan mode");
+      case "ask":
+        return this.style.yellow("ask mode");
+      case "auto":
+        return "auto mode";
+    }
+  }
+
+  private borderFor(mode: PermissionMode): (text: string) => string {
+    return mode === "plan" ? (text) => this.style.cyan(text) : mode === "full" ? (text) => this.style.red(text) : (text) => this.style.dim(text);
   }
 
   /** Keys owned by the input layer; undefined lets the rest of `onKey` and the editor see them. */
@@ -863,7 +892,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       return { consume: true };
     }
     if (matchesKey(data, "shift+tab") || matchesKey(data, "alt+m")) {
-      this.setPlanMode(!this.planModeOn);
+      this.setPermissionMode(nextPermissionMode(this.permission));
       return { consume: true };
     }
     if (matchesKey(data, "alt+v") || matchesKey(data, "ctrl+v")) {
@@ -928,12 +957,14 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     }
   }
 
-  private setPlanMode(on: boolean): void {
-    if (this.planModeOn === on) return;
-    this.planModeOn = on;
-    this.editor.borderColor = on ? (text) => this.style.cyan(text) : (text) => this.style.dim(text);
-    if (this.presenter === undefined) this.appendLine({ level: "info", text: on ? "Plan mode on: Synorch reads and plans, no edits (Shift+Tab to leave)." : "Plan mode off." });
-    for (const listener of this.planListeners) listener(on);
+  /** Shift+Tab cycles ask -> auto -> full -> plan; the session applies the policy and prints the notice. */
+  private setPermissionMode(mode: PermissionMode): void {
+    if (this.permission === mode) return;
+    this.permission = mode;
+    this.permissionShown = true;
+    this.editor.borderColor = this.borderFor(mode);
+    if (this.presenter === undefined && this.permissionListeners.size === 0) this.appendLine({ level: "info", text: `Permission mode: ${mode} (Shift+Tab cycles).` });
+    for (const listener of this.permissionListeners) listener(mode);
     if (this.started && !this.stopped) this.tui.requestRender();
   }
 
@@ -1299,25 +1330,34 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
 
   private promptApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
     return withApprovalDeadline(request, this.options.policyMode, signal, this.clock, (promptSignal) =>
-      new Promise<ApprovalChoice>((resolve, reject) => {
+      new Promise<ApprovalAnswer>((resolve, reject) => {
         const trust = request.subject_kind === "workspace-trust";
         const items: { value: string; label: string }[] = [];
         if (trust) {
           // "Not now" first, so the pre-selected answer never trusts anything.
           for (const choice of WORKSPACE_TRUST_CHOICES) items.push({ value: choice.outcome, label: choice.label });
         } else {
-          items.push({ value: "allowed-once", label: "Allow once" });
-          if (request.scope !== "once") items.push({ value: "allowed-for-scope", label: `Allow for this ${request.scope}` });
-          items.push({ value: "rejected", label: "Reject" });
+          for (const choice of actionChoices(request)) items.push({ value: choice.value, label: `${choice.key}. ${choice.label}` });
         }
         const list = new SelectList(items, items.length, this.selectTheme);
         const box = new Box(1, 0);
-        box.addChild(new Text(this.style.yellow(trust ? (this.presenter !== undefined ? "Trust this folder?" : "Trust this workspace?") : `Approval needed (${request.subject_kind})`), 0, 0));
-        box.addChild(new Text(sanitizeInline(request.summary, 2000), 0, 0));
-        if (request.effect !== undefined) box.addChild(new Text(this.style.dim(`effect ${request.effect} · scope ${request.scope}`), 0, 0));
+        if (trust) {
+          box.addChild(new Text(this.style.yellow(this.presenter !== undefined ? "Trust this folder?" : "Trust this workspace?"), 0, 0));
+          box.addChild(new Text(sanitizeInline(request.summary, 2000), 0, 0));
+        } else {
+          // UX-03 action card: what, why, consequence, then the choices.
+          box.addChild(new Text(this.style.yellow(this.style.bold(actionTitle(request))), 0, 0));
+          const what = request.command !== undefined ? request.command.join(" ") : request.summary;
+          box.addChild(new Text(`  ${sanitizeInline(what, 2000)}`, 0, 0));
+          if (request.details !== undefined) {
+            box.addChild(new Text(this.style.dim(`  why          ${sanitizeInline(request.details.why, 1000)}`), 0, 0));
+            box.addChild(new Text(this.style.dim(`  consequence  ${sanitizeInline(request.details.consequence, 1000)}`), 0, 0));
+          } else if (request.effect !== undefined) box.addChild(new Text(this.style.dim(`  effect ${request.effect} · scope ${request.scope}`), 0, 0));
+        }
         box.addChild(list);
+        if (!trust) box.addChild(new Text(this.style.dim("  1-9 or arrows + Enter · Esc denies"), 0, 0));
         let settled = false;
-        const finish = (outcome: ApprovalChoice | undefined): void => {
+        const finish = (outcome: ApprovalAnswer | undefined): void => {
           if (settled) return;
           settled = true;
           promptSignal.removeEventListener("abort", onAbort);
@@ -1327,7 +1367,29 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         };
         const onAbort = (): void => finish(undefined);
         promptSignal.addEventListener("abort", onAbort, { once: true });
-        list.onSelect = (item) => finish(item.value as ApprovalChoice);
+        const askWhy = (): void => {
+          const reason = new Input({ prompt: "why? ", placeholder: "tell Synorch why (Enter sends, Esc just denies)" });
+          const why = new Box(1, 0);
+          why.addChild(new Text(this.style.yellow("Denied. Tell Synorch why (optional)"), 0, 0));
+          why.addChild(reason);
+          reason.onSubmit = (value) => finish(value.trim() === "" ? "rejected" : { choice: "rejected", reason: value });
+          reason.onEscape = () => finish("rejected");
+          // Replace the choices without cancelling the pending answer.
+          this.closeDialog();
+          this.openDialog(why, reason, () => finish(undefined));
+        };
+        const pick = (value: string): void => {
+          if (value === "rejected-why") askWhy();
+          else finish(value as ApprovalChoice);
+        };
+        const handle = list.handleInput.bind(list);
+        list.handleInput = (data: string): void => {
+          const index = /^[1-9]$/.test(data) ? Number(data) - 1 : -1;
+          const item = items[index];
+          if (!trust && item !== undefined) pick(item.value);
+          else handle(data);
+        };
+        list.onSelect = (item) => pick(item.value);
         list.onCancel = () => finish("rejected");
         this.openDialog(box, list, () => finish(undefined));
       }),

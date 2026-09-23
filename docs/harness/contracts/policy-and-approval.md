@@ -388,7 +388,7 @@ requested_at: "2026-09-22T10:01:00Z"
 - **Tavan:** `ROLE_EFFECT_CEILINGS.session = {read, workspace-write, exec, external-write, control: allow}`; ardından mod, yapılandırma, sandbox, güven ve rail kesişimi aynen uygulanır (`external-write` kullanıcı allowlist'i olmadan `deny`, `ask` modunda yan etkili her eylem sorulur).
 - **`run_id`:** `EffectivePolicy.run_id` yalnız `session` için yok olabilir (şema refine'ı diğer rollerde zorunlu tutar); `TurnInput.runId`, `ContextBuildInput.runId`, `ToolExecutionContext.runId`, `ToolInvocationScope.runId`, `ApprovalRequest.run_id` opsiyoneldir.
 - **Yazma kapsamı:** `write_scope: ["**"]` (`SESSION_WRITE_SCOPE`) yalnız `session` için geçerlidir; bütün çalışma alanı deseni diğer rollerde yine reddedilir. Ayrılmış yollar (`.git/**`, `.synorch/**`), git hook/config, Synorch home ve kanonik rol manifestleri (`.ai/agents/**`, `policy-self-modification`) istisnasız reddedilir.
-- **Exec:** mevcut `exec_confinement` aynen (tam sandbox / allowlist + güven / ask). Git geçmişini veya index'i değiştiren komutlar (`commit`, `add`, `stash`, `reset`, `checkout`, `push` …) her rolde olduğu gibi reddedilir. Allowlist dışı komutlar için etkileşimli onay sorusu **yoktur** (otonom mod prompt uydurmaz); kullanıcı `/allow <önek>` yazar.
+- **Exec:** mevcut `exec_confinement` aynen (tam sandbox / allowlist + güven / ask). Git geçmişini veya index'i değiştiren komutlar (`commit`, `add`, `stash`, `reset`, `checkout` …) her rolde olduğu gibi reddedilir. Allowlist dışı komutlar izin moduna göre sorulur (`auto`), izinlidir (`full`) veya reddedilir (mod yok: headless); bkz. §9. `/allow <önek>` kısayolu sürer.
 - **`command_grants` (yalnız `session`):** `/allow` önekleri, kelime kelime argv öneki olarak eşleşir; `hardRefusal`/tanınmayan argv ve çalışma alanı dışı yol argümanları hiçbir zaman eşleşmez, yıkıcı komut kuralları önce reddeder. Eşleşen komut build/test komutu gibi değerlendirilir: tam sandbox yoksa çalışma alanı güveni ister (`workspace-untrusted`). Kaynak yalnız kullanıcı kapsamı: `<synorch home>/command-grants.json` (kanonik kök anahtarlı), her ekleme `command/allowed` ile denetlenir. `sh`/`bash`/`cmd`/`powershell`/`env`/`npx` gibi tek başına her şeyi açacak önekler ve `git` reddedilir.
 - **Güven zamanı (UX-GATE-01):** konuşma açılışında soru yoktur; depo kodu çalıştıran ilk exec'te (`workspace-untrusted` olacak komut) etkileşimli oturum güven sorusunu bir kez gösterir ("Not now / Trust for this session only / Trust this workspace"), cevaba göre aynı çağrı güncel politika ile değerlendirilir. "Not now" o komutu reddeder, okuma ve düzenleme sürer; `/trust` soruyu tekrar açar. Headless'ta davranış değişmez.
 - **Onay:** `approval/decided.decided_by` `session` değerini alabilir (yalnız `autonomous` modda ve insan-yalnız konular hariç; orkestrasyon başlatma kararı K2'de kullanılır).
@@ -467,4 +467,84 @@ Reddedilenler: bütün çalışma alanını başka bir rol yazamaz; `run_id`'siz
   require_full_sandbox: false
   command_grants: ["node check.mjs"]
   layers: [{ layer: role, source: reviewer, digest: "sha256:9999999999999999999999999999999999999999999999999999999999999999" }]
+```
+
+## 9. İzin modları (ADR-08 revizyonu 2026-09-24)
+
+Konuşma ajanı (`session`) için Claude Code tarzı etkileşimli izin modları; `EffectivePolicy.permission_mode` (`PERMISSION_MODES`), `PolicyInputs.permissionMode`. Alan yoksa davranış revizyon öncesiyle aynıdır: prompt'suz varsayılan-ret (headless).
+
+| Mod | `mode` | Düzenleme | Allowlist'teki / güvenilen komut | Allowlist dışı komut, güvenilmeyen çalışma alanı, dış yazma, allowlist dışı host | Hard rail |
+| --- | --- | --- | --- | --- | --- |
+| `ask` | `ask` | ask | ask | ask | deny |
+| `auto` (etkileşimli varsayılan, `ui.permission_mode`) | `autonomous` | allow | allow | **ask** (`permission-prompt`) | deny |
+| `full` | `autonomous` | allow | allow | **allow** (`permission-full-access`), oturumluk güven | deny |
+| `plan` | `autonomous` | deny | deny | deny | deny |
+
+- **Kaldırılabilir retler** (`PERMISSION_LIFTABLE_CODES`): `exec-not-allowlisted` (yalnız sandbox katmanı), `workspace-untrusted`, `external-write-not-allowlisted`, `network-denied`, `host-not-allowlisted`. Karar yalnız bunlarla reddedildiyse `auto` onu `ask`'e, `full` `allow`'a çevirir. Rail, ayrılmış yol, kaçış, git entegrasyonu (`commit`, `reset` …), node modül enjeksiyonu, yapılandırılmış etki reddi ve salt-okur roller hiçbir modda kaldırılmaz.
+- **Daraltma:** bir yapılandırma katmanı `policy.mode: ask` derse `auto`/`full` `ask` olur; repo katmanı `ui` anahtarını hiç ayarlayamaz. `auto`/`full`'da `external-write` etkisi `allow` hesaplanır (allowlist şartı şema refine'ından muaf), karar değerlendirmede verilir.
+- **İşçiler:** `implementer`/`debugger` yalnız `full`'u miras alır (motor seçeneği `permissionMode`); diğer modlar ve salt-okur roller/orchestrator varsayılan-ret kalır. Şema: `session` dışında yalnız `full`; `mode` = `policyModeForPermission(permission_mode)`; `plan` salt okurdur.
+- **Onay isteği:** `ApprovalRequest.command` (redakte argv) ve `details: { why, consequence }` UX-03 eylem kartını besler. Seçimler: *Allow once* · *Always allow `<önek>`* (kullanıcı kapsamı `command-grants.json`, `command/allowed` ile denetlenir; git ve tek başına kabuk önerilmez) · *Deny* · *Deny and tell Synorch why* (`reason: "the user said: …"` modele iletilir). Tuşlar 1–9 veya oklar + Enter; Esc reddeder; TTY'de zaman aşımı yoktur.
+- **Güven:** `auto`/`ask`'te depo kodu çalıştıran ilk komut aynı akışta "trust this folder?" sorar; "Not now" o çağrının onayını kullanıcı adına `rejected` yapar (çift soru yok). `full` oturum boyunca güven ima eder, kalıcı değildir, kırmızı tek satırla söylenir.
+- **Headless** (`syn run`, JSONL, TTY yok): `--permission-mode` verilmezse varsayılan-ret. `--permission-mode auto` headless'ta soruları ret yapar; `syn run --permission-mode full` işçilere tam erişim verir.
+
+`auto` modunda güvenilmeyen çalışma alanında `session` politikası: `python gen.py` ve `pnpm test` sorulur, `git push` sorulur, `.git/config` ve `git commit` reddedilir.
+
+```yaml example=effective-policy
+- schema_version: 1
+  policy_version: 1
+  mode: autonomous
+  role: session
+  workspace_root: /home/dev/syn-smoke
+  write_scope: ["**"]
+  read_scope: ["**"]
+  forbidden: []
+  effects: { read: allow, workspace-write: allow, exec: allow, external-write: allow, control: allow }
+  external_write_allowlist: []
+  network: { mode: deny, hosts: [] }
+  sandbox: { backend: policy-only, enforcement: partial }
+  require_full_sandbox: false
+  exec_confinement: allowlist
+  verification_commands: []
+  workspace_trusted: false
+  command_grants: []
+  permission_mode: auto
+  layers:
+    - { layer: platform, source: builtin-rails, digest: "sha256:5555555555555555555555555555555555555555555555555555555555555555" }
+    - { layer: role, source: session, digest: "sha256:6666666666666666666666666666666666666666666666666666666666666666" }
+```
+
+Reddedilenler: `plan` modunda yazma/exec açık olamaz; bir işçi `auto` taşıyamaz (yalnız `full`).
+
+```yaml example=effective-policy invalid
+- schema_version: 1
+  policy_version: 1
+  mode: autonomous
+  role: session
+  workspace_root: /w
+  write_scope: ["**"]
+  read_scope: ["**"]
+  forbidden: []
+  effects: { read: allow, workspace-write: allow, exec: allow, external-write: deny, control: allow }
+  external_write_allowlist: []
+  network: { mode: deny, hosts: [] }
+  sandbox: { backend: policy-only, enforcement: partial }
+  require_full_sandbox: false
+  permission_mode: plan
+  layers: [{ layer: role, source: session, digest: "sha256:6666666666666666666666666666666666666666666666666666666666666666" }]
+- schema_version: 1
+  policy_version: 1
+  mode: autonomous
+  role: implementer
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  workspace_root: /w
+  write_scope: [src/**]
+  read_scope: ["**"]
+  forbidden: []
+  effects: { read: allow, workspace-write: allow, exec: allow, external-write: deny, control: allow }
+  external_write_allowlist: []
+  network: { mode: deny, hosts: [] }
+  sandbox: { backend: policy-only, enforcement: partial }
+  require_full_sandbox: false
+  permission_mode: auto
+  layers: [{ layer: role, source: implementer, digest: "sha256:7777777777777777777777777777777777777777777777777777777777777777" }]
 ```

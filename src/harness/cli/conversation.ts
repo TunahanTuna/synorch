@@ -7,13 +7,18 @@ import {
   digestOf,
   effectivePolicySchema,
   EVENT_VERSIONS,
+  DEFAULT_PERMISSION_MODE,
   EXIT_CODES,
   exitCodeFor,
   HarnessError,
   MODEL_TIERS,
+  HARD_RAILS,
   WORKSPACE_UNTRUSTED_CODE,
   workspaceDigest,
   type AgentDriver,
+  type ApprovalBroker,
+  type ApprovalDecision,
+  type ApprovalRequest,
   type Attachment,
   type BlobRef,
   type CompletionPacket,
@@ -24,6 +29,7 @@ import {
   type HarnessErrorInfo,
   type ModelRequest,
   type ModelTier,
+  type PermissionMode,
   type RenderEvent,
   type RouteDecision,
   type RouteRule,
@@ -42,8 +48,8 @@ import {
 import type { CriterionView, EvidenceView, WhyView } from "../contracts/views.ts";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageTokens, reconstructHistory } from "../context/index.ts";
-import { evaluateExecAllowlist } from "../policy/index.ts";
-import { describeEvent, formatHarnessError, GLYPH_SETS, patchPaths, selectGlyphs, type GlyphSet } from "../tui/index.ts";
+import { createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/index.ts";
+import { describeEvent, formatHarnessError, GLYPH_SETS, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
 import type { ParsedCommand } from "./args.ts";
 import { mayContainImage, resolveAttachments } from "./attachments.ts";
 import { profileHintsFor } from "./canonical.ts";
@@ -62,7 +68,6 @@ import {
   findConversationCommand,
   unknownConversationCommand,
   memoryReport,
-  permissionsReport,
   tasksReport,
   type ConversationCommandHost,
 } from "./slash-commands.ts";
@@ -248,7 +253,11 @@ class Conversation implements ConversationCommandHost {
   private turnRunning = false;
   private orchestration: ActiveOrchestration | undefined;
   private readonly orchestratedSessions: SessionId[] = [];
-  private planOn = false;
+  /** The mode to return to when plan mode ends (Shift+Tab, /go, a go-word). */
+  private modeBeforePlan: PermissionMode | undefined;
+  /** Set while the current exec call follows a declined trust question: its prompt is answered "no" for the user. */
+  private trustDeclinedNow = false;
+  private sessionBroker: ApprovalBroker | undefined;
   private startedAt = Date.now();
   private lastTracker: OrchestrationTracker | undefined;
   private turnId: TurnId | undefined;
@@ -275,7 +284,14 @@ class Conversation implements ConversationCommandHost {
     let failure: HarnessErrorInfo | undefined;
     let runtime: Runtime | undefined;
     try {
-      runtime = await createRuntime({ workspaceRoot, env: io.env, policyMode: this.parsed.session.policy, routes: this.parsed.session.profiles, overrides: this.overrides });
+      runtime = await createRuntime({
+        workspaceRoot,
+        env: io.env,
+        policyMode: this.parsed.session.policy,
+        routes: this.parsed.session.profiles,
+        overrides: this.overrides,
+        ...(this.parsed.session.permission === undefined ? {} : { permissionMode: this.parsed.session.permission }),
+      });
     } catch (error) {
       failure = failureInfo(error);
     }
@@ -314,6 +330,12 @@ class Conversation implements ConversationCommandHost {
     });
     if (runtime === undefined || failure !== undefined) return this.fail(failure ?? failureInfo(new Error("runtime unavailable")));
     this.runtime = runtime;
+    // ADR-08 revision (2026-09-24): an interactive conversation starts in `ui.permission_mode` (default auto);
+    // headless keeps default-deny unless --permission-mode was passed; --policy ask means ask mode.
+    const interactive = io.stdinIsTTY && this.renderer.approvals.availability === "interactive";
+    const startMode = interactive ? (runtime.config.permissionMode ?? DEFAULT_PERMISSION_MODE) : undefined;
+    if (this.parsed.session.permission === undefined) runtime.setPermissionMode(this.parsed.session.policy === "ask" ? "ask" : startMode);
+    if (runtime.permissionMode() === "plan") this.modeBeforePlan = startMode === "plan" ? DEFAULT_PERMISSION_MODE : startMode;
     this.sessionTier = await savedSessionTier(runtime.home);
     const rule = sessionRouteRule(runtime, this.sessionTier);
     if (rule === undefined) return this.fail(failureInfo(missingRoute(runtime)));
@@ -340,8 +362,9 @@ class Conversation implements ConversationCommandHost {
       await this.renderer.start(this.header(rule));
       const controls = this.renderer.controls;
       controls?.setCommands(conversationPaletteEntries());
-      // Shift+Tab / Alt+M in the renderer; the session applies the policy narrowing (ADR-21 D2).
-      unbindControls = controls?.onPlanModeChange((on) => this.setPlanMode(on)) ?? (() => undefined);
+      // Shift+Tab / Alt+M in the renderer cycles the permission mode; the session applies the policy.
+      unbindControls = controls?.onPermissionModeChange((mode) => this.setMode(mode)) ?? (() => undefined);
+      if (runtime.permissionMode() === "full") this.note("error", this.fullAccessNotice());
       if (resumed !== undefined) await this.showResumed(resumed);
       if (this.debug) this.note("info", `harness: runtime ready in ${runtimeMs} ms`);
       // Credential pre-resolution (keychain, token refresh) happens in the background, never before the editor.
@@ -375,6 +398,7 @@ class Conversation implements ConversationCommandHost {
   }
 
   private header(rule: RouteRule): SessionHeaderView {
+    const permissionMode = this.runtime.permissionMode();
     const runtime = this.runtime;
     return {
       workspaceRoot: runtime.workspaceRoot,
@@ -387,6 +411,7 @@ class Conversation implements ConversationCommandHost {
       version: SYNORCH_VERSION,
       model: rule.route.model_id,
       contextWindowTokens: DEFAULT_CONTEXT_WINDOW,
+      ...(permissionMode === undefined ? {} : { permissionMode }),
     };
   }
 
@@ -559,13 +584,70 @@ class Conversation implements ConversationCommandHost {
     return this.policyCache;
   }
 
+  private get planOn(): boolean {
+    return this.runtime.permissionMode() === "plan";
+  }
+
   private policy(): EffectivePolicy {
-    return this.planOn ? planModePolicy(this.basePolicy()) : this.basePolicy();
+    // Plan mode is computed into the policy itself (permission_mode plan); without a mode (headless) nothing narrows further.
+    return this.basePolicy();
   }
 
   private ensureDriver(log: EventStore): AgentDriver {
-    this.driver ??= this.runtime.createSessionDriver(this.runtime.brokerFor(this.renderer.approvals), log, (gateway) => this.wrap(gateway));
+    this.driver ??= this.runtime.createSessionDriver(this.broker(), log, (gateway) => this.wrap(gateway));
     return this.driver;
+  }
+
+  /**
+   * The conversation's approval broker (ADR-08 revision 2026-09-24): with a permission mode and a
+   * human attached, prompts go to the renderer's action card, and "Always allow <prefix>" is
+   * persisted per workspace (user scope, audited as `command/allowed`). Headless, a prompt is a
+   * refusal. `--policy ask` without a mode keeps the renderer broker too.
+   */
+  private broker(): ApprovalBroker {
+    if (this.sessionBroker !== undefined) return this.sessionBroker;
+    const interactive = this.renderer.approvals;
+    const headless = createHeadlessApprovalBroker({ mode: this.runtime.policyMode });
+    this.sessionBroker = {
+      availability: interactive.availability,
+      request: async (request, signal) => {
+        const mode = this.runtime.permissionMode();
+        const human = interactive.availability === "interactive" && (mode !== undefined || this.runtime.policyMode === "ask");
+        if (!human) return headless.request(request, signal);
+        if (this.trustDeclinedNow && request.subject_kind === "action") {
+          return {
+            approval_id: request.approval_id,
+            subject_kind: request.subject_kind,
+            subject_digest: request.subject_digest,
+            outcome: "rejected",
+            decided_by: "user",
+            mode: this.basePolicy().mode,
+            decided_at: new Date().toISOString(),
+            reason: "the user chose not to trust this folder (Not now), so this command was not run",
+          };
+        }
+        const decision = await interactive.request(request, signal);
+        await this.afterDecision(request, decision);
+        return decision;
+      },
+    };
+    return this.sessionBroker;
+  }
+
+  /** "Always allow <prefix>" persists a grant; "Allow all edits" switches to auto mode. */
+  private async afterDecision(request: ApprovalRequest, decision: ApprovalDecision): Promise<void> {
+    if (decision.decided_by !== "user" || decision.outcome !== "allowed-for-scope" || request.subject_kind !== "action") return;
+    const prefix = suggestedCommandPrefix(request.command);
+    if (prefix !== undefined) {
+      await this.addGrant(prefix, "prompt");
+      return;
+    }
+    if (request.effect === "workspace-write" && this.runtime.permissionMode() === "ask") this.setMode("auto");
+  }
+
+  private fullAccessNotice(): string {
+    const trusted = this.runtime.trust.recorded().trusted;
+    return `${this.glyphs.warn} Full access: Synorch edits and runs any command in this folder without asking (hard rails still apply)${trusted ? "" : "; the folder is trusted for this session only (not saved)"} ${this.glyphs.sep} Shift+Tab leaves`;
   }
 
   /**
@@ -576,9 +658,15 @@ class Conversation implements ConversationCommandHost {
   private wrap(inner: ToolGateway): ToolGateway {
     return {
       invoke: async (request, scope, signal) => {
-        if (request.tool_name === "exec" && !this.planOn) await this.trustGate(request, signal);
+        const declined = request.tool_name === "exec" && !this.planOn ? await this.trustGate(request, signal) : false;
         const captured = WRITE_TOOLS.has(request.tool_name) && !this.planOn ? await this.capture(request).catch(() => undefined) : undefined;
-        const outcome = await inner.invoke(request, { ...scope, policy: this.policy() }, signal);
+        this.trustDeclinedNow = declined;
+        let outcome;
+        try {
+          outcome = await inner.invoke(request, { ...scope, policy: this.policy() }, signal);
+        } finally {
+          this.trustDeclinedNow = false;
+        }
         if (captured !== undefined && captured.length > 0 && outcome.state === "succeeded") {
           await this.checkpoint(request, captured, outcome.result.changed_paths ?? []).catch(() => undefined);
         }
@@ -591,12 +679,13 @@ class Conversation implements ConversationCommandHost {
     };
   }
 
-  private async trustGate(request: ToolCallRequest, signal: AbortSignal): Promise<void> {
+  /** The trust question at the first repo-code command; resolves true when the user just declined it for this call. */
+  private async trustGate(request: ToolCallRequest, signal: AbortSignal): Promise<boolean> {
     const runtime = this.runtime;
-    if (this.trustAsked || runtime.trust.state().trusted || runtime.sandbox.enforcement === "full") return;
-    if (this.renderer.approvals.availability !== "interactive") return;
+    if (this.trustAsked || runtime.trust.state().trusted || runtime.sandbox.enforcement === "full") return false;
+    if (this.renderer.approvals.availability !== "interactive") return false;
     const argv = strings(request.arguments.argv);
-    if (argv === undefined || argv.length === 0) return;
+    if (argv === undefined || argv.length === 0) return false;
     const policy = this.basePolicy();
     const verdict = evaluateExecAllowlist({
       argv,
@@ -607,9 +696,13 @@ class Conversation implements ConversationCommandHost {
       workspaceTrusted: false,
       commandGrants: policy.command_grants ?? [],
     });
-    if (verdict?.code !== WORKSPACE_UNTRUSTED_CODE) return;
+    if (verdict?.code !== WORKSPACE_UNTRUSTED_CODE) return false;
     this.trustAsked = true;
-    if (await promptTrustForCommand(runtime, this.renderer, argv.join(" "), signal)) this.policyCache = undefined;
+    if (await promptTrustForCommand(runtime, this.renderer, argv.join(" "), signal)) {
+      this.policyCache = undefined;
+      return false;
+    }
+    return true;
   }
 
   private inside(declared: string): { relative: string; absolute: string } | undefined {
@@ -1008,19 +1101,53 @@ class Conversation implements ConversationCommandHost {
     else this.active.abort();
   }
 
-  /** Plan mode on/off from `/plan`, `/go`, a go-word or the renderer (Shift+Tab / Alt+M); idempotent. */
+  /**
+   * The permission mode from Shift+Tab, `/permissions <mode>`, `/plan`, `/go` or a go-word
+   * (ADR-08 revision 2026-09-24); idempotent. The policy is recomputed at once, the footer follows,
+   * and the agent is told at its next message.
+   */
+  private setMode(mode: PermissionMode | undefined): void {
+    const runtime = this.runtime;
+    const previous = runtime.permissionMode();
+    if (previous === mode) return;
+    if (mode === "plan") this.modeBeforePlan = previous;
+    runtime.setPermissionMode(mode);
+    this.policyCache = undefined;
+    const g = this.glyphs;
+    if (mode !== undefined) this.renderer.controls?.setPermissionMode(mode);
+    if (mode === "plan") {
+      this.note("info", `${g.bullet} Plan mode on ${g.sep} Synorch reads and plans but does not edit or run commands ${g.sep} Shift+Tab or /plan leaves`);
+      this.pendingNotes.push(
+        "plan mode is ON: you may read, search and discuss, but not edit files or run commands. Produce a concrete plan (steps, files, risks, how it will be verified); say whether it is small enough to do directly or big enough for workers.",
+      );
+      return;
+    }
+    if (previous === "plan") {
+      this.pendingNotes.push("plan mode is OFF: you may edit files and run commands again.");
+      if (mode !== "full") {
+        this.note("info", `${g.bullet} Plan mode off ${g.sep} Synorch may edit and run commands again${mode === undefined ? "" : ` ${g.sep} ${mode} mode`}`);
+        return;
+      }
+    }
+    if (mode === "full") {
+      this.note("error", this.fullAccessNotice());
+      this.pendingNotes.push("the user switched to full access: edits and commands in this folder run without asking (hard rails still apply).");
+    } else if (mode === "ask") {
+      this.note("info", `${g.bullet} Ask mode ${g.sep} Synorch asks before every edit and command`);
+      this.pendingNotes.push("the user switched to ask mode: each edit and command is confirmed by the user first.");
+    } else if (mode === "auto") {
+      this.note("info", `${g.bullet} Auto mode ${g.sep} edits and allowlisted commands run; anything risky asks you first`);
+      if (previous === "ask" || previous === "full") this.pendingNotes.push("the user switched to auto mode: edits and allowlisted commands run, anything else is asked for.");
+    } else this.note("info", `${g.bullet} Default-deny ${g.sep} commands outside the allowlist are refused`);
+  }
+
+  /** Plan mode on/off from `/plan`, `/go` or a go-word; leaving returns to the mode before it. */
   private setPlanMode(on: boolean): void {
     if (this.planOn === on) return;
-    this.planOn = on;
-    const g = this.glyphs;
-    this.renderer.controls?.setPlanMode(on);
-    this.note("info", on ? `${g.bullet} Plan mode on ${g.sep} Synorch reads and plans but does not edit or run commands ${g.sep} Shift+Tab or /plan leaves` : `${g.bullet} Plan mode off ${g.sep} Synorch may edit and run commands again`);
-    this.pendingNotes.push(
-      on
-        ? "plan mode is ON: you may read, search and discuss, but not edit files or run commands. Produce a concrete plan (steps, files, risks, how it will be verified); say whether it is small enough to do directly or big enough for workers."
-        : "plan mode is OFF: you may edit files and run commands again.",
-    );
+    if (on) this.setMode("plan");
+    else this.setMode(this.modeBeforePlan);
   }
+
   public async planMode(goal: string): Promise<void> {
     if (goal === "") {
       this.setPlanMode(!this.planOn);
@@ -1107,13 +1234,86 @@ class Conversation implements ConversationCommandHost {
       this.note("info", `${this.glyphs.ok} Removed: ${normalized.prefix}`);
       return;
     }
+    await this.addGrant(normalized.prefix, "command");
+  }
+
+  /** Persists a command prefix for this folder (user scope), audits it and applies it to the policy at once. */
+  private async addGrant(raw: string, source: "command" | "prompt"): Promise<void> {
+    const grants = this.grants;
+    if (grants === undefined) return;
+    const normalized = normalizeGrant(raw);
+    if ("error" in normalized) {
+      this.note("warning", `${this.glyphs.warn} Not saved as a rule: ${normalized.error}`);
+      return;
+    }
     this.grantList = await grants.add(normalized.prefix);
     this.policyCache = undefined;
-    await this.ensureLog(`/allow ${normalized.prefix}`).catch(() => undefined);
+    // A prompt answer arrives inside a turn whose log is already open; /allow may be the first thing typed.
+    if (source === "command") await this.ensureLog(`/allow ${normalized.prefix}`).catch(() => undefined);
     await this.append("command/allowed", { workspace_root: this.runtime.trust.state().root, prefix: normalized.prefix }, "user").catch(() => undefined);
     const trustNote = this.runtime.sandbox.enforcement !== "full" && !this.runtime.trust.state().trusted ? " (it runs repository code, so this folder must be trusted too; Synorch asks when it first runs)" : "";
-    this.note("info", `${this.glyphs.ok} Allowed commands starting with "${normalized.prefix}" in this folder${trustNote}`);
-    this.pendingNotes.push(`the user allowed commands starting with "${normalized.prefix}" (/allow); you may run them now.`);
+    this.note("info", `${this.glyphs.ok} Always allowed: commands starting with "${normalized.prefix}" in this folder${trustNote} ${this.glyphs.sep} /permissions lists the rules`);
+    this.pendingNotes.push(`the user allowed commands starting with "${normalized.prefix}"; you may run them now.`);
+  }
+
+  /**
+   * `/permissions`: the mode, the persisted allow rules and the trust state; `/permissions <mode>`
+   * switches the mode, `allow <prefix>` / `remove <prefix>` edit the rules (like /allow).
+   */
+  public async permissions(argument: string): Promise<void> {
+    const [verb = "", ...rest] = argument.split(/\s+/).filter((part) => part !== "");
+    const tail = rest.join(" ");
+    const wanted = (PERMISSION_MODE_WORDS as readonly string[]).includes(verb.toLowerCase()) ? verb.toLowerCase() : verb.toLowerCase() === "mode" ? rest[0]?.toLowerCase() : undefined;
+    if (wanted !== undefined) {
+      if (!(PERMISSION_MODE_WORDS as readonly string[]).includes(wanted)) {
+        this.print([`Unknown mode "${wanted}". Modes: ${PERMISSION_MODE_WORDS.join(", ")}`]);
+        return;
+      }
+      if (this.renderer.approvals.availability !== "interactive" && wanted !== "full" && wanted !== "plan") {
+        this.note("warning", `${this.glyphs.warn} No terminal can answer prompts here: ${wanted} mode questions become refusals`);
+      }
+      this.setMode(wanted as PermissionMode);
+      return;
+    }
+    if (verb === "allow" || verb === "add") {
+      await this.allow(tail);
+      return;
+    }
+    if (verb === "remove" || verb === "rm" || verb === "-r") {
+      await this.allow(tail === "" ? "" : `-r ${tail}`);
+      return;
+    }
+    if (verb !== "") {
+      this.print(["Usage: /permissions [ask|auto|full|plan] · /permissions allow <prefix> · /permissions remove <prefix>"]);
+      return;
+    }
+    this.print(await this.permissionLines());
+  }
+
+  private async permissionLines(): Promise<string[]> {
+    const runtime = this.runtime;
+    const g = this.glyphs;
+    const mode = runtime.permissionMode();
+    const recorded = runtime.trust.recorded();
+    const state = runtime.trust.state();
+    const rules = (await this.grants?.list()) ?? this.grantList;
+    const trust =
+      runtime.sandbox.enforcement === "full"
+        ? "not needed (full sandbox)"
+        : recorded.trusted
+          ? recorded.source === "store" || recorded.source === undefined ? "trusted (saved; syn trust --revoke removes it)" : "trusted for this session"
+          : state.trusted
+            ? "trusted for this session by full access (not saved)"
+            : "not trusted (Synorch asks at the first build or test command; /trust asks now)";
+    return [
+      `Mode            ${mode === undefined ? `default-deny (no prompts; headless)` : `${mode} ${g.sep} ${MODE_MEANINGS[mode]}`}`,
+      `                Shift+Tab cycles ask ${g.name === "rich" ? "→" : "->"} auto ${g.name === "rich" ? "→" : "->"} full ${g.name === "rich" ? "→" : "->"} plan; /permissions <mode> switches`,
+      `Trust           ${trust}`,
+      `Sandbox         ${runtime.sandbox.backend} (${runtime.sandbox.enforcement})`,
+      `Always allowed  ${rules.length === 0 ? "none yet (answer \"Always allow\" in a prompt, or /permissions allow <prefix>)" : rules.join(` ${g.sep} `)}`,
+      ...(rules.length === 0 ? [] : ["                /permissions remove <prefix> deletes a rule"]),
+      `Never           ${HARD_RAILS.join(", ")} (hard rails, every mode); git history changes stay with you`,
+    ];
   }
 
   public async trust(): Promise<void> {
@@ -1530,7 +1730,8 @@ class Conversation implements ConversationCommandHost {
     for (const reason of decision.reasons) {
       if (reason.code === "exec-not-allowlisted" && action.command !== undefined) add(`/allow ${action.command.argv.slice(0, 2).join(" ")}`, "lets Synorch run commands starting with this prefix here");
       if (reason.code === WORKSPACE_UNTRUSTED_CODE) add("/trust", "lets build and test commands run in this folder");
-      if (reason.code === "approval-required") add("--policy autonomous", "no per-action questions (hard rails still apply)");
+      if (reason.code === "approval-required" || reason.code === "permission-prompt") add("Shift+Tab (auto or full)", "fewer questions: auto asks only for risky commands, full asks nothing (hard rails still apply)");
+      if (reason.code === "exec-not-allowlisted" && this.runtime.permissionMode() === undefined) add("--permission-mode auto", "asks you instead of refusing commands outside the allowlist");
       if (reason.code === "sandbox-insufficient") add("syn doctor --runtime", "shows why a full sandbox is required and missing");
     }
     if (planDenied) add("/plan (or Shift+Tab)", "leaves plan mode so edits and commands are allowed");
@@ -1587,7 +1788,7 @@ class Conversation implements ConversationCommandHost {
         this.print(contextReport(await this.readEvents()));
         return;
       case "permissions":
-        this.print([...(this.planOn ? ["plan mode is on: edits and commands are refused until you leave it"] : []), ...permissionsReport(this.runtime, await this.readEvents())]);
+        await this.permissions(argument);
         return;
       case "tasks": {
         const events = await this.orchestrationEvents();
@@ -1706,6 +1907,15 @@ class Conversation implements ConversationCommandHost {
     else this.print(tracker.view().tasks.map((task) => `${task.key} (${task.role}) ${task.state.replaceAll("_", " ")}${task.dependsOn === undefined || task.dependsOn.length === 0 ? "" : ` after ${task.dependsOn.join(", ")}`}`));
   }
 }
+
+const PERMISSION_MODE_WORDS = ["ask", "auto", "full", "plan"] as const;
+
+const MODE_MEANINGS: Readonly<Record<PermissionMode, string>> = {
+  ask: "asks before every edit and command",
+  auto: "edits and allowlisted commands run; anything outside the allowlist asks you first",
+  full: "no prompts: everything in this folder is allowed except the hard rails",
+  plan: "read-only: reads and plans, no edits or commands",
+};
 
 function relativeTime(then: number): string {
   if (!Number.isFinite(then)) return "earlier";

@@ -70,7 +70,7 @@ test("every contract command and flag parses into a typed invocation", () => {
   assert.deepEqual(parseHarnessArgs(["agent"]), {
     kind: "agent",
     common: { target: undefined, plain: false, color: "auto" },
-    session: { policy: "autonomous", profiles: [] },
+    session: { policy: "autonomous", permission: undefined, profiles: [] },
     resume: undefined,
     fork: undefined,
     continue: false,

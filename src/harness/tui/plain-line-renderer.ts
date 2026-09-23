@@ -13,7 +13,7 @@ import type {
   UserInputSource,
 } from "../contracts/index.ts";
 import { WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
-import { HeadlessApprovalBroker, withApprovalDeadline, type ApprovalChoice } from "./approvals.ts";
+import { actionChoices, actionTitle, HeadlessApprovalBroker, withApprovalDeadline, type ApprovalAnswer } from "./approvals.ts";
 import { ConversationPresenter, GLYPH_SETS, headerLines, type GlyphSet, type ViewOp } from "./conversation-view.ts";
 import { HeadlessAuthInteraction, LineAuthInteraction } from "./auth-interaction.ts";
 import { describeEvent, levelPrefix, type EventLine } from "./describe.ts";
@@ -493,13 +493,22 @@ class LineApprovalBroker implements ApprovalBroker {
         const picked = WORKSPACE_TRUST_CHOICES.find((choice) => answer === choice.key || answer === choice.label.toLowerCase());
         return picked?.outcome ?? "rejected";
       }
-      const scoped = request.scope !== "once";
-      this.write(`${this.style.yellow(`Approval needed (${request.subject_kind})`)}: ${sanitizeInline(request.summary, 2000)}\n`);
-      if (request.effect !== undefined) this.write(`  effect: ${request.effect}; scope: ${request.scope}\n`);
-      this.write(scoped ? "Allow? [y]es once, [a]lways for this scope, [N]o: " : "Allow? [y/N] ");
-      const answer = (await this.lines.next(promptSignal))?.trim().toLowerCase();
-      const choice: ApprovalChoice = answer === "y" || answer === "yes" ? "allowed-once" : scoped && (answer === "a" || answer === "always") ? "allowed-for-scope" : "rejected";
-      return choice;
+      // UX-03 action card as lines: what, why, consequence, numbered choices; anything unrecognised denies.
+      const choices = actionChoices(request);
+      this.write(`${this.style.yellow(actionTitle(request))} ${sanitizeInline(request.command?.join(" ") ?? request.summary, 2000)}\n`);
+      if (request.details !== undefined) {
+        this.write(`  why:         ${sanitizeInline(request.details.why, 1000)}\n  consequence: ${sanitizeInline(request.details.consequence, 1000)}\n`);
+      } else if (request.effect !== undefined) this.write(`  effect: ${request.effect}; scope: ${request.scope}\n`);
+      this.write(`${choices.map((choice) => `  ${choice.key}. ${choice.label}`).join("\n")}\n`);
+      this.write(`Choose [1-${choices.length}] (y = allow once, Enter = deny): `);
+      const answer = (await this.lines.next(promptSignal))?.trim().toLowerCase() ?? "";
+      const picked = choices.find((choice) => choice.key === answer) ?? (answer === "y" || answer === "yes" ? choices[0] : answer === "a" || answer === "always" ? choices.find((choice) => choice.value === "allowed-for-scope") : undefined);
+      if (picked === undefined || picked.value === "rejected") return "rejected";
+      if (picked.value !== "rejected-why") return picked.value;
+      this.write("Why? (Enter to skip): ");
+      const reason = (await this.lines.next(promptSignal))?.trim() ?? "";
+      const answered: ApprovalAnswer = reason === "" ? "rejected" : { choice: "rejected", reason };
+      return answered;
     });
   }
 }

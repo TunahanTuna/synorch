@@ -23,6 +23,8 @@ export interface TriageDecision {
   readonly decision: "accept" | "retry" | "fail";
   readonly waive_criteria?: readonly string[] | undefined;
   readonly guidance?: string | undefined;
+  /** Replacement verification commands (with `retry`, only for plan-caused verification problems). */
+  readonly verification?: readonly string[] | undefined;
 }
 
 export interface DelegationPort {

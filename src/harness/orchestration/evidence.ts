@@ -12,6 +12,7 @@ import {
   type EvidenceResolution,
   type EvidenceResolutionMethod,
   type HarnessEvidence,
+  type HarnessVerification,
   type ReviewPacket,
   type TaskContextPacket,
   verificationProves,
@@ -427,6 +428,21 @@ export interface CompletionVerification {
   readonly unevidenced: readonly string[];
   /** Required verification commands the harness ran and saw fail (a `verification-repair`). */
   readonly failedVerification?: readonly string[];
+  /**
+   * Plan-caused verification problems (live run 01M37V2J): a required command the harness refused
+   * or could not run (`not-run`), or whose program was not found (`spawn-failed`), and that the
+   * worker neither ran nor skipped. The worker cannot fix the plan: these never go to a worker
+   * repair; the orchestrator decides (triage). `planProblems` are their entries of `problems`.
+   */
+  readonly planCaused?: readonly string[];
+  readonly planProblems?: readonly string[];
+}
+
+/** Whether a harness verification record failed for a reason the plan, not the worker, must fix. */
+export function isPlanCausedVerification(record: Partial<Pick<HarnessVerification, "termination" | "reason">> & Pick<HarnessVerification, "status">): boolean {
+  // Not plan-caused: a cancelled attempt, and an `ask`-mode command the harness never asks for (the worker can run it with approval).
+  if (record.status === "not-run") return !/cancelled|never asks for approval/.test(record.reason ?? "");
+  return record.status === "failed" && record.termination === "spawn-failed";
 }
 
 export interface CompletionVerificationOptions {
@@ -435,6 +451,11 @@ export interface CompletionVerificationOptions {
    * are waived, and a `partial`/`needs_context` status is accepted. Every other check still applies.
    */
   readonly waivedCriteria?: readonly string[];
+  /**
+   * Verification commands the orchestrator waived in triage because they could not run for a
+   * plan-caused reason (`planCaused`); they are not required. Every other check still applies.
+   */
+  readonly waivedCommands?: readonly string[];
 }
 
 /** Orchestrator-side verification of a completed attempt against the real diff, the log and the harness records. */
@@ -499,10 +520,15 @@ export async function verifyCompletion(
     if (!known.has(entry.criterion_id)) revisions.push(`evidence for unknown criterion ${entry.criterion_id}`);
   }
 
+  const planCaused: string[] = [];
+  const planProblems: string[] = [];
+  const waivedCommands = options.waivedCommands ?? [];
   for (const [position, required] of packet.verification.commands.entries()) {
+    if (waivedCommands.some((command) => sameCommand(command, required))) continue;
     const record = harness?.verification.find((candidate) => candidate.ordinal === position + 1 && sameCommand(candidate.command, required)) ?? harness?.verification.find((candidate) => sameCommand(candidate.command, required));
     if (record?.status === "passed") continue;
-    if (record?.status === "failed") {
+    const planCause = record !== undefined && isPlanCausedVerification(record);
+    if (record?.status === "failed" && !planCause) {
       failedVerification.push(required);
       revisions.push(`verification command "${required}" failed when the harness ran it (${record.exit_code === null ? record.termination ?? "no exit code" : `exit ${record.exit_code}`})`);
       continue;
@@ -519,11 +545,18 @@ export async function verifyCompletion(
     const skipped = completion.skipped_checks.some((check) => sameCommand(check.check, required) || check.check.includes(required.trim()));
     if (exits.includes(0)) continue;
     if (exits.length > 0) revisions.push(`verification command "${required}" exited ${exits.at(-1)}`);
-    else if (!skipped) revisions.push(`verification command "${required}" was neither run nor explicitly skipped${record?.status === "not-run" ? ` (the harness could not run it: ${record.reason ?? "unknown"})` : ""}`);
+    else if (skipped) continue;
+    else if (planCause && record !== undefined) {
+      const problem = `verification command "${required}" could not run (plan-caused: ${record.status === "not-run" ? record.reason ?? "the harness did not run it" : "the program was not found"}); the worker cannot fix this, the orchestrator decides`;
+      planCaused.push(required);
+      planProblems.push(problem);
+      revisions.push(problem);
+    } else if (!skipped) revisions.push(`verification command "${required}" was neither run nor explicitly skipped${record?.status === "not-run" ? ` (the harness could not run it: ${record.reason ?? "unknown"})` : ""}`);
   }
 
-  if (rejections.length > 0) return { decision: "reject", problems: [...rejections, ...revisions], unevidenced, failedVerification };
-  if (revisions.length > 0) return { decision: "revise", problems: revisions, unevidenced, failedVerification };
+  const causes = planCaused.length === 0 ? {} : { planCaused, planProblems };
+  if (rejections.length > 0) return { decision: "reject", problems: [...rejections, ...revisions], unevidenced, failedVerification, ...causes };
+  if (revisions.length > 0) return { decision: "revise", problems: revisions, unevidenced, failedVerification, ...causes };
   return { decision: "pass", problems: [], unevidenced, failedVerification };
 }
 

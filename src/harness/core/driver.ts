@@ -160,6 +160,11 @@ class FixedAgentDriver implements AgentDriver {
         }
         return this.#endStep(step, "aborted", "cancelled");
       }
+      if (step.input.reportOnly !== undefined && call.name !== step.input.reportOnly) {
+        // A report-only turn offers one tool; any other call is answered without running it.
+        await this.#recordToolResult(step, call, { isError: true, text: `not executed: this is a report-only turn; call ${step.input.reportOnly} now`, blob: undefined });
+        continue;
+      }
       const result = await this.#invokeRecorded(step, call, signal);
       await this.#recordToolResult(step, call, { isError: result.result.status === "error", text: renderToolResultText(result.ref, result.result), blob: result.result.blob });
       if (result.endsTurn === true) {
@@ -189,6 +194,7 @@ class FixedAgentDriver implements AgentDriver {
       const toolCallId = createId("toolCall");
       bridgeIds.set(call.providerCallId, toolCallId);
       const ref: ToolCallRef = { toolCallId, providerCallId: call.providerCallId, name: bridgeToolName(call.name), arguments: call.arguments };
+      if (input.reportOnly !== undefined && ref.name !== input.reportOnly) return { isError: true, text: `not executed: this is a report-only turn; call ${input.reportOnly} now` };
       try {
         const outcome = await this.#invokeRecorded(step, ref, AbortSignal.any([stepSignal, callSignal]));
         const text = renderToolResultText(outcome.ref, outcome.result);
@@ -202,7 +208,7 @@ class FixedAgentDriver implements AgentDriver {
     };
     const tools: ToolBridge = {
       serverName: "synorch",
-      list: () => this.#deps.tools.visibleTo(input.role, input.policy),
+      list: () => this.#deps.tools.visibleTo(input.role, input.policy).filter((tool) => input.reportOnly === undefined || tool.name === input.reportOnly),
       call: (call, callSignal) => {
         const run = chain.then(() => runBridgeCall(call, callSignal));
         chain = run.catch(() => undefined);
@@ -272,6 +278,7 @@ class FixedAgentDriver implements AgentDriver {
           packet: input.packet,
           requestId: step.requestId,
           ...(input.sources === undefined ? {} : { sources: input.sources }),
+          ...(input.reportOnly === undefined ? {} : { reportOnly: input.reportOnly }),
         },
         signal,
       );

@@ -63,6 +63,7 @@ Kurallar: her `met` hükmü **bağımsız** en az bir kanıta dayanır: reviewer
 | `task/packet_issued` + `attempt/started` | `ready → running` |
 | Completion `completed` | `running → verifying` (harness önce `verification.commands`'ı attempt çalışma alanında koşar ve `attempt/verification_ran` yazar) |
 | Doğrulama yalnız kanıt eksik (`revise`, iş sağlam) veya harness doğrulaması başarısız | Aynı attempt session'ı artifact korunarak sürdürülür (`attempt/repair_requested`, `evidence_repairs` bütçesi); görev durumu değişmez. Bütçe bitince orchestrator triyajı (`task_triage`), doğrudan `failed` değil |
+| Doğrulama komutu plan kaynaklı çalışmadı (`not-run` reddi/argv değil, program bulunamadı `spawn-failed`) | Worker onarımı **yok**; orchestrator triyajı: `accept` komutu feragat eder → `verifying → reviewing`/`completed`; `retry` + `verification` planı yeni sürüme çıkarır → `verifying → failed → retry_pending → ready`, yeni attempt önceki artifact'tan; `fail` → `failed` |
 | Completion `needs_context` | `running → needs_context` (kaynak değiştiyse yeniden paketleme; worker'ın kendi bildirimiyse orchestrator triyajı) |
 | Completion `partial` | Orchestrator triyajı: `accept` (yalnız hiçbir şey değiştirmemiş salt okunur görev) `running → verifying`, `retry` `running → failed → retry_pending → ready` (delta önceki raporu taşır), `fail` `running → failed` |
 | Completion `blocked` / `failed` | `running → blocked` / `failed` |
@@ -597,6 +598,22 @@ expected_external_effects: []
 verification: []
 budget: { max_wall_time_seconds: 1800, max_steps: 100 }
 assumptions: []
+```
+
+`plan_propose` şemadan geçen planın her doğrulama komutunu harness runner'ı gibi (argv ayrımı + policy) çalıştırmadan dener; runner'ın reddedeceği komut (kabuk sözdizimi, satır içi yorumlayıcı kodu `node -e`, izin listesi dışı komut) planı reddeder ([orkestrasyon §2](../reference/orchestration-and-context.md#2-run-akışı)).
+
+`task_triage` girdisi (`taskTriageInputSchema`, yalnız triyaj danışmasında). `verification` yalnız `retry` ile ve yalnız plan kaynaklı doğrulama sorununda verilir: görevin yedek doğrulama listesinin tamamıdır, plan gibi denenir ve plan yeni sürüme çıkar:
+
+```yaml example=task-triage
+- { task: fix-add, decision: accept, waive_criteria: [AC-2], guidance: "fix-add runs the check" }
+- { task: implement-multiply, decision: retry, verification: ["node --check src-test.js", "node check-multiply.mjs"], guidance: "the implementer owns check-multiply.mjs" }
+- { task: implement-multiply, decision: fail }
+```
+
+```yaml example=task-triage invalid
+- { task: implement-multiply, decision: revise }
+- { task: implement-multiply, decision: retry, verification: [] }
+- { task: implement-multiply, decision: retry, commands: ["node check.mjs"] }
 ```
 
 ## 8. Harness kanıtı, çözümleme ve onarım (ADR-18)

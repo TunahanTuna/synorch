@@ -73,6 +73,15 @@ export interface TriageInput {
   }[];
   /** Verification problems that remained after the in-session repairs (a completed report that did not verify). */
   readonly problems?: readonly string[];
+  /**
+   * Verification commands that could not run for a plan-caused reason (refused, not runnable,
+   * program not found); they never went to a worker repair. `verificationOnly`: they are the only
+   * problems left, so `accept` (waiving them) is possible even for a writing task.
+   */
+  readonly planCaused?: readonly string[];
+  readonly verificationOnly?: boolean;
+  /** The task's owned paths (where a replacement check script must live). */
+  readonly ownedPaths?: readonly string[];
   /** The harness-run verification commands and their outcome. */
   readonly harnessChecks?: readonly string[];
   readonly summary: string;
@@ -116,6 +125,12 @@ export function renderTriagePrompt(input: TriageInput): string {
   );
   const problems = input.problems ?? [];
   const checks = input.harnessChecks ?? [];
+  const planCaused = input.planCaused ?? [];
+  const acceptLine = input.acceptable
+    ? "- accept: the findings are sufficient; list in waive_criteria the criteria this role could not meet (they are handed to dependent tasks as notes); every other criterion must be evidenced."
+    : input.verificationOnly === true
+      ? "- accept: the change goes to independent review without the commands that could not run (they are waived and noted); choose it when the reviewer can still check the criteria."
+      : "- accept is not possible: this task writes files, so it completes only through verification and independent review.";
   return [
     `Worker report needs your decision (plan v${input.planVersion}, goal: ${input.goal}).`,
     `Task ${input.task.key} ${input.task.taskId} (${input.task.role}, ${input.task.risk}, ${input.task.writeMode}), attempt ${input.attempt}, reported ${input.status}${problems.length > 0 ? " but did not pass verification after its in-session repairs" : ""}.`,
@@ -123,14 +138,15 @@ export function renderTriagePrompt(input: TriageInput): string {
     `Acceptance criteria (evidence as the harness resolved it):\n${criteria.join("\n")}`,
     checks.length > 0 ? `Harness-run verification:\n${checks.map((line) => `- ${line}`).join("\n")}` : "",
     problems.length > 0 ? `Verification problems:\n${problems.slice(0, 10).map((line) => `- ${line}`).join("\n")}` : "",
+    planCaused.length > 0
+      ? `Plan-caused (the plan's verification could not run; the worker cannot fix this and was not asked to):\n${planCaused.map((command) => `- ${command}`).join("\n")}\nTo replace them, call task_triage with decision retry and verification = the whole replacement list: plain argv commands (no shell syntax, no inline interpreter code) such as \`node <check script inside ${(input.ownedPaths ?? []).join(", ") || "the owned paths"}>\` or the project's test runner; the plan is revised and a new attempt continues from the current change.`
+      : "",
     input.skippedChecks.length > 0 ? `Skipped checks:\n${input.skippedChecks.map((line) => `- ${line}`).join("\n")}` : "",
     input.unresolvedRisks.length > 0 ? `Unresolved:\n${input.unresolvedRisks.map((line) => `- ${line}`).join("\n")}` : "",
     `Tasks:\n${input.tasks.map((line) => `- ${line}`).join("\n")}`,
     [
       `Call task_triage exactly once for task ${input.task.key}:`,
-      input.acceptable
-        ? "- accept: the findings are sufficient; list in waive_criteria the criteria this role could not meet (they are handed to dependent tasks as notes); every other criterion must be evidenced."
-        : "- accept is not possible: this task writes files, so it completes only through verification and independent review.",
+      acceptLine,
       `- retry: one more attempt (${input.retriesLeft} left) with your guidance; only when a new attempt can succeed.`,
       "- fail: stop this task (its dependents are cancelled); add replacement work with task_spawn if the goal still needs it.",
       "You never implement anything yourself. Do not ask the user. End your turn after deciding.",

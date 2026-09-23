@@ -58,10 +58,16 @@ import {
   compileTaskPacket,
   createDeltaPacket,
   deltaNotes,
+  DEFAULT_STEP_FLOORS,
   refreshPacketSources,
+  reviewerStepLimit,
+  runStepLimit,
   validatePlan,
   type PacketSource,
+  type PlanValidation,
+  type StepFloors,
 } from "./plan.ts";
+import { formatVerificationRefusal, preflightVerification, type VerificationPreflightContext } from "./verification-preflight.ts";
 import type { Planner } from "./planner.ts";
 import {
   createRunRecorder,
@@ -103,6 +109,8 @@ export interface CoordinatorLimits {
   readonly maxRepackages: number;
   /** Follow-up tasks the orchestrator may add through `task_spawn` per run. */
   readonly maxSpawnedTasks: number;
+  /** Guaranteed step floors per worker and reviewer attempt, and the finish-now warning distance. */
+  readonly stepFloors: StepFloors;
 }
 
 export const DEFAULT_COORDINATOR_LIMITS: CoordinatorLimits = {
@@ -115,6 +123,7 @@ export const DEFAULT_COORDINATOR_LIMITS: CoordinatorLimits = {
   maxReviewAttempts: 2,
   maxRepackages: 2,
   maxSpawnedTasks: 4,
+  stepFloors: DEFAULT_STEP_FLOORS,
 };
 
 export interface CoordinatorDependencies {
@@ -154,7 +163,8 @@ function needsTrust(plan: Plan): boolean {
 interface TaskEntry {
   readonly key: string;
   readonly taskId: TaskId;
-  readonly plan: PlanTask;
+  /** The task as the approved plan states it; a triage revision of its verification replaces it. */
+  plan: PlanTask;
   state: TaskState;
   route: RouteDecision | undefined;
   readonly attempts: AttemptId[];
@@ -172,8 +182,8 @@ interface TaskEntry {
 }
 
 type TriageOutcome =
-  | { readonly kind: "accept"; readonly waived: readonly string[]; readonly guidance: string | undefined }
-  | { readonly kind: "retry"; readonly guidance: string | undefined }
+  | { readonly kind: "accept"; readonly waived: readonly string[]; readonly guidance: string | undefined; readonly waivedCommands?: readonly string[] }
+  | { readonly kind: "retry"; readonly guidance: string | undefined; readonly verification?: readonly string[] }
   | { readonly kind: "fail"; readonly guidance: string | undefined };
 
 interface PendingTriage {
@@ -182,6 +192,10 @@ interface PendingTriage {
   readonly acceptable: boolean;
   readonly criteria: readonly string[];
   readonly retriesLeft: number;
+  /** Plan-caused verification commands (refused / not runnable / program not found); the orchestrator decides. */
+  readonly planCaused: readonly string[];
+  /** Every remaining verification problem is plan-caused: `accept` (waiving those commands) is possible for a writing task. */
+  readonly verificationOnly: boolean;
   decision: TriageOutcome | undefined;
 }
 
@@ -301,7 +315,14 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
   const now = deps.now ?? (() => new Date());
   const platform = deps.platform ?? process.platform;
   const budgets = resolveBudgets(deps.limits);
-  const limits: CoordinatorLimits = { ...DEFAULT_COORDINATOR_LIMITS, ...deps.limits, maxRetries: budgets.triage_retries, maxRevisions: budgets.review_revisions, budgets };
+  const limits: CoordinatorLimits = {
+    ...DEFAULT_COORDINATOR_LIMITS,
+    ...deps.limits,
+    maxRetries: budgets.triage_retries,
+    maxRevisions: budgets.review_revisions,
+    budgets,
+    stepFloors: { ...DEFAULT_STEP_FLOORS, ...deps.limits?.stepFloors },
+  };
   const listeners = new Set<(event: RenderEvent) => void>();
   const steering: string[] = [];
   let activeRecorder: RunRecorder | undefined;
@@ -394,6 +415,35 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
       const orchestratorRoute = await deps.router.resolve({ tier: "orchestrator", role: "orchestrator" }, signal);
       await recorder.record("route/decided", { decision: orchestratorRoute }, { actor: { kind: "system" } });
 
+      const preflightContext: VerificationPreflightContext = {
+        policy: deps.policy,
+        mode: request.policyMode,
+        runId,
+        workspaceRoot: request.workspaceRoot,
+        sandbox: deps.sandbox,
+        userConfig: deps.userConfig,
+        workspaceConfig: deps.workspaceConfig,
+      };
+      const environmentNoted = new Set<string>();
+      /**
+       * `validatePlan` plus the plan-time dry run of every verification command (live run 01M37V2J):
+       * a command the harness runner would refuse or record `not-run` rejects the candidate with the
+       * command, the refusal code and what to use instead. Refusals caused only by the environment
+       * (untrusted workspace, required full sandbox) are noticed once, not rejected.
+       */
+      const checkPlan = (candidate: unknown, expected: { runId: RunId; planId: Plan["plan_id"]; version: number }, include?: (task: PlanTask) => boolean): PlanValidation => {
+        const validation = validatePlan(candidate, expected);
+        if (!validation.ok) return validation;
+        const preflight = preflightVerification(validation.plan.tasks, preflightContext, include);
+        for (const refusal of preflight.environment) {
+          if (environmentNoted.has(refusal.command)) continue;
+          environmentNoted.add(refusal.command);
+          notice("warning", `verification command "${refusal.command.slice(0, 200)}" of ${refusal.taskKey} will not run in this environment (${refusal.code}: ${refusal.reason.slice(0, 300)})`);
+        }
+        if (preflight.refusals.length === 0) return validation;
+        return { ok: false, issues: preflight.refusals.map(formatVerificationRefusal) };
+      };
+
       const planId = createId("plan");
       let plan: Plan | undefined;
       let planDigestValue: Digest | undefined;
@@ -412,7 +462,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           if (revisionsExhausted()) {
             return { ok: false, code: "policy_denied", message: `the plan revision limit (${limits.maxPlanRevisions}) is reached; the run stops without a plan. End your turn.` };
           }
-          const validation = validatePlan({ ...raw, schema_version: 1, plan_id: planId, run_id: runId, version: 1, created_at: now().toISOString() }, { runId, planId, version: 1 });
+          const validation = checkPlan({ ...raw, schema_version: 1, plan_id: planId, run_id: runId, version: 1, created_at: now().toISOString() }, { runId, planId, version: 1 });
           if (validation.ok) {
             const approval = request.policyMode === "ask" ? "the runtime now asks the user in its own interface" : "the runtime now approves it under the autonomous policy (audited)";
             return { ok: true, text: `plan accepted; ${approval}. Do not ask for approval in text. End your turn now.` };
@@ -446,7 +496,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           },
           signal,
         );
-        const validation = validatePlan(candidate, { runId, planId, version: 1 });
+        const validation = checkPlan(candidate, { runId, planId, version: 1 });
         if (validation.ok) {
           plan = validation.plan;
           planDigestValue = validation.digest;
@@ -529,7 +579,8 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         limits: {
           maxCostUsd: minDefined(request.budget.maxCostUsd, plan.budget.max_cost_usd),
           maxWallTimeSeconds: minDefined(request.budget.maxWallTimeSeconds, plan.budget.max_wall_time_seconds),
-          maxSteps: plan.budget.max_steps,
+          // Never below the steps the run guarantees its attempts (every task's limit, plus its reviewer's).
+          maxSteps: runStepLimit(plan, limits.stepFloors),
           maxToolCalls: undefined,
         },
         onExceeded: (exceeded) => {
@@ -542,7 +593,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
       ticker.unref?.();
 
       const workers = deps.createWorkers(
-        { runId, mode: request.policyMode, workspaceRoot: request.workspaceRoot, projectId, recorder, budgets: limits.budgets },
+        { runId, mode: request.policyMode, workspaceRoot: request.workspaceRoot, projectId, recorder, budgets: limits.budgets, finishWarning: limits.stepFloors.finishWarning },
         budget,
       );
       let approvedPlan: Plan = plan;
@@ -673,12 +724,22 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         attemptId: AttemptId,
         retriesLeft: number,
         problems: readonly string[] = [],
+        cause: { readonly planCaused: readonly string[]; readonly verificationOnly: boolean } = { planCaused: [], verificationOnly: false },
       ): Promise<TriageOutcome> => {
         const fallback: TriageOutcome = { kind: "retry", guidance: undefined };
         if (deps.planner.triage === undefined || deps.delegation === undefined) return fallback;
         const record = workers.attempt(attemptId);
         const acceptable = packet.write_mode !== "owned-paths" && (record?.changeSet?.changes.length ?? 0) === 0;
-        const pending: PendingTriage = { key: entry.key, taskId: entry.taskId, acceptable, criteria: packet.acceptance_criteria.map((criterion) => criterion.id), retriesLeft, decision: undefined };
+        const pending: PendingTriage = {
+          key: entry.key,
+          taskId: entry.taskId,
+          acceptable,
+          criteria: packet.acceptance_criteria.map((criterion) => criterion.id),
+          retriesLeft,
+          planCaused: cause.planCaused,
+          verificationOnly: cause.verificationOnly,
+          decision: undefined,
+        };
         await orchestratorTurn(async () => {
           triaging = pending;
           consulting = true;
@@ -704,6 +765,9 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
                   };
                 }),
                 problems,
+                planCaused: cause.planCaused,
+                verificationOnly: cause.verificationOnly,
+                ownedPaths: packet.scope.owned_paths,
                 harnessChecks: (completion.harness_evidence?.verification ?? []).map((check) => `${check.command}: ${check.status}${check.exit_code === null ? "" : ` (exit ${check.exit_code})`}`),
                 summary: completion.summary,
                 skippedChecks: completion.skipped_checks.map((check) => `${check.check}: ${check.reason}`),
@@ -752,6 +816,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           findings: findings(entry),
           forbiddenPaths: [],
           preferWorktree: deps.preferWorktree ?? true,
+          stepFloor: limits.stepFloors.worker,
         });
         let retries = 0;
         let revisions = 0;
@@ -865,11 +930,53 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
 
           await move(entry, "verifying", waived === undefined ? "completion received" : `triage accepted the findings${waived.length > 0 ? `; waived ${waived.join(", ")}` : ""}`);
           let verification = await workers.verify(handle.attemptId, waived === undefined ? undefined : { waivedCriteria: waived });
+          let waivedCommands: readonly string[] = [];
           if (verification.decision === "revise" && waived === undefined) {
             // ADR-18 D2: the in-session repairs are spent (the worker manager repaired within its budget); the work
             // is never dropped silently: the orchestrator decides with the resolved evidence and what is still wrong.
-            const decision = await triageReport(entry, packet, completion, handle.attemptId, limits.budgets.triage_retries - retries, verification.problems);
-            if (decision.kind === "accept") {
+            // Plan-caused verification problems never went to the worker; the orchestrator may waive or replace them.
+            const planCaused = verification.planCaused ?? [];
+            const planProblems = new Set(verification.planProblems ?? []);
+            const verificationOnly = planCaused.length > 0 && verification.problems.every((problem) => planProblems.has(problem));
+            const decision = await triageReport(entry, packet, completion, handle.attemptId, limits.budgets.triage_retries - retries, verification.problems, { planCaused, verificationOnly });
+            if (decision.kind === "accept" && decision.waivedCommands !== undefined) {
+              waivedCommands = decision.waivedCommands;
+              verification = await workers.verify(handle.attemptId, { waivedCommands });
+              entry.notes.push(...waivedCommands.map((command) => `verification "${command}" could not run and was waived by the orchestrator in triage${decision.guidance === undefined ? "" : ` (${decision.guidance})`}`.slice(0, NOTE_LIMIT)));
+            } else if (decision.kind === "retry" && decision.verification !== undefined && retries < limits.budgets.triage_retries) {
+              const artifactBytes = workers.attempt(handle.attemptId)?.changeSet?.artifactBytes;
+              if (!(await reviseVerification(entry, decision.verification))) {
+                entry.failure = "verification_failed";
+                await move(entry, "failed", `verification could not run (plan-caused) and its revision was not approved: ${planCaused.join("; ")}`);
+                return "failed";
+              }
+              retries += 1;
+              entry.failure = undefined;
+              await move(entry, "failed", `verification could not run (plan-caused: ${planCaused.join("; ")}); the orchestrator revised it`);
+              seed = artifactBytes;
+              await workers.revert(handle.attemptId, signal);
+              await retire(entry, handle.attemptId);
+              await move(entry, "retry_pending", "triage: verification revised in plan");
+              packet = compileTaskPacket({
+                plan: approvedPlan,
+                planDigest: approvedDigest,
+                task: entry.plan,
+                taskId: entry.taskId,
+                createdAt: now().toISOString(),
+                sources: await packetSources(entry),
+                findings: findings(entry),
+                forbiddenPaths: [],
+                preferWorktree: deps.preferWorktree ?? true,
+                stepFloor: limits.stepFloors.worker,
+              });
+              entry.nextNotes = [
+                `The orchestrator replaced this task's verification (it could not run: ${planCaused.join("; ")}) with: ${decision.verification.join("; ")}.`.slice(0, NOTE_LIMIT),
+                "Your previous change is already in your workspace: do not redo it. Make the new verification pass (a check script it runs must be inside your owned paths), run it, then report.",
+                ...(decision.guidance === undefined ? [] : [`Orchestrator guidance: ${decision.guidance}`.slice(0, NOTE_LIMIT)]),
+              ];
+              await move(entry, "ready", `retry ${retries} with the revised verification`);
+              continue;
+            } else if (decision.kind === "accept") {
               waived = decision.waived;
               verification = await workers.verify(handle.attemptId, { waivedCriteria: waived });
             } else if (decision.kind === "retry" && retries < limits.budgets.triage_retries) {
@@ -912,7 +1019,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             return "completed";
           }
 
-          await move(entry, "reviewing", "independent review required");
+          await move(entry, "reviewing", waivedCommands.length === 0 ? "independent review required" : `independent review required; triage waived verification that could not run: ${waivedCommands.join("; ")}`);
           if (artifact === undefined) {
             await move(entry, "failed", "no pinned artifact to review");
             return "failed";
@@ -930,6 +1037,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
               extraCriteria: reviewerExtras(packet, configurations),
               extraVerification: configurations.flatMap((task) => task.verification),
               ...(waived === undefined ? {} : { waivedCriteria: waived }),
+              maxSteps: reviewerStepLimit(packet.limits.max_steps, limits.stepFloors),
             });
             const reviewerRoute = await deps.router.resolve({ tier: reviewerPacket.model_tier, role: "reviewer" }, signal);
             const reviewHandle = await workers.dispatchReview(reviewerPacket, handle.attemptId, signal, { route: reviewerRoute });
@@ -1026,7 +1134,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           if (!parsed.success) return deny("invalid_arguments", parsed.error.issues.map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`).join("; "));
           if (entries.has(parsed.data.key) || spawned.some((task) => task.key === parsed.data.key)) return deny("invalid_arguments", `task key ${parsed.data.key} already exists`);
           const probeId = createId("plan");
-          const validation = validatePlan(revisionCandidate(probeId, [...spawned, parsed.data], []), { runId, planId: probeId, version: approvedPlan.version + 1 });
+          const validation = checkPlan(revisionCandidate(probeId, [...spawned, parsed.data], []), { runId, planId: probeId, version: approvedPlan.version + 1 }, (task) => task.key === parsed.data.key);
           if (!validation.ok) return deny("invalid_arguments", `the task does not fit the plan: ${validation.issues.slice(0, 5).join("; ")}`);
           spawned.push(parsed.data);
           return { ok: true, text: `task ${parsed.data.key} accepted for plan v${approvedPlan.version + 1}; it runs only after the revised plan is approved` };
@@ -1044,6 +1152,23 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           }
           if (pending.decision !== undefined) return deny("invalid_arguments", `task ${pending.key} is already decided (${pending.decision.kind}); end your turn`);
           const waive = [...new Set(input.waive_criteria ?? [])];
+          const replacement = [...new Set((input.verification ?? []).map((command) => command.trim()).filter((command) => command !== ""))];
+          if (replacement.length > 0) {
+            if (input.decision !== "retry") return deny("invalid_arguments", "verification (replacement commands) goes with decision retry");
+            if (pending.planCaused.length === 0) return deny("invalid_arguments", `${pending.key} has no plan-caused verification problem; its verification stays as planned`);
+            if (pending.retriesLeft <= 0) return deny("invalid_arguments", `no retries are left for ${pending.key}; choose accept or fail`);
+            const task = approvedPlan.tasks.find((candidate) => candidate.key === pending.key);
+            if (task !== undefined) {
+              const dry = preflightVerification([{ ...task, verification: replacement }], preflightContext);
+              if (dry.refusals.length > 0) return deny("invalid_arguments", `replacement verification rejected:\n${dry.refusals.map((refusal) => `- ${formatVerificationRefusal(refusal)}`).join("\n")}\nFix it and call task_triage again.`);
+            }
+            pending.decision = { kind: "retry", guidance: input.guidance, verification: replacement };
+            return { ok: true, text: `decision for ${pending.key} recorded: retry with the revised verification (${replacement.join("; ")}); the plan is revised and re-approved. End your turn now.` };
+          }
+          if (input.decision === "accept" && pending.verificationOnly && !pending.acceptable) {
+            pending.decision = { kind: "accept", waived: [], guidance: input.guidance, waivedCommands: pending.planCaused };
+            return { ok: true, text: `decision for ${pending.key} recorded: accept; the verification command(s) that could not run are waived (${pending.planCaused.join("; ")}) and the change goes to independent review. End your turn now.` };
+          }
           if (input.decision === "accept") {
             if (!pending.acceptable) return deny("invalid_arguments", `accept is only for read-only tasks that changed nothing; ${pending.key} completes only through verification and review. Choose retry or fail.`);
             const unknown = waive.filter((id) => !pending.criteria.includes(id));
@@ -1077,6 +1202,20 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           notice("warning", `plan revision invalid; the run continues with v${approvedPlan.version}: ${validation.issues.slice(0, 5).join("; ")}`);
           return;
         }
+        if (!(await approveRevision(validation, cause))) return;
+        for (const task of extra) {
+          const entry = newEntry(task);
+          entries.set(task.key, entry);
+          await createTask(entry);
+          scheduler.add({ key: task.key, dependsOn: task.depends_on, ownedPaths: task.owned_paths, provider: entry.route?.route.provider_id, workspace: request.workspaceRoot });
+        }
+      };
+
+      /**
+       * Proposes a validated revision and re-approves it under the run's policy mode; only an
+       * approved revision supersedes the running plan. False when it was not approved.
+       */
+      const approveRevision = async (validation: Extract<PlanValidation, { ok: true }>, cause: string): Promise<boolean> => {
         await recorder.record("plan/proposed", { plan: validation.plan, digest: validation.digest });
         if (request.policyMode === "ask") await moveRun("waiting_for_approval", `revised plan v${validation.plan.version} approval requested`);
         const decision = await approvePlan({ plan: validation.plan, digest: validation.digest, mode: request.policyMode, broker: deps.approvals, now }, signal);
@@ -1094,7 +1233,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             approval_id: decision.request.approval_id,
           });
           notice("warning", `revised plan v${validation.plan.version} was not approved; the run continues with v${approvedPlan.version}`);
-          return;
+          return false;
         }
         await recorder.record("plan/state_changed", {
           plan_id: approvedPlan.plan_id,
@@ -1113,12 +1252,31 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         });
         approvedPlan = validation.plan;
         approvedDigest = validation.digest;
-        for (const task of extra) {
-          const entry = newEntry(task);
-          entries.set(task.key, entry);
-          await createTask(entry);
-          scheduler.add({ key: task.key, dependsOn: task.depends_on, ownedPaths: task.owned_paths, provider: entry.route?.route.provider_id, workspace: request.workspaceRoot });
+        return true;
+      };
+
+      /**
+       * A triage revision of one task's verification (plan-caused problems): the plan is re-versioned
+       * with the replacement commands, dry-run like `plan_propose` and re-approved under the run's
+       * policy mode. False when it is invalid or not approved.
+       */
+      const reviseVerification = async (entry: TaskEntry, commands: readonly string[]): Promise<boolean> => {
+        const revisionId = createId("plan");
+        const candidate = {
+          ...approvedPlan,
+          plan_id: revisionId,
+          version: approvedPlan.version + 1,
+          tasks: approvedPlan.tasks.map((task) => (task.key === entry.key ? { ...task, verification: [...commands] } : task)),
+          created_at: now().toISOString(),
+        };
+        const validation = checkPlan(candidate, { runId, planId: revisionId, version: approvedPlan.version + 1 }, (task) => task.key === entry.key);
+        if (!validation.ok) {
+          notice("warning", `verification revision of ${entry.key} invalid: ${validation.issues.slice(0, 3).join("; ")}`.slice(0, 1000));
+          return false;
         }
+        if (!(await approveRevision(validation, `the triage of ${entry.key}'s verification`))) return false;
+        entry.plan = validation.plan.tasks.find((task) => task.key === entry.key) ?? entry.plan;
+        return true;
       };
 
       /**

@@ -121,6 +121,23 @@ const planProposalShape = {
 export const planProposalSchema = z.strictObject(planProposalShape);
 export type PlanProposal = z.infer<typeof planProposalSchema>;
 
+/** The orchestrator's decision on a triaged worker report (`task_triage`, triage consultation only). */
+export const TRIAGE_DECISIONS = ["accept", "retry", "fail"] as const;
+
+/**
+ * Input of the `task_triage` tool. `verification` (replacement verification commands) goes only
+ * with `retry` and only for a plan-caused verification problem; orchestration dry-runs it like
+ * `plan_propose` and revises the plan. Structural only: the decision rules live in orchestration.
+ */
+export const taskTriageInputSchema = z.strictObject({
+  task: z.string().trim().min(1).max(200),
+  decision: z.enum(TRIAGE_DECISIONS),
+  waive_criteria: z.array(acceptanceCriterionIdSchema).max(20).optional(),
+  guidance: z.string().trim().min(1).max(2000).optional(),
+  verification: z.array(z.string().trim().min(1).max(4000)).min(1).max(20).optional(),
+});
+export type TaskTriageInput = z.infer<typeof taskTriageInputSchema>;
+
 export const planSchema = z
   .strictObject({
     schema_version: z.literal(1),

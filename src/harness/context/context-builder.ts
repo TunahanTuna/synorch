@@ -65,7 +65,8 @@ export type RequestBudgetAdmission =
 
 /** Checked before every model request; a refusal means no request may start (ADR-14). */
 export interface RequestBudgetGate {
-  admit(observations: readonly UsageObservation[]): RequestBudgetAdmission;
+  /** `grace`: a report-only request (`ContextBuildInput.reportOnly`) the gate may admit past an exhausted step budget. */
+  admit(observations: readonly UsageObservation[], options?: { readonly grace?: boolean }): RequestBudgetAdmission;
 }
 
 export interface MemoryRecall {
@@ -364,7 +365,8 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
     const history = await reconstructHistory(events, deps.blobs, { role: input.role, taskId: input.taskId, attemptId: input.attemptId });
     const { blocks, memories, skillsLoadable } = await baseBlocks(input, history, events, signal);
     const messages = history.messages.map((entry) => entry.message);
-    const tools = selectTools(deps.tools.visibleTo(input.role, input.policy), { role: input.role, packet: input.packet, skillsLoadable });
+    const selected = selectTools(deps.tools.visibleTo(input.role, input.policy), { role: input.role, packet: input.packet, skillsLoadable });
+    const tools = input.reportOnly === undefined ? selected : selected.filter((tool) => tool.name === input.reportOnly);
     return { history, blocks, memories, messages, tools };
   };
 
@@ -380,7 +382,7 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
         const observations = events.flatMap((event) =>
           event.type === "provider/usage" ? [{ sessionId: input.sessionId, seq: event.seq, usage: event.data.usage }] : [],
         );
-        const admission = deps.budget.admit(observations);
+        const admission = deps.budget.admit(observations, input.reportOnly === undefined ? undefined : { grace: true });
         if (!admission.ok) return budgetRefusal(admission);
       }
       const window = deps.contextWindow?.(input.route) ?? DEFAULT_CONTEXT_WINDOW;

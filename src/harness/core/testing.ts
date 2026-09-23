@@ -210,25 +210,46 @@ export type ToolHandler = (request: ToolCallRequest, signal: AbortSignal) => Pro
  * Records `tool/call_proposed` -> `tool/execution_started` -> `tool/result_recorded` like the real
  * gateway and runs `handler` in between; `invocations` lists every call that reached execution.
  */
+export interface RecordingGatewayOptions {
+  /** Assign `[#n]` short refs (1, 2, …) like the real gateway (ADR-18). */
+  readonly refs?: boolean;
+  /** Names of terminal control tools: a succeeded call with `status: ok` returns `endsTurn` (ADR-20). */
+  readonly terminalTools?: readonly string[];
+}
+
 export class RecordingToolGateway implements ToolGateway {
   public readonly invocations: ToolCallRequest[] = [];
   readonly #events: EventStore;
   readonly #handler: ToolHandler;
+  readonly #options: RecordingGatewayOptions;
+  #nextRef = 1;
 
-  public constructor(events: EventStore, handler: ToolHandler = async (request) => ({ status: "ok", text: `ran ${request.tool_name}`, truncated: false, redactions: 0 })) {
+  public constructor(
+    events: EventStore,
+    handler: ToolHandler = async (request) => ({ status: "ok", text: `ran ${request.tool_name}`, truncated: false, redactions: 0 }),
+    options: RecordingGatewayOptions = {},
+  ) {
     this.#events = events;
     this.#handler = handler;
+    this.#options = options;
   }
 
   public async invoke(request: ToolCallRequest, scope: ToolInvocationScope, signal: AbortSignal): Promise<ToolCallOutcome> {
     const correlation = { run_id: scope.runId, ...(scope.taskId === undefined ? {} : { task_id: scope.taskId }) };
     const actor = { kind: "system" as const };
+    const ref = this.#options.refs === true ? this.#nextRef++ : undefined;
     await this.#events.append({
       type: "tool/call_proposed",
       event_version: EVENT_VERSIONS["tool/call_proposed"],
       actor,
       ...correlation,
-      data: { tool_call_id: request.tool_call_id, provider_call_id: request.provider_call_id, tool_name: request.tool_name, args_digest: digestOf(request.arguments) },
+      data: {
+        tool_call_id: request.tool_call_id,
+        provider_call_id: request.provider_call_id,
+        tool_name: request.tool_name,
+        args_digest: digestOf(request.arguments),
+        ...(ref === undefined ? {} : { ref }),
+      },
     } as SessionEventDraft);
     await this.#events.append({
       type: "tool/execution_started",
@@ -253,7 +274,16 @@ export class RecordingToolGateway implements ToolGateway {
       ...correlation,
       data: { tool_call_id: request.tool_call_id, state, result, duration_ms: Date.now() - started },
     } as SessionEventDraft);
-    return { toolCallId: request.tool_call_id, state, result, decision: undefined, approval: undefined };
+    const endsTurn = state === "succeeded" && result.status === "ok" && (this.#options.terminalTools ?? []).includes(request.tool_name);
+    return {
+      toolCallId: request.tool_call_id,
+      state,
+      result,
+      decision: undefined,
+      approval: undefined,
+      ...(ref === undefined ? {} : { ref }),
+      ...(endsTurn ? { endsTurn } : {}),
+    };
   }
 }
 

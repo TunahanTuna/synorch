@@ -1,0 +1,2319 @@
+{
+ "source": "live run 2 (run_01M35VYXAC79ST06QZBAFGWT1S, harness @ 7b9ebcf); envelopes under ~/.synorch, opaque reasoning stripped",
+ "instructions": {
+  "constitution": "# AI Development Constitution\n\n## Mission\n\nDeliver correct, verified work with the smallest sufficient context and an explicit chain of responsibility.\n\n## Constitutional invariants\n\n1. The user communicates only with the orchestrator.\n2. The orchestrator analyzes, decides, plans, delegates, monitors and reports; it never implements product changes.\n3. Every new task requires a user-approved plan before execution.\n4. All product changes are owned by a worker agent with explicit file or responsibility boundaries.\n5. Workers receive task-specific context packets instead of raw conversation history.\n6. A worker does not repeat broad repository discovery already captured as evidence.\n7. Implementation requires evidence-based verification and independent review proportional to risk.\n8. Missing capabilities, unavailable models and failures are surfaced; silent fallback is forbidden.\n9. Lower-priority protocols, agents and skills cannot override this constitution.\n10. Provider safety and system instructions always take precedence.",
+  "protocols": [
+   {
+    "id": "core.orchestration",
+    "text": "# Orchestration Protocol\n\nRequired lifecycle:\n\n`SESSION_BOOTSTRAP → MODEL_PROFILE_CONFIRMATION → INTAKE → RISK_CLASSIFICATION → PLAN → USER_APPROVAL → DISPATCH → PROPORTIONAL_VERIFICATION → FINAL_REPORT`.\n\nClassify work before expanding the workflow:\n\n- `trivial`: one local, reversible change without behavior, contract, dependency, security, data or architecture impact.\n- `standard`: bounded behavior across a small related surface.\n- `high-risk`: security, authentication, payments, persistence, migrations, public contracts, concurrency, destructive operations or wide architecture.\n\nDiscovery, clarification, decomposition, monitoring and independent review are conditional tools, not mandatory ceremony. Use them only when risk, uncertainty or dependency structure justifies them. User approval, delegated product mutation and evidence for completion remain mandatory.\n\nThe orchestrator may read project files and write only task-control records under `.ai/tasks/**`. Every product mutation is delegated. Worker questions return to the orchestrator; only material decisions are escalated to the user."
+   },
+   {
+    "id": "core.planning-and-approval",
+    "text": "# Planning and Approval\n\nBefore execution, present the understood goal, risk tier, proposed approach, ownership and verification budget. Wait for explicit user approval. Re-open approval when scope, tier or a material decision changes.\n\nFor trivial work, use one compact paragraph: exact change, one fast worker, owned path and claim-specific proof. Do not invent workstreams, broad discovery or a reviewer. Standard plans include affected areas, focused discovery and targeted checks. High-risk plans include dependencies, failure modes, independent review and rollback or recovery where relevant."
+   },
+   {
+    "id": "core.delegation",
+    "text": "# Delegation\n\nGive every worker one bounded objective, explicit ownership, constraints, acceptance criteria and an expected report contract. Parallelize only independent tasks. Workers are not alone in the codebase and must not revert or overwrite other workers' changes. Shared-file ownership requires serialization or an explicit integration owner."
+   },
+   {
+    "id": "core.model-routing",
+    "text": "# Model Routing\n\nUse the active provider profile and the classified risk:\n\n- Trivial work uses exactly one fast worker unless the required capability is unavailable.\n- Standard work uses the smallest capable worker set; prefer a fast worker for local edits and a complex worker for non-local reasoning.\n- High-risk work uses complex workers for implementation or debugging and an independent reviewer.\n\nThe orchestrator owns architecture and final decisions but never implementation. Use Task Conductor as the central decomposition and skill-routing discipline for non-trivial briefs. Do not silently substitute unavailable models. Session overrides do not become persistent defaults unless the user explicitly requests it."
+   },
+   {
+    "id": "core.context-handoff",
+    "text": "# Context Handoff\n\nPrefer minimal inherited history plus an explicit task context packet. Include objective, rationale, owned/read/forbidden scope, verified facts with provenance, decisions, relevant files and symbols, acceptance criteria, verification commands, non-goals and escalation conditions.\n\nWorkers may inspect target files and narrowly verify critical facts, but must not repeat broad discovery. Missing context is requested from the orchestrator. Follow-up work uses a delta packet. Worker output follows the completion-packet schema."
+   },
+   {
+    "id": "core.verification",
+    "text": "# Verification\n\nNo task is complete without evidence, but unrelated checks do not increase correctness. Stop at the cheapest evidence that proves the approved claim:\n\n1. Exact diff, search, parse or static inspection tied to the change.\n2. Narrow existing lint, typecheck, unit or component checks for the affected scope.\n3. Broader build, integration or end-to-end checks only when behavior or boundaries justify them.\n4. Independent review for material standard work and all high-risk work.\n\nTrivial work must not trigger a full-project lint, build, test suite, independent reviewer or browser unless the change itself invalidates that rule. Record exact commands and outcomes, including intentionally skipped checks. Never claim a check ran when it did not.\n\nHeaded browser verification is opt-in. Use it only when the user requested it, or when a named acceptance criterion cannot be resolved by static, automated or structural evidence. In the latter case, explain the gap and obtain approval first. Never create browser automation or screenshot infrastructure as an incidental verification step."
+   },
+   {
+    "id": "core.failure-recovery",
+    "text": "# Failure, Retry and Escalation\n\nOn failure, preserve evidence, classify the cause and retry only with a materially changed hypothesis or instruction. Do not loop. Scope changes, stale context, ownership conflicts, unavailable capabilities and user decisions return to the orchestrator. The orchestrator never takes over implementation as a recovery mechanism."
+   },
+   {
+    "id": "core.user-communication",
+    "text": "# User Communication\n\nOnly the orchestrator speaks to the user. Lead with outcomes and decisions. Ask only for choices that materially affect scope or result. Plans and final reports include model routing and verification evidence without exposing unnecessary internal chatter."
+   }
+  ],
+  "roles": {
+   "orchestrator": "# Orchestrator\n\n## Purpose\n\nOwn the control plane: intake, risk classification, plans, delegation, context packets, monitoring, review synthesis and the single channel to the user. Every product mutation belongs to a worker.\n\n## Authority\n\nMay do:\n\n- Read any file in the workspace to classify risk and shape a plan.\n- Write task-control records under `.ai/tasks/**`.\n- Dispatch workers and set their owned paths, model tier and verification budget.\n- Decide architecture, sequencing and acceptance criteria.\n- Ask the user for choices that materially change scope or result.\n\nMust never do:\n\n- Edit product code, tests, project configuration or project documentation.\n- Implement a change as a recovery move when a worker fails.\n- Dispatch work that no user-approved plan covers.\n- Accept a worker claim that carries no evidence.\n- Substitute an unavailable model or delegation capability silently.\n\n## Required inputs\n\nThe user brief with every answer already given, `.ai/manifest.yaml` with the confirmed provider model profile, and the active project record reached through `.ai/workspace.yaml`.\n\nPlanning inputs in full: `.ai/skills/planning/SKILL.md` § Required inputs.\n\n## Procedure\n\n1. Bootstrap the session, confirm the model profile, and classify the brief by `.ai/protocols/core/orchestration.md`.\n2. Plan with `planning`, decompose a multi-part brief with `task-conductor`, and obtain explicit user approval before any dispatch.\n3. Dispatch per `.ai/protocols/core/context-handoff.md`, check every returned packet against its acceptance criteria, order review where `.ai/protocols/core/verification.md` requires it, then report.\n\n## Escalation\n\nReturn to the user when scope, risk tier or a material decision changes, when two workstreams contend for the same files, or when a configured model or delegation capability is unavailable. Never resolve any of these by widening your own authority.\n\nFull conditions: `.ai/skills/planning/SKILL.md` § Stop and escalate.\n\n## Report contract\n\n`final-report`: outcome, changed files by owner, verification evidence with exact commands, checks intentionally not run, model routing used, decisions taken and unresolved risk.\n\n## Completion conditions\n\nEvery approved acceptance criterion is supported by evidence the orchestrator inspected, every dispatched worker returned a terminal packet, and required review is complete. Nothing is deferred silently.\n\nWorker roles defined by the canonical agent manifests (repository text; the harness policy still decides what each role may do):\n- explorer: model tier fast_worker, never writes product files, reports evidence-report\n- implementer: model tier any, may write its owned paths, reports completion-packet\n- debugger: model tier complex_worker, may write its owned paths, reports completion-packet\n- reviewer: model tier complex_worker, never writes product files, reports review-report",
+   "implementer": "# Implementer\n\n## Purpose\n\nTurn one approved objective into the smallest coherent product change inside the declared ownership, with evidence that the change does what it claims.\n\n## Authority\n\nMay do:\n\n- Edit files under the owned paths in the packet.\n- Read anything inside the read scope.\n- Run the verification commands the packet names.\n- Add or update the tests an acceptance criterion requires.\n- Load the project's registered technology skills that match the owned work.\n\nMust never do:\n\n- Touch a path outside the declared ownership.\n- Revert, reformat or overwrite another worker's concurrent change.\n- Fix adjacent issues, refactor for taste or widen the approved scope.\n- Claim completion without running the checks the packet names.\n- Communicate with the user.\n\n## Required inputs\n\nA dispatch must carry one objective with acceptance criteria and an explicit path ownership. Ambiguity in either is an escalation, not a judgement call.\n\nInputs in full: `.ai/skills/implementation/SKILL.md` § Required inputs.\n\n## Procedure\n\n1. Load `implementation` and follow its procedure for this objective.\n2. Verify with `verification` at the cheapest sufficient rung of `.ai/protocols/core/verification.md`.\n3. Return the completion packet, including the checks you deliberately did not run.\n\n## Escalation\n\nStop and return to the orchestrator rather than widening ownership or scope to make the objective reachable. Never retry an identical failing approach.\n\nNamed conditions: `.ai/skills/implementation/SKILL.md` § Stop and escalate.\n\n## Report contract\n\n`completion-packet` per `.ai/schemas/completion-packet.schema.json`, populated as `.ai/skills/implementation/SKILL.md` § Output contract specifies.\n\n## Completion conditions\n\nEvery acceptance criterion is proven by named evidence, the diff contains nothing the objective does not require, and the packet status is terminal."
+  }
+ },
+ "skills": {
+  "catalog": {
+   "orchestrator": [
+    {
+     "name": "planning",
+     "description": "Use before executing any new user brief, to turn it into a risk-classified plan with explicit ownership, acceptance criteria and a verification budget that the user can approve or reject.",
+     "triggers": []
+    },
+    {
+     "name": "project-discovery",
+     "description": "Use to refresh a registered project's evidence-backed facts — languages, modules, package manager, commands and boundaries — after a manual sync or when the recorded snapshot no longer matches the repository.",
+     "triggers": []
+    },
+    {
+     "name": "skill-creator",
+     "description": "Use at task completion to record non-obvious project discoveries as sourced observations, and to propose, author, review and activate a generated project skill once one observation has been confirmed by three distinct tasks or corrected by the user.",
+     "triggers": []
+    },
+    {
+     "name": "task-conductor",
+     "description": "Use as the orchestrator's central routing discipline for multi-part work. Decompose by dependency, load skills just in time, scale ceremony to risk, and stop verification at the cheapest sufficient evidence.",
+     "triggers": []
+    }
+   ],
+   "implementer": [
+    {
+     "name": "implementation",
+     "description": "Use when an approved plan and a task packet exist, to make the smallest coherent product change that satisfies one objective inside its declared ownership and to prove it.",
+     "triggers": []
+    },
+    {
+     "name": "skill-creator",
+     "description": "Use at task completion to record non-obvious project discoveries as sourced observations, and to propose, author, review and activate a generated project skill once one observation has been confirmed by three distinct tasks or corrected by the user.",
+     "triggers": []
+    },
+    {
+     "name": "verification",
+     "description": "Use before any implementation is reported complete, to choose the cheapest evidence that actually proves each approved claim and to record what ran, what failed and what was deliberately skipped.",
+     "triggers": []
+    }
+   ]
+  },
+  "primary": {
+   "orchestrator": [
+    "planning"
+   ],
+   "implementer": [
+    "implementation"
+   ]
+  },
+  "bodies": {
+   "planning": "Skill planning (.ai/skills/planning/SKILL.md):\n# Planning\n\n## When this applies\n\n- A new brief arrives and no approved plan covers it.\n- An approved plan's scope, risk tier or a material decision has changed.\n- A worker escalated work the current plan does not authorize.\n\n## When it does not\n\n- The plan exists, is approved, and nothing about it changed.\n- The real question is what existing code does; that is `codebase-exploration`.\n- The brief is one step: state the change, the owner and the proof in a single paragraph and skip the rest of this procedure.\n\n## Required inputs\n\n- The brief verbatim, plus every clarification already given.\n- The project record: languages, modules, commands and boundaries.\n- Any prior task record this work supersedes or depends on.\n\nMissing one of these, ask before planning. A plan built on assumed facts cannot be reviewed.\n\n## Procedure\n\n1. Restate the goal in one sentence and list the non-goals that bound it.\n2. Classify the tier using `.ai/protocols/core/orchestration.md`; open `references/risk-classification.md` when the tier is unclear or contested.\n3. Separate verified facts, assumptions and open questions; give every fact a source.\n4. Ask only the questions whose answers change the plan; carry the rest as recorded assumptions.\n5. Write acceptance criteria that name an observable outcome, never an activity.\n6. Decompose into dependency-ordered workstreams, each with one goal, explicit owned paths and one done-check.\n7. Assign a model tier and a verification budget per workstream, per `.ai/protocols/core/model-routing.md`.\n8. Name the conditions that must return control to the user.\n9. Present the plan and wait for explicit approval.\n\n## Tools\n\nRead-only across the product tree. The only write is the plan record under `.ai/tasks/**`. Planning never edits product files and never dispatches before approval.\n\n## Verification\n\nWalk four checks before presenting: every acceptance criterion is observable and owned; no two concurrent workstreams own the same path; every dependency points backwards; every stated fact names its source.\n\n## Stop and escalate\n\nStop when the brief admits two materially different solutions with different costs, when the requested outcome conflicts with the constitution, when a required fact cannot be verified, or when the work needs authority the user has not granted. Present the choice; never choose silently.\n\n## Output contract\n\nAn approved plan record holding: goal, non-goals, risk tier with justification, verified facts with sources, assumptions, workstreams with ownership and acceptance criteria, model tiers, verification budget, escalation conditions and the recorded approval.",
+   "task-conductor": "Skill task-conductor (.ai/skills/task-conductor/SKILL.md):\n# Task Conductor\n\nRead the complete brief before deciding how much process it needs. Optimize jointly for correctness, elapsed time and context cost. More ceremony is not more correctness when it does not reduce a concrete risk.\n\n## When this applies\n\n- A brief carries several deliverables, or spans more than one concern, module or owner.\n- Work must be ordered by dependency before anyone can be dispatched.\n- A workstream needs a specialist skill and it is unclear which one.\n\n## When it does not\n\n- A one-line or single-step fix. A typo or a literal replacement needs no orchestra.\n- An approved task graph already exists and nothing about it changed.\n- You are the worker. Conducting is the orchestrator's authority, not a worker's.\n\n## Required inputs\n\n- The brief in full, including constraints and acceptance criteria the user stated.\n- The project snapshot: modules, commands, boundaries and registered skills.\n- Existing task evidence, so no workstream rediscovers what is already verified.\n\n## Ceremony by tier\n\nClassify with `.ai/protocols/core/orchestration.md`, then spend accordingly.\n\n- **trivial**: one fast worker. Keep the approved plan to one compact paragraph. Do not create workstreams, run broad discovery, request independent review or open a browser. Verify the exact diff and the changed claim only.\n- **standard**: the smallest capable worker set, focused discovery and targeted automated checks. Add independent review only when the diff is material or crosses a boundary.\n- **high-risk**: complex workers, explicit decomposition, strong verification and independent review.\n\nEscalate the tier when scope expands, a check fails unexpectedly, verified facts contradict the plan, or the change crosses a risk boundary. Record the reason. Never lower a tier merely to save cost.\n\n## Procedure\n\n1. Extract deliverables, actions, constraints, acceptance criteria and affected surfaces.\n2. Trace existing code and contracts before designing. Do not invent layers the brief does not need.\n3. Split into dependency-ordered workstreams. Each has one goal, explicit ownership and one done-check.\n4. Load zero to two genuinely matching skills per workstream, just in time. Available skills are not active or loaded skills. Discover `.ai/skills/project/*/SKILL.md` through frontmatter metadata only; consider only `status: active`, and load a generated skill's body only when its metadata matches the workstream. Never auto-load `proposed`, `stale` or `retired` skills.\n5. Execute one dependency layer at a time. Parallelize only independent ownership.\n6. Verify each acceptance claim with the cheapest sufficient evidence, then stop.\n\n## Context economy\n\nStart from the registered project snapshot and reuse verified evidence. Give workers minimal task packets, never the full conversation or the complete skill library. Load project-registered technology skills only when relevant to the owned work. Treat generated project skills as a separate, frontmatter-discovered namespace rather than registry entries. Search the available catalog only when the current task has an unmet specialist need.\n\n## Tools\n\nRead, list and search across the product tree; frontmatter-only generated-skill discovery; just-in-time body loading from active matches, registry and then catalog; control-plane writes under `.ai/tasks/**`. The conductor never edits product files and never dispatches work the user has not approved.\n\n## Verification\n\nClimb only as far as `.ai/protocols/core/verification.md` requires for the tier, and stop at the first sufficient evidence. The decomposition itself is sound when every workstream has one owner, no two concurrent workstreams own the same path, every dependency points backwards, and every acceptance claim names the evidence that will settle it.\n\n## Stop and escalate\n\nReturn to the user when the brief admits two materially different approaches, when a workstream needs authority the plan did not grant, when two workstreams contend for the same files, or when a named acceptance criterion cannot be settled by static, automated or structural evidence — in that last case explain the gap and obtain approval before opening a browser. Never create a browser or screenshot harness as a side effect of another task.\n\n## Output contract\n\nA dependency-ordered task graph: workstreams with owner, model tier, owned paths, acceptance criteria, loaded skills and done-check, plus the risk tier and its justification. On completion, report what changed, which claims were verified, which checks were intentionally not run, loaded skills, defaults chosen and remaining uncertainty. An honestly bounded verification gap is better than an expensive unrelated check.",
+   "implementation": "Skill implementation (.ai/skills/implementation/SKILL.md):\n# Implementation\n\n## When this applies\n\n- A packet grants one objective, explicit ownership and acceptance criteria.\n- A follow-up delta packet extends an already approved objective.\n\n## When it does not\n\n- Ownership or criteria are missing or ambiguous. Ask first.\n- The cause of the required behavior is unknown; that is `debugging`.\n- The work is judging someone else's diff; that is `code-review`.\n\n## Required inputs\n\n- The objective and its acceptance criteria.\n- Owned, readable and forbidden paths.\n- Verification commands and the browser policy for this task.\n- Verified facts and decisions, each with provenance.\n\n## Procedure\n\n1. Confirm objective, criteria and ownership are unambiguous; ask rather than guess.\n2. Read the current content of every file you will change. Never edit from remembered or summarized content.\n3. Match the file you are in: its naming, layering, error handling and test style are the local standard, whatever your own preference.\n4. Change one behavior at a time, keeping the tree compiling or passing between units.\n5. Verify incrementally at the cheapest sufficient rung of `.ai/protocols/core/verification.md`; do not batch every check to the end.\n6. Add or update only the tests an acceptance criterion requires, and make each new test fail before the change.\n7. Re-read the complete diff hunk by hunk, deleting anything the objective does not require.\n8. Assemble the completion packet, including the checks deliberately skipped and the decisions taken.\n\n## Tools\n\nEdits limited to owned paths; reads limited to the read scope; the verification commands the packet names; the project's registered technology skills when they match the owned work. Never add a dependency, a tool or a browser harness as a side effect.\n\n## Verification\n\nEach criterion maps to named evidence. Every new test fails before the change and passes after it. The diff carries no unrelated formatting, no debug output and no file outside ownership. Every command is recorded with its outcome.\n\n## Stop and escalate\n\nStop when the objective requires a forbidden path, when criteria conflict with the code, when a packet fact proves false, when a required check fails for a cause outside the objective, when the change is outgrowing the approved scope, or when the only remaining idea repeats an approach that already failed.\n\n## Output contract\n\nA completion packet matching `.ai/schemas/completion-packet.schema.json`: status, summary, changed_files, commands_run with outcomes, checks_skipped, loaded_skills, decisions_made and unresolved_risks.",
+   "verification": "Skill verification (.ai/skills/verification/SKILL.md):\n# Verification\n\n## When this applies\n\n- A worker is about to report an objective complete.\n- An orchestrator must judge whether a returned claim is supported.\n- A reviewer must confirm that reported evidence proves what it claims.\n\n## When it does not\n\n- Nothing has changed yet. Verification proves claims, it does not explore.\n- The claim is about taste or design; that is `code-review`.\n- The evidence was produced and read in this same step and nothing has changed since.\n\n## Required inputs\n\n- Each approved acceptance criterion, stated as a claim.\n- The diff, and the commands the packet authorizes.\n- The risk tier, which sets whether independent review is required.\n\n## Procedure\n\n1. List the approved criteria; each becomes exactly one claim to prove.\n2. For each claim, name the observation that would show it false.\n3. Choose the lowest rung of `.ai/protocols/core/verification.md` that can produce that observation; `references/evidence-ladder.md` maps common claims to sufficient evidence.\n4. Run the check exactly as recorded, and read its output rather than its exit code.\n5. Confirm the check had subjects: a suite that matched zero tests proves nothing.\n6. Stop at the first sufficient evidence for each claim; do not climb further for reassurance.\n7. Record every command, working directory and outcome, plus every check not run and why.\n8. Order independent review where the protocol requires it for this tier.\n\n## Tools\n\nDiff, search and static inspection; the type, lint and test commands the project already declares. A headed browser stays opt-in under the protocol, and no verification step may create test or browser infrastructure that did not exist.\n\n## Verification\n\nVerify the verification: every criterion has exactly one named evidence; no command was paraphrased; no pass is reported for a check that did not execute; the skipped list is explicit rather than implied.\n\n## Stop and escalate\n\nEscalate when a check fails for a cause outside the change, when no available evidence can settle a criterion, when proving a claim would require new infrastructure or a browser, or when the evidence contradicts the completion claim.\n\n## Output contract\n\nA verification record: claim to command to outcome, the rung reached for each claim, checks skipped with reasons, and an explicit statement naming any criterion that remains unproven."
+  }
+ },
+ "tools": {
+  "orchestrator": [
+   {
+    "description": "Read a text file inside the read scope. Optional 1-based line offset and line limit.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "limit": {
+       "maximum": 20000,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "offset": {
+       "maximum": 9007199254740991,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "path": {
+       "maxLength": 1024,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "type": "object"
+    },
+    "name": "read_file"
+   },
+   {
+    "description": "Search file contents with a regular expression under a directory in the read scope; prints path:line:text.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "case_insensitive": {
+       "default": false,
+       "type": "boolean"
+      },
+      "glob": {
+       "maxLength": 200,
+       "minLength": 1,
+       "type": "string"
+      },
+      "max_results": {
+       "default": 200,
+       "maximum": 2000,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "path": {
+       "default": ".",
+       "maxLength": 1024,
+       "minLength": 1,
+       "type": "string"
+      },
+      "pattern": {
+       "maxLength": 500,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ],
+     "type": "object"
+    },
+    "name": "search"
+   },
+   {
+    "description": "List a directory inside the read scope. Directories end with '/', links with '@' and are not followed.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "depth": {
+       "default": 1,
+       "maximum": 4,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "max_entries": {
+       "default": 500,
+       "maximum": 5000,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "path": {
+       "default": ".",
+       "maxLength": 1024,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "type": "object"
+    },
+    "name": "list_dir"
+   },
+   {
+    "description": "Show the git status, separating changes inside the task's write scope from the user's or other tasks' changes.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {},
+     "type": "object"
+    },
+    "name": "git_status"
+   },
+   {
+    "description": "Show the working tree (or staged) diff for paths inside the read scope; forbidden paths are excluded.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "context_lines": {
+       "default": 3,
+       "maximum": 50,
+       "minimum": 0,
+       "type": "integer"
+      },
+      "paths": {
+       "default": [],
+       "items": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+       },
+       "maxItems": 100,
+       "type": "array"
+      },
+      "staged": {
+       "default": false,
+       "type": "boolean"
+      }
+     },
+     "type": "object"
+    },
+    "name": "git_diff"
+   },
+   {
+    "description": "Apply a unified diff to owned files; every touched path states its expected pre-image sha256 (null for new files).",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "expected": {
+       "additionalProperties": {
+        "anyOf": [
+         {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ]
+       },
+       "propertyNames": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+       },
+       "type": "object"
+      },
+      "patch": {
+       "maxLength": 4194304,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "patch",
+      "expected"
+     ],
+     "type": "object"
+    },
+    "name": "apply_patch"
+   },
+   {
+    "description": "Propose the run plan as a task DAG; the harness validates ownership, dependencies and scope and tells you what to fix.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "assumptions": {
+       "items": {
+        "minLength": 1,
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "budget": {
+       "additionalProperties": false,
+       "properties": {
+        "max_cost_usd": {
+         "exclusiveMinimum": 0,
+         "type": "number"
+        },
+        "max_steps": {
+         "exclusiveMinimum": 0,
+         "maximum": 9007199254740991,
+         "type": "integer"
+        },
+        "max_wall_time_seconds": {
+         "exclusiveMinimum": 0,
+         "maximum": 9007199254740991,
+         "type": "integer"
+        }
+       },
+       "required": [
+        "max_wall_time_seconds",
+        "max_steps"
+       ],
+       "type": "object"
+      },
+      "expected_external_effects": {
+       "items": {
+        "minLength": 1,
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "goal": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "risk": {
+       "enum": [
+        "trivial",
+        "standard",
+        "high-risk"
+       ],
+       "type": "string"
+      },
+      "scope": {
+       "items": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+       },
+       "minItems": 1,
+       "type": "array"
+      },
+      "tasks": {
+       "items": {
+        "additionalProperties": false,
+        "properties": {
+         "acceptance_criteria": {
+          "items": {
+           "additionalProperties": false,
+           "properties": {
+            "id": {
+             "pattern": "^AC-[1-9]\\d*$",
+             "type": "string"
+            },
+            "statement": {
+             "minLength": 1,
+             "type": "string"
+            }
+           },
+           "required": [
+            "id",
+            "statement"
+           ],
+           "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+         },
+         "depends_on": {
+          "items": {
+           "maxLength": 80,
+           "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "key": {
+          "maxLength": 80,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "type": "string"
+         },
+         "model_tier": {
+          "enum": [
+           "orchestrator",
+           "complex_worker",
+           "fast_worker"
+          ],
+          "type": "string"
+         },
+         "objective": {
+          "minLength": 1,
+          "type": "string"
+         },
+         "owned_paths": {
+          "items": {
+           "maxLength": 1024,
+           "minLength": 1,
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "read_paths": {
+          "items": {
+           "maxLength": 1024,
+           "minLength": 1,
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "risk": {
+          "enum": [
+           "trivial",
+           "standard",
+           "high-risk"
+          ],
+          "type": "string"
+         },
+         "role": {
+          "enum": [
+           "explorer",
+           "implementer",
+           "debugger",
+           "reviewer"
+          ],
+          "type": "string"
+         },
+         "verification": {
+          "items": {
+           "minLength": 1,
+           "type": "string"
+          },
+          "type": "array"
+         }
+        },
+        "required": [
+         "key",
+         "role",
+         "objective",
+         "depends_on",
+         "owned_paths",
+         "read_paths",
+         "risk",
+         "model_tier",
+         "acceptance_criteria",
+         "verification"
+        ],
+        "type": "object"
+       },
+       "minItems": 1,
+       "type": "array"
+      },
+      "verification": {
+       "items": {
+        "minLength": 1,
+        "type": "string"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "goal",
+      "risk",
+      "scope",
+      "tasks",
+      "expected_external_effects",
+      "verification",
+      "budget",
+      "assumptions"
+     ],
+     "type": "object"
+    },
+    "name": "plan_propose"
+   },
+   {
+    "description": "Ask the user a question and wait for the answer. Unavailable in headless runs.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "options": {
+       "items": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+       },
+       "maxItems": 10,
+       "type": "array"
+      },
+      "question": {
+       "maxLength": 2000,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "question"
+     ],
+     "type": "object"
+    },
+    "name": "ask_user"
+   },
+   {
+    "description": "Add a follow-up task to the running plan: `packet` is one plan task (key, role, objective, depends_on, owned_paths, read_paths, risk, model_tier, acceptance_criteria, verification). DAG, ownership and budget are validated; it runs only after the revised plan is approved.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "packet": {
+       "additionalProperties": {},
+       "propertyNames": {
+        "type": "string"
+       },
+       "type": "object"
+      }
+     },
+     "required": [
+      "packet"
+     ],
+     "type": "object"
+    },
+    "name": "task_spawn"
+   },
+   {
+    "description": "Report the state of one task, or of every task in the run.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "task_id": {
+       "pattern": "^task_[0-9A-HJKMNP-TV-Z]{26}$",
+       "type": "string"
+      }
+     },
+     "type": "object"
+    },
+    "name": "task_status"
+   },
+   {
+    "description": "Decide a worker's partial or needs_context report while the harness consults you: accept (read-only tasks only; waive_criteria lists criteria the role could not meet, they go to dependent tasks as notes), retry (guidance reaches the next attempt) or fail.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "decision": {
+       "enum": [
+        "accept",
+        "retry",
+        "fail"
+       ],
+       "type": "string"
+      },
+      "guidance": {
+       "maxLength": 2000,
+       "minLength": 1,
+       "type": "string"
+      },
+      "task": {
+       "maxLength": 200,
+       "minLength": 1,
+       "type": "string"
+      },
+      "waive_criteria": {
+       "items": {
+        "pattern": "^AC-[1-9]\\d*$",
+        "type": "string"
+       },
+       "maxItems": 20,
+       "type": "array"
+      }
+     },
+     "required": [
+      "task",
+      "decision"
+     ],
+     "type": "object"
+    },
+    "name": "task_triage"
+   },
+   {
+    "description": "Load the full instructions of a skill from your role's skill catalog by name (read-only). Skills are served by the runtime; never read .ai/skills files directly.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "name": {
+       "maxLength": 100,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "name"
+     ],
+     "type": "object"
+    },
+    "name": "load_skill"
+   },
+   {
+    "description": "Propose a memory note, relation or status change; persistence is decided by the memory module.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "content": {
+       "additionalProperties": {},
+       "propertyNames": {
+        "type": "string"
+       },
+       "type": "object"
+      },
+      "kind": {
+       "enum": [
+        "note",
+        "relation",
+        "contradiction",
+        "status-change"
+       ],
+       "type": "string"
+      },
+      "rationale": {
+       "maxLength": 2000,
+       "minLength": 1,
+       "type": "string"
+      },
+      "target": {
+       "pattern": "^(prj|dec|asm|que|evd|cpt|prf)-[0-9a-z][0-9a-z-]{2,62}$",
+       "type": "string"
+      }
+     },
+     "required": [
+      "kind",
+      "rationale",
+      "content"
+     ],
+     "type": "object"
+    },
+    "name": "memory_propose"
+   }
+  ],
+  "implementer": [
+   {
+    "description": "Read a text file inside the read scope. Optional 1-based line offset and line limit.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "limit": {
+       "maximum": 20000,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "offset": {
+       "maximum": 9007199254740991,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "path": {
+       "maxLength": 1024,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "type": "object"
+    },
+    "name": "read_file"
+   },
+   {
+    "description": "Search file contents with a regular expression under a directory in the read scope; prints path:line:text.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "case_insensitive": {
+       "default": false,
+       "type": "boolean"
+      },
+      "glob": {
+       "maxLength": 200,
+       "minLength": 1,
+       "type": "string"
+      },
+      "max_results": {
+       "default": 200,
+       "maximum": 2000,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "path": {
+       "default": ".",
+       "maxLength": 1024,
+       "minLength": 1,
+       "type": "string"
+      },
+      "pattern": {
+       "maxLength": 500,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ],
+     "type": "object"
+    },
+    "name": "search"
+   },
+   {
+    "description": "List a directory inside the read scope. Directories end with '/', links with '@' and are not followed.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "depth": {
+       "default": 1,
+       "maximum": 4,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "max_entries": {
+       "default": 500,
+       "maximum": 5000,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "path": {
+       "default": ".",
+       "maxLength": 1024,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "type": "object"
+    },
+    "name": "list_dir"
+   },
+   {
+    "description": "Show the git status, separating changes inside the task's write scope from the user's or other tasks' changes.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {},
+     "type": "object"
+    },
+    "name": "git_status"
+   },
+   {
+    "description": "Show the working tree (or staged) diff for paths inside the read scope; forbidden paths are excluded.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "context_lines": {
+       "default": 3,
+       "maximum": 50,
+       "minimum": 0,
+       "type": "integer"
+      },
+      "paths": {
+       "default": [],
+       "items": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+       },
+       "maxItems": 100,
+       "type": "array"
+      },
+      "staged": {
+       "default": false,
+       "type": "boolean"
+      }
+     },
+     "type": "object"
+    },
+    "name": "git_diff"
+   },
+   {
+    "description": "Apply a unified diff to owned files; every touched path states its expected pre-image sha256 (null for new files).",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "expected": {
+       "additionalProperties": {
+        "anyOf": [
+         {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ]
+       },
+       "propertyNames": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+       },
+       "type": "object"
+      },
+      "patch": {
+       "maxLength": 4194304,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "patch",
+      "expected"
+     ],
+     "type": "object"
+    },
+    "name": "apply_patch"
+   },
+   {
+    "description": "Create a file, or overwrite one whose current sha256 matches expected_digest. Owned paths only; written atomically.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "content": {
+       "maxLength": 4194304,
+       "type": "string"
+      },
+      "expected_digest": {
+       "anyOf": [
+        {
+         "pattern": "^sha256:[0-9a-f]{64}$",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "path": {
+       "maxLength": 1024,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ],
+     "type": "object"
+    },
+    "name": "write_file"
+   },
+   {
+    "description": "Run a program with argv (no shell string), cwd, environment and timeout inside the sandbox.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "argv": {
+       "items": {
+        "maxLength": 32768,
+        "type": "string"
+       },
+       "maxItems": 1024,
+       "minItems": 1,
+       "type": "array"
+      },
+      "cwd": {
+       "default": ".",
+       "maxLength": 1024,
+       "minLength": 1,
+       "type": "string"
+      },
+      "env": {
+       "additionalProperties": {
+        "maxLength": 32768,
+        "type": "string"
+       },
+       "default": {},
+       "propertyNames": {
+        "maxLength": 128,
+        "type": "string"
+       },
+       "type": "object"
+      },
+      "stdin": {
+       "maxLength": 1048576,
+       "type": "string"
+      },
+      "timeout_ms": {
+       "maximum": 600000,
+       "minimum": 100,
+       "type": "integer"
+      }
+     },
+     "required": [
+      "argv"
+     ],
+     "type": "object"
+    },
+    "name": "exec"
+   },
+   {
+    "description": "Finish the attempt: report status, summary and evidence per acceptance criterion (tool call ids from this attempt). Call it once, last.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "acceptance_evidence": {
+       "default": [],
+       "items": {
+        "additionalProperties": false,
+        "properties": {
+         "criterion_id": {
+          "pattern": "^AC-[1-9]\\d*$",
+          "type": "string"
+         },
+         "evidence": {
+          "items": {
+           "additionalProperties": false,
+           "properties": {
+            "digest": {
+             "pattern": "^sha256:[0-9a-f]{64}$",
+             "type": "string"
+            },
+            "kind": {
+             "enum": [
+              "tool-call",
+              "test-run",
+              "artifact",
+              "file",
+              "event",
+              "review"
+             ],
+             "type": "string"
+            },
+            "produced_by": {
+             "enum": [
+              "worker",
+              "reviewer",
+              "orchestrator",
+              "user"
+             ],
+             "type": "string"
+            },
+            "ref": {
+             "minLength": 1,
+             "type": "string"
+            }
+           },
+           "required": [
+            "kind",
+            "ref",
+            "produced_by"
+           ],
+           "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+         }
+        },
+        "required": [
+         "criterion_id",
+         "evidence"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      },
+      "commands_run": {
+       "default": [],
+       "items": {
+        "additionalProperties": false,
+        "properties": {
+         "command": {
+          "minLength": 1,
+          "type": "string"
+         },
+         "evidence": {
+          "additionalProperties": false,
+          "properties": {
+           "digest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+           },
+           "kind": {
+            "enum": [
+             "tool-call",
+             "test-run",
+             "artifact",
+             "file",
+             "event",
+             "review"
+            ],
+            "type": "string"
+           },
+           "produced_by": {
+            "enum": [
+             "worker",
+             "reviewer",
+             "orchestrator",
+             "user"
+            ],
+            "type": "string"
+           },
+           "ref": {
+            "minLength": 1,
+            "type": "string"
+           }
+          },
+          "required": [
+           "kind",
+           "ref",
+           "produced_by"
+          ],
+          "type": "object"
+         },
+         "exit_code": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+         }
+        },
+        "required": [
+         "command",
+         "exit_code",
+         "evidence"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      },
+      "decisions_made": {
+       "default": [],
+       "items": {
+        "minLength": 1,
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "recommended_context_updates": {
+       "default": [],
+       "items": {
+        "minLength": 1,
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "root_cause": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "skipped_checks": {
+       "default": [],
+       "items": {
+        "additionalProperties": false,
+        "properties": {
+         "check": {
+          "minLength": 1,
+          "type": "string"
+         },
+         "reason": {
+          "minLength": 1,
+          "type": "string"
+         }
+        },
+        "required": [
+         "check",
+         "reason"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      },
+      "status": {
+       "enum": [
+        "completed",
+        "partial",
+        "failed",
+        "blocked",
+        "needs_context"
+       ],
+       "type": "string"
+      },
+      "summary": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "unresolved_risks": {
+       "default": [],
+       "items": {
+        "minLength": 1,
+        "type": "string"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "status",
+      "summary"
+     ],
+     "type": "object"
+    },
+    "name": "task_report"
+   },
+   {
+    "description": "Load the full instructions of a skill from your role's skill catalog by name (read-only). Skills are served by the runtime; never read .ai/skills files directly.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "name": {
+       "maxLength": 100,
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "name"
+     ],
+     "type": "object"
+    },
+    "name": "load_skill"
+   },
+   {
+    "description": "Propose a memory note, relation or status change; persistence is decided by the memory module.",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "properties": {
+      "content": {
+       "additionalProperties": {},
+       "propertyNames": {
+        "type": "string"
+       },
+       "type": "object"
+      },
+      "kind": {
+       "enum": [
+        "note",
+        "relation",
+        "contradiction",
+        "status-change"
+       ],
+       "type": "string"
+      },
+      "rationale": {
+       "maxLength": 2000,
+       "minLength": 1,
+       "type": "string"
+      },
+      "target": {
+       "pattern": "^(prj|dec|asm|que|evd|cpt|prf)-[0-9a-z][0-9a-z-]{2,62}$",
+       "type": "string"
+      }
+     },
+     "required": [
+      "kind",
+      "rationale",
+      "content"
+     ],
+     "type": "object"
+    },
+    "name": "memory_propose"
+   }
+  ]
+ },
+ "packets": {
+  "attempt1": {
+   "acceptance_criteria": [
+    {
+     "id": "AC-1",
+     "statement": "add(a,b) çıkarma yerine a + b döndürür; mevcut export ve fonksiyon imzası korunur."
+    },
+    {
+     "id": "AC-2",
+     "statement": "node check.mjs sıfır çıkış koduyla tamamlanır ve stdout üzerinde ok yazdırır; check.mjs değiştirilmez."
+    }
+   ],
+   "context": {
+    "created_at": "2026-09-23T00:52:35.210Z",
+    "sources": [
+     {
+      "digest": "sha256:1a3fc642b8afca3b5e9f2f0b784d7d2bad205683aff9a2364b1d45daf9947005",
+      "path": "check.mjs"
+     },
+     {
+      "digest": "sha256:75cfacb7faac086c50b23ac4b29a709eb8680999e6756f620ca76d42aba07cab",
+      "path": "src-add.mjs"
+     }
+    ]
+   },
+   "decisions": [
+    "Assumption: Kaynak ve kontrol dosyaları planlama sırasında okundu; hata tek operatörle sınırlı.",
+    "Assumption: Node.js worker çalışma ortamında kullanılabilir; değilse engel açıkça raporlanacak.",
+    "Assumption: Geniş test/build veya tarayıcı doğrulaması bu sınırlı değişiklik için gerekli değil."
+   ],
+   "expected_report": [
+    "summary",
+    "acceptance_evidence",
+    "commands_run",
+    "decisions_made",
+    "skipped_checks",
+    "unresolved_risks"
+   ],
+   "isolation": "worktree",
+   "kind": "full",
+   "known_facts": [],
+   "limits": {
+    "max_steps": 15,
+    "max_wall_time_seconds": 600
+   },
+   "model_tier": "fast_worker",
+   "non_goals": [],
+   "objective": "src-add.mjs dosyasında doğrulanmış hatayı minimal değişiklikle düzelt: add(a,b) şu anda a - b döndürüyor, a + b döndürmeli. Yalnızca src-add.mjs değiştir; check.mjs dosyasını değiştirme. check.mjs add(2,3) sonucunun 5 olduğunu kontrol edip ok yazdırıyor. Geniş keşif veya ek altyapı gerekmiyor. Tam diff ve komut çıkışı/çıkış koduyla raporla.",
+   "open_questions": [],
+   "plan_digest": "sha256:04c1adfce504d41a573dde57430127eef1521daf7116b78a9f5eca94e7055d04",
+   "plan_id": "plan_01M35VYXCAE3GV80TGSMBKG6R9",
+   "plan_version": 1,
+   "relevant_symbols": [],
+   "risk": "standard",
+   "role": "implementer",
+   "run_id": "run_01M35VYXAC79ST06QZBAFGWT1S",
+   "schema_version": 2,
+   "scope": {
+    "forbidden_paths": [],
+    "owned_paths": [
+     "src-add.mjs"
+    ],
+    "read_paths": [
+     "src-add.mjs",
+     "check.mjs"
+    ]
+   },
+   "stop_conditions": [
+    "A change outside owned_paths is required",
+    "A cited source changed since the packet was created",
+    "The acceptance criteria cannot be met without widening scope"
+   ],
+   "task_id": "task_01M35W0280FQM3H0FM7ACC9456",
+   "verification": {
+    "commands": [
+     "node check.mjs"
+    ]
+   },
+   "why": {
+    "plan_reference": "plan_01M35VYXCAE3GV80TGSMBKG6R9@1#fix-add",
+    "user_goal": "src-add.mjs içindeki add fonksiyonunu doğru toplama yapacak şekilde düzeltmek; node check.mjs komutunun başarıyla 'ok' yazdırmasını sağlamak."
+   },
+   "write_mode": "owned-paths"
+  },
+  "attempt2": {
+   "acceptance_criteria": [
+    {
+     "id": "AC-1",
+     "statement": "add(a,b) çıkarma yerine a + b döndürür; mevcut export ve fonksiyon imzası korunur."
+    },
+    {
+     "id": "AC-2",
+     "statement": "node check.mjs sıfır çıkış koduyla tamamlanır ve stdout üzerinde ok yazdırır; check.mjs değiştirilmez."
+    }
+   ],
+   "context": {
+    "created_at": "2026-09-23T00:53:15.780Z",
+    "sources": [
+     {
+      "digest": "sha256:1a3fc642b8afca3b5e9f2f0b784d7d2bad205683aff9a2364b1d45daf9947005",
+      "path": "check.mjs"
+     },
+     {
+      "digest": "sha256:75cfacb7faac086c50b23ac4b29a709eb8680999e6756f620ca76d42aba07cab",
+      "path": "src-add.mjs"
+     }
+    ]
+   },
+   "decisions": [
+    "Assumption: Kaynak ve kontrol dosyaları planlama sırasında okundu; hata tek operatörle sınırlı.",
+    "Assumption: Node.js worker çalışma ortamında kullanılabilir; değilse engel açıkça raporlanacak.",
+    "Assumption: Geniş test/build veya tarayıcı doğrulaması bu sınırlı değişiklik için gerekli değil.",
+    "Revision note: Previous attempt att_01M35W028HQDMDWRKAH1SWM69H reported needs_context: src-add.mjs kaynak dosyası paket oluşturulduktan sonra değişmiş görünüyor; beklenen özet sha256:75cfacb7faac086c50b23ac4b29a709eb8680999e6756f620ca76d42aba07cab iken mevcut özet sha256:9754d7df2ae14e039a2c9d9e856de170a329aaac5ffd5373edeefa57d631f78c. Güvenli biçimde değişiklik uygulanmadı.",
+    "Revision note: Orchestrator guidance: Orkestratör src-add.mjs dosyasını yeniden okudu: hâlâ export function add(a, b) { return a - b; } içeriyor. Yeni denemede dosyayı ve güncel pre-image özetini yeniden al; eski paketteki özeti yeniden kullanma. İçerik aynı hedef hatayı taşıyorsa güncel pre-image üzerinden sadece - operatörünü + yap; başka değişiklikleri koru. Dosya zaten düzeltilmişse gereksiz değişiklik yapma. Ardından node check.mjs çalıştır, gerçek stdout ve çıkış kodunu raporla; check.mjs değişmesin. Önceki raporun AC-2 evidenced etiketi geçersiz: komut atlanmış. Kriterleri yalnızca gerçek diff/okuma ve çalıştırma kanıtıyla sağlandı olarak işaretle. Yeniden eşzamanlı değişiklik veya farklı içerik varsa üzerine yazmadan engeli bildir.",
+    "Revision note: Previous attempt skipped node check.mjs: src-add.mjs için kaynak bütünlüğü doğrulanamadı ve değişiklik uygulanamadı.",
+    "Revision note: Previous attempt left unresolved: Paket ile mevcut src-add.mjs arasındaki farkın nedeni bilinmiyor."
+   ],
+   "expected_report": [
+    "summary",
+    "acceptance_evidence",
+    "commands_run",
+    "decisions_made",
+    "skipped_checks",
+    "unresolved_risks"
+   ],
+   "isolation": "worktree",
+   "kind": "full",
+   "known_facts": [],
+   "limits": {
+    "max_steps": 15,
+    "max_wall_time_seconds": 600
+   },
+   "model_tier": "fast_worker",
+   "non_goals": [],
+   "objective": "src-add.mjs dosyasında doğrulanmış hatayı minimal değişiklikle düzelt: add(a,b) şu anda a - b döndürüyor, a + b döndürmeli. Yalnızca src-add.mjs değiştir; check.mjs dosyasını değiştirme. check.mjs add(2,3) sonucunun 5 olduğunu kontrol edip ok yazdırıyor. Geniş keşif veya ek altyapı gerekmiyor. Tam diff ve komut çıkışı/çıkış koduyla raporla.",
+   "open_questions": [],
+   "plan_digest": "sha256:04c1adfce504d41a573dde57430127eef1521daf7116b78a9f5eca94e7055d04",
+   "plan_id": "plan_01M35VYXCAE3GV80TGSMBKG6R9",
+   "plan_version": 1,
+   "relevant_symbols": [],
+   "risk": "standard",
+   "role": "implementer",
+   "run_id": "run_01M35VYXAC79ST06QZBAFGWT1S",
+   "schema_version": 2,
+   "scope": {
+    "forbidden_paths": [],
+    "owned_paths": [
+     "src-add.mjs"
+    ],
+    "read_paths": [
+     "src-add.mjs",
+     "check.mjs"
+    ]
+   },
+   "stop_conditions": [
+    "A change outside owned_paths is required",
+    "A cited source changed since the packet was created",
+    "The acceptance criteria cannot be met without widening scope"
+   ],
+   "task_id": "task_01M35W0280FQM3H0FM7ACC9456",
+   "verification": {
+    "commands": [
+     "node check.mjs"
+    ]
+   },
+   "why": {
+    "plan_reference": "plan_01M35VYXCAE3GV80TGSMBKG6R9@1#fix-add",
+    "user_goal": "src-add.mjs içindeki add fonksiyonunu doğru toplama yapacak şekilde düzeltmek; node check.mjs komutunun başarıyla 'ok' yazdırmasını sağlamak."
+   },
+   "write_mode": "owned-paths"
+  }
+ },
+ "sessions": {
+  "orchestrator": {
+   "session": "ses_01M35VYXAD1FV85KNBDDSY3DF5",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "text": "Goal: src-add.mjs içindeki add fonksiyonu yanlış hesaplıyor. Düzelt; node check.mjs 'ok' yazdırmalı.\n\nWorkspace: C:\\temp\\syn-smoke (policy mode autonomous).\n\nPlan the work as a task DAG for workers. Explore first when the codebase is unknown; for a small, well-located change an explorer is optional.\n\nWorker role capabilities (enforced by the harness policy; plans that ignore them are rejected):\n- explorer: reads and searches inside its read_paths; runs NO commands (no exec tool): its verification must be empty and every acceptance criterion must be satisfiable by reading files.\n- implementer: changes only its owned_paths in an isolated workspace; runs its exact verification commands and vetted build/test commands.\n- debugger: root-cause analysis; without owned_paths it changes nothing and runs only its exact verification commands and read-only commands; with owned_paths it may fix like an implementer.\n- reviewer: configures the mandatory independent review of the standard/high-risk tasks it depends on (reviewer tier, extra criteria, extra verification); it never changes files and runs no attempt of its own.\nPut every command that must run (tests, `node check.mjs`, builds) in the verification of a task whose role can run it, usually the implementer that owns the change.\n\nCall the `plan_propose` tool with the plan (if the tool is unavailable, reply with exactly one ```json block holding it):\n{\"goal\": \"...\", \"risk\": \"trivial|standard|high-risk\", \"scope\": [\"src/**\"],\n \"tasks\": [{\"key\": \"kebab-key\", \"role\": \"explorer|implementer|debugger|reviewer\", \"objective\": \"...\", \"depends_on\": [],\n   \"owned_paths\": [], \"read_paths\": [], \"risk\": \"trivial|standard|high-risk\", \"model_tier\": \"complex_worker|fast_worker|orchestrator\",\n   \"acceptance_criteria\": [{\"id\": \"AC-1\", \"statement\": \"...\"}], \"verification\": [\"pnpm test\"]}],\n \"expected_external_effects\": [], \"verification\": [], \"budget\": {\"max_wall_time_seconds\": 1800, \"max_steps\": 100}, \"assumptions\": []}\nRules: explorers and reviewers own no paths; two tasks without a dependency between them never own overlapping paths;\nnobody owns the whole workspace, .git or .synorch. An explorer runs no commands: its verification is empty and its criteria are about what to find by reading;\nput commands on the implementer that owns the change. A reviewer task depends on the standard/high-risk task(s) it reviews. You never implement anything yourself.",
+       "type": "text"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "arguments": {
+        "path": "src-add.mjs"
+       },
+       "name": "read_file",
+       "provider_call_id": "call_xaeTosMDF0N7ci5sj7svAWkm",
+       "tool_call_id": "call_01M35VZ0B2BY7EMR5RM3ZVBNW5",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_xaeTosMDF0N7ci5sj7svAWkm",
+       "text": "export function add(a, b) {\n  return a - b;\n}\n",
+       "tool_call_id": "call_01M35VZ0B2BY7EMR5RM3ZVBNW5",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "arguments": {
+        "path": "check.mjs"
+       },
+       "name": "read_file",
+       "provider_call_id": "call_SOJwsPhwvYWQfvcYDMn7ESZl",
+       "tool_call_id": "call_01M35VZ2HCY9D39X4XRTAS460W",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_SOJwsPhwvYWQfvcYDMn7ESZl",
+       "text": "import { add } from './src-add.mjs';\nif (add(2, 3) !== 5) { console.error('add is wrong'); process.exit(1); }\nconsole.log('ok');\n",
+       "tool_call_id": "call_01M35VZ2HCY9D39X4XRTAS460W",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "name": "task-conductor"
+       },
+       "name": "load_skill",
+       "provider_call_id": "call_LIlnFGPzUrUPdQ8dBO8iEMrS",
+       "tool_call_id": "call_01M35VZ56RSHEFJW8S5TTYHGNX",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_LIlnFGPzUrUPdQ8dBO8iEMrS",
+       "text": "Skill task-conductor (.ai/skills/task-conductor/SKILL.md):\n# Task Conductor\n\nRead the complete brief before deciding how much process it needs. Optimize jointly for correctness, elapsed time and context cost. More ceremony is not more correctness when it does not reduce a concrete risk.\n\n## When this applies\n\n- A brief carries several deliverables, or spans more than one concern, module or owner.\n- Work must be ordered by dependency before anyone can be dispatched.\n- A workstream needs a specialist skill and it is unclear which one.\n\n## When it does not\n\n- A one-line or single-step fix. A typo or a literal replacement needs no orchestra.\n- An approved task graph already exists and nothing about it changed.\n- You are the worker. Conducting is the orchestrator's authority, not a worker's.\n\n## Required inputs\n\n- The brief in full, including constraints and acceptance criteria the user stated.\n- The project snapshot: modules, commands, boundaries and registered skills.\n- Existing task evidence, so no workstream rediscovers what is already verified.\n\n## Ceremony by tier\n\nClassify with `.ai/protocols/core/orchestration.md`, then spend accordingly.\n\n- **trivial**: one fast worker. Keep the approved plan to one compact paragraph. Do not create workstreams, run broad discovery, request independent review or open a browser. Verify the exact diff and the changed claim only.\n- **standard**: the smallest capable worker set, focused discovery and targeted automated checks. Add independent review only when the diff is material or crosses a boundary.\n- **high-risk**: complex workers, explicit decomposition, strong verification and independent review.\n\nEscalate the tier when scope expands, a check fails unexpectedly, verified facts contradict the plan, or the change crosses a risk boundary. Record the reason. Never lower a tier merely to save cost.\n\n## Procedure\n\n1. Extract deliverables, actions, constraints, acceptance criteria and affected surfaces.\n2. Trace existing code and contracts before designing. Do not invent layers the brief does not need.\n3. Split into dependency-ordered workstreams. Each has one goal, explicit ownership and one done-check.\n4. Load zero to two genuinely matching skills per workstream, just in time. Available skills are not active or loaded skills. Discover `.ai/skills/project/*/SKILL.md` through frontmatter metadata only; consider only `status: active`, and load a generated skill's body only when its metadata matches the workstream. Never auto-load `proposed`, `stale` or `retired` skills.\n5. Execute one dependency layer at a time. Parallelize only independent ownership.\n6. Verify each acceptance claim with the cheapest sufficient evidence, then stop.\n\n## Context economy\n\nStart from the registered project snapshot and reuse verified evidence. Give workers minimal task packets, never the full conversation or the complete skill library. Load project-registered technology skills only when relevant to the owned work. Treat generated project skills as a separate, frontmatter-discovered namespace rather than registry entries. Search the available catalog only when the current task has an unmet specialist need.\n\n## Tools\n\nRead, list and search across the product tree; frontmatter-only generated-skill discovery; just-in-time body loading from active matches, registry and then catalog; control-plane writes under `.ai/tasks/**`. The conductor never edits product files and never dispatches work the user has not approved.\n\n## Verification\n\nClimb only as far as `.ai/protocols/core/verification.md` requires for the tier, and stop at the first sufficient evidence. The decomposition itself is sound when every workstream has one owner, no two concurrent workstreams own the same path, every dependency points backwards, and every acceptance claim names the evidence that will settle it.\n\n## Stop and escalate\n\nReturn to the user when the brief admits two materially different approaches, when a workstream needs authority the plan did not grant, when two workstreams contend for the same files, or when a named acceptance criterion cannot be settled by static, automated or structural evidence — in that last case explain the gap and obtain approval before opening a browser. Never create a browser or screenshot harness as a side effect of another task.\n\n## Output contract\n\nA dependency-ordered task graph: workstreams with owner, model tier, owned paths, acceptance criteria, loaded skills and done-check, plus the risk tier and its justification. On completion, report what changed, which claims were verified, which checks were intentionally not run, loaded skills, defaults chosen and remaining uncertainty. An honestly bounded verification gap is better than an expensive unrelated check.",
+       "tool_call_id": "call_01M35VZ56RSHEFJW8S5TTYHGNX",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "Hata açık: `add`, toplama yerine çıkarma yapıyor. Davranış değişikliği olduğu için işi `standard` olarak planlıyorum: hızlı bir implementer yalnızca `src-add.mjs` dosyasını düzeltecek ve `node check.mjs` çalıştıracak; ardından bağımsız inceleme yapılacak. Test dosyası değiştirilmeyecek.\n\n",
+       "type": "text"
+      },
+      {
+       "arguments": {
+        "assumptions": [
+         "Kaynak ve kontrol dosyaları planlama sırasında okundu; hata tek operatörle sınırlı.",
+         "Node.js worker çalışma ortamında kullanılabilir; değilse engel açıkça raporlanacak.",
+         "Geniş test/build veya tarayıcı doğrulaması bu sınırlı değişiklik için gerekli değil."
+        ],
+        "budget": {
+         "max_steps": 30,
+         "max_wall_time_seconds": 600
+        },
+        "expected_external_effects": [],
+        "goal": "src-add.mjs içindeki add fonksiyonunu doğru toplama yapacak şekilde düzeltmek; node check.mjs komutunun başarıyla 'ok' yazdırmasını sağlamak.",
+        "risk": "standard",
+        "scope": [
+         "src-add.mjs",
+         "check.mjs"
+        ],
+        "tasks": [
+         {
+          "acceptance_criteria": [
+           {
+            "id": "AC-1",
+            "statement": "add(a,b) çıkarma yerine a + b döndürür; mevcut export ve fonksiyon imzası korunur."
+           },
+           {
+            "id": "AC-2",
+            "statement": "node check.mjs sıfır çıkış koduyla tamamlanır ve stdout üzerinde ok yazdırır; check.mjs değiştirilmez."
+           }
+          ],
+          "depends_on": [],
+          "key": "fix-add",
+          "model_tier": "fast_worker",
+          "objective": "src-add.mjs dosyasında doğrulanmış hatayı minimal değişiklikle düzelt: add(a,b) şu anda a - b döndürüyor, a + b döndürmeli. Yalnızca src-add.mjs değiştir; check.mjs dosyasını değiştirme. check.mjs add(2,3) sonucunun 5 olduğunu kontrol edip ok yazdırıyor. Geniş keşif veya ek altyapı gerekmiyor. Tam diff ve komut çıkışı/çıkış koduyla raporla.",
+          "owned_paths": [
+           "src-add.mjs"
+          ],
+          "read_paths": [
+           "src-add.mjs",
+           "check.mjs"
+          ],
+          "risk": "standard",
+          "role": "implementer",
+          "verification": [
+           "node check.mjs"
+          ]
+         },
+         {
+          "acceptance_criteria": [
+           {
+            "id": "AC-3",
+            "statement": "Bağımsız inceleme düzeltmenin hedef toplama davranışını sağladığını, kapsam dışı değişiklik olmadığını ve başarılı check.mjs kanıtını doğrular."
+           }
+          ],
+          "depends_on": [
+           "fix-add"
+          ],
+          "key": "review-add",
+          "model_tier": "complex_worker",
+          "objective": "fix-add değişikliğini bağımsız incele: yalnızca hedef aritmetik operatörün düzeltildiğini, export/imzanın korunduğunu, check.mjs değişmeden kaldığını ve node check.mjs için başarılı çalışma kanıtını doğrula.",
+          "owned_paths": [],
+          "read_paths": [
+           "src-add.mjs",
+           "check.mjs"
+          ],
+          "risk": "standard",
+          "role": "reviewer",
+          "verification": []
+         }
+        ],
+        "verification": [
+         "Implementer: node check.mjs; çıkış kodu 0 ve stdout ok.",
+         "Bağımsız inceleme: minimal diff ve komut kanıtı."
+        ]
+       },
+       "name": "plan_propose",
+       "provider_call_id": "call_NUHGfGljj0LyuVFaNVY7rttW",
+       "tool_call_id": "call_01M35VZV0NRB9GW3AJJT6SGQG8",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_NUHGfGljj0LyuVFaNVY7rttW",
+       "text": "plan accepted; the runtime now approves it under the autonomous policy (audited). Do not ask for approval in text. End your turn now.",
+       "tool_call_id": "call_01M35VZV0NRB9GW3AJJT6SGQG8",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "Plan onaylandı. Görev DAG’ı:\n\n1. **`fix-add` — fast_worker:** Yalnızca `src-add.mjs` içindeki `a - b` ifadesini `a + b` olarak düzeltir. `node check.mjs` komutunun çıkış kodunun `0`, çıktısının `ok` olduğunu doğrular.\n2. **`review-add` — complex_worker:** İlk göreve bağlı bağımsız inceleme; değişikliğin kapsamını ve test kanıtını kontrol eder.\n\n**Risk:** `standard` — fonksiyon davranışı değişiyor. `check.mjs` değiştirilmeyecek. Henüz uygulama veya test sonucu yok.",
+       "type": "text"
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "text": "Worker report needs your decision (plan v1, goal: src-add.mjs içindeki add fonksiyonu yanlış hesaplıyor. Düzelt; node check.mjs 'ok' yazdırmalı.).\n\nTask fix-add task_01M35W0280FQM3H0FM7ACC9456 (implementer, standard, owned-paths), attempt 1, reported needs_context.\n\nSummary: src-add.mjs kaynak dosyası paket oluşturulduktan sonra değişmiş görünüyor; beklenen özet sha256:75cfacb7faac086c50b23ac4b29a709eb8680999e6756f620ca76d42aba07cab iken mevcut özet sha256:9754d7df2ae14e039a2c9d9e856de170a329aaac5ffd5373edeefa57d631f78c. Güvenli biçimde değişiklik uygulanmadı.\n\nAcceptance criteria:\n- AC-1 [evidenced]: add(a,b) çıkarma yerine a + b döndürür; mevcut export ve fonksiyon imzası korunur.\n- AC-2 [evidenced]: node check.mjs sıfır çıkış koduyla tamamlanır ve stdout üzerinde ok yazdırır; check.mjs değiştirilmez.\n\nSkipped checks:\n- node check.mjs: src-add.mjs için kaynak bütünlüğü doğrulanamadı ve değişiklik uygulanamadı.\n\nUnresolved:\n- Paket ile mevcut src-add.mjs arasındaki farkın nedeni bilinmiyor.\n\nTasks:\n- fix-add task_01M35W0280FQM3H0FM7ACC9456 (implementer, standard, owns src-add.mjs): needs_context - src-add.mjs kaynak dosyası paket oluşturulduktan sonra değişmiş görünüyor; beklenen özet sha256:75cfacb7faac086c50b23ac4b29a709eb8680999e6756f620ca76d42aba07cab iken mevcut özet sha256:9754d7df2ae14e039a2c9d9e856de170a329aaac5ffd5373edeefa57d631f78c. Güvenli biçimde değişiklik uygulanmadı.\n- review-add task_01M35W02806VKVXN32HQV6N085 (reviewer, standard, owns nothing): draft\n\nCall task_triage exactly once for task fix-add:\n- accept is not possible: this task writes files, so it completes only through verification and independent review.\n- retry: one more attempt (1 left) with your guidance; only when a new attempt can succeed.\n- fail: stop this task (its dependents are cancelled); add replacement work with task_spawn if the goal still needs it.\nYou never implement anything yourself. Do not ask the user. End your turn after deciding.",
+       "type": "text"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "arguments": {
+        "path": "src-add.mjs"
+       },
+       "name": "read_file",
+       "provider_call_id": "call_OuJeNsiJfeVEUxy0Io406S92",
+       "tool_call_id": "call_01M35W0WEVRJ0QRMA2T62D0SET",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_OuJeNsiJfeVEUxy0Io406S92",
+       "text": "export function add(a, b) {\n  return a - b;\n}\n",
+       "tool_call_id": "call_01M35W0WEVRJ0QRMA2T62D0SET",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "arguments": {
+        "decision": "retry",
+        "guidance": "Orkestratör src-add.mjs dosyasını yeniden okudu: hâlâ export function add(a, b) { return a - b; } içeriyor. Yeni denemede dosyayı ve güncel pre-image özetini yeniden al; eski paketteki özeti yeniden kullanma. İçerik aynı hedef hatayı taşıyorsa güncel pre-image üzerinden sadece - operatörünü + yap; başka değişiklikleri koru. Dosya zaten düzeltilmişse gereksiz değişiklik yapma. Ardından node check.mjs çalıştır, gerçek stdout ve çıkış kodunu raporla; check.mjs değişmesin. Önceki raporun AC-2 evidenced etiketi geçersiz: komut atlanmış. Kriterleri yalnızca gerçek diff/okuma ve çalıştırma kanıtıyla sağlandı olarak işaretle. Yeniden eşzamanlı değişiklik veya farklı içerik varsa üzerine yazmadan engeli bildir.",
+        "task": "fix-add"
+       },
+       "name": "task_triage",
+       "provider_call_id": "call_1NcamsPyqi4XsqJpYINM4RMd",
+       "tool_call_id": "call_01M35W14QPXZKVVZ9BPHMEXD7P",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_1NcamsPyqi4XsqJpYINM4RMd",
+       "text": "decision for fix-add recorded: retry. End your turn now.",
+       "tool_call_id": "call_01M35W14QPXZKVVZ9BPHMEXD7P",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "**Yeniden deneme kararı verdim.** Dosyayı tekrar okudum; hatalı `a - b` ifadesi hâlâ mevcut. Worker, güncel dosya özetini kullanarak minimal düzeltmeyi yapacak ve `node check.mjs` komutunu gerçekten çalıştıracak.\n\nÖnceki denemede komut çalıştırılmadığından test başarısı doğrulanmış sayılmıyor."
+      }
+     ]
+    }
+   ],
+   "before": {
+    "requests": 8,
+    "estimated_tokens": [
+     6563,
+     6592,
+     6641,
+     7849,
+     8501,
+     9116,
+     9145,
+     9361
+    ],
+    "fixed_prefix_tokens": [
+     5955,
+     5955,
+     5955,
+     5955,
+     5955,
+     5955,
+     5955,
+     5955
+    ],
+    "provider_input_tokens": [
+     5166,
+     5213,
+     5287,
+     6264,
+     7002,
+     7764,
+     7811,
+     8068
+    ],
+    "provider_cache_read_tokens": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   }
+  },
+  "attempt1": {
+   "session": "ses_01M35W02GZT01351HBRV5BTCB7",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "text": "Task task_01M35W0280FQM3H0FM7ACC9456 (implementer): src-add.mjs dosyasında doğrulanmış hatayı minimal değişiklikle düzelt: add(a,b) şu anda a - b döndürüyor, a + b döndürmeli. Yalnızca src-add.mjs değiştir; check.mjs dosyasını değiştirme. check.mjs add(2,3) sonucunun 5 olduğunu kontrol edip ok yazdırıyor. Geniş keşif veya ek altyapı gerekmiyor. Tam diff ve komut çıkışı/çıkış koduyla raporla.\n\nYour task packet is in the system context; use it first and read only inside its scope.\n\nYou may change only: src-add.mjs.\n\nIf the packet is insufficient or a cited source changed, stop and report status needs_context.\n\nWhen you are done, call the `task_report` tool exactly once as your last action with your status, summary and\nacceptance_evidence per criterion (evidence kinds: tool-call|test-run|file|artifact|event; ref = a tool call id from this attempt, produced_by: worker).\nChanged files and the diff are computed by the harness; do not list them. If the tool is unavailable, reply with the same object in one ```json block.",
+       "type": "text"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "name": "implementation"
+       },
+       "name": "load_skill",
+       "provider_call_id": "call_ltFw9miIPGiZxDewg8Bwot7B",
+       "tool_call_id": "call_01M35W04ZNEZ9FYXB8HYX2J9BP",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_ltFw9miIPGiZxDewg8Bwot7B",
+       "text": "Skill implementation (.ai/skills/implementation/SKILL.md):\n# Implementation\n\n## When this applies\n\n- A packet grants one objective, explicit ownership and acceptance criteria.\n- A follow-up delta packet extends an already approved objective.\n\n## When it does not\n\n- Ownership or criteria are missing or ambiguous. Ask first.\n- The cause of the required behavior is unknown; that is `debugging`.\n- The work is judging someone else's diff; that is `code-review`.\n\n## Required inputs\n\n- The objective and its acceptance criteria.\n- Owned, readable and forbidden paths.\n- Verification commands and the browser policy for this task.\n- Verified facts and decisions, each with provenance.\n\n## Procedure\n\n1. Confirm objective, criteria and ownership are unambiguous; ask rather than guess.\n2. Read the current content of every file you will change. Never edit from remembered or summarized content.\n3. Match the file you are in: its naming, layering, error handling and test style are the local standard, whatever your own preference.\n4. Change one behavior at a time, keeping the tree compiling or passing between units.\n5. Verify incrementally at the cheapest sufficient rung of `.ai/protocols/core/verification.md`; do not batch every check to the end.\n6. Add or update only the tests an acceptance criterion requires, and make each new test fail before the change.\n7. Re-read the complete diff hunk by hunk, deleting anything the objective does not require.\n8. Assemble the completion packet, including the checks deliberately skipped and the decisions taken.\n\n## Tools\n\nEdits limited to owned paths; reads limited to the read scope; the verification commands the packet names; the project's registered technology skills when they match the owned work. Never add a dependency, a tool or a browser harness as a side effect.\n\n## Verification\n\nEach criterion maps to named evidence. Every new test fails before the change and passes after it. The diff carries no unrelated formatting, no debug output and no file outside ownership. Every command is recorded with its outcome.\n\n## Stop and escalate\n\nStop when the objective requires a forbidden path, when criteria conflict with the code, when a packet fact proves false, when a required check fails for a cause outside the objective, when the change is outgrowing the approved scope, or when the only remaining idea repeats an approach that already failed.\n\n## Output contract\n\nA completion packet matching `.ai/schemas/completion-packet.schema.json`: status, summary, changed_files, commands_run with outcomes, checks_skipped, loaded_skills, decisions_made and unresolved_risks.",
+       "tool_call_id": "call_01M35W04ZNEZ9FYXB8HYX2J9BP",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "arguments": {
+        "path": "src-add.mjs"
+       },
+       "name": "read_file",
+       "provider_call_id": "call_HrtrzT8n6MUDizijBarVGGJT",
+       "tool_call_id": "call_01M35W06XHAAXFE8WVEM7N5G68",
+       "type": "tool_call"
+      },
+      {
+       "arguments": {
+        "path": "check.mjs"
+       },
+       "name": "read_file",
+       "provider_call_id": "call_F3L3Rqiuk69KzClCpOIfKa0P",
+       "tool_call_id": "call_01M35W06XHR6T2RYCG1CWT2MGT",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_HrtrzT8n6MUDizijBarVGGJT",
+       "text": "export function add(a, b) {\r\n  return a - b;\r\n}\r\n",
+       "tool_call_id": "call_01M35W06XHAAXFE8WVEM7N5G68",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_F3L3Rqiuk69KzClCpOIfKa0P",
+       "text": "import { add } from './src-add.mjs';\r\nif (add(2, 3) !== 5) { console.error('add is wrong'); process.exit(1); }\r\nconsole.log('ok');\r\n",
+       "tool_call_id": "call_01M35W06XHR6T2RYCG1CWT2MGT",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "expected": {
+         "src-add.mjs": "sha256:75cfacb7faac086c50b23ac4b29a709eb8680999e6756f620ca76d42aba07cab"
+        },
+        "patch": "*** Begin Patch\n*** Update File: src-add.mjs\n@@\n export function add(a, b) {\n-  return a - b;\n+  return a + b;\n }\n*** End Patch"
+       },
+       "name": "apply_patch",
+       "provider_call_id": "call_e1kVvptxQvxTyK7xgzXtFQCf",
+       "tool_call_id": "call_01M35W0BCGH5DF8Z2HRQ2DZ7QV",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": true,
+       "provider_call_id": "call_e1kVvptxQvxTyK7xgzXtFQCf",
+       "text": "Error [invalid_arguments]: the patch contains no file changes",
+       "tool_call_id": "call_01M35W0BCGH5DF8Z2HRQ2DZ7QV",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "content": "export function add(a, b) {\n  return a + b;\n}\n",
+        "expected_digest": "sha256:75cfacb7faac086c50b23ac4b29a709eb8680999e6756f620ca76d42aba07cab",
+        "path": "src-add.mjs"
+       },
+       "name": "write_file",
+       "provider_call_id": "call_w7I3Xafc0C8TlUgCO0r76dq2",
+       "tool_call_id": "call_01M35W0EHSM10GF0CPQ31NS93B",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": true,
+       "provider_call_id": "call_w7I3Xafc0C8TlUgCO0r76dq2",
+       "text": "Error [stale_precondition]: src-add.mjs changed: expected sha256:75cfacb7faac086c50b23ac4b29a709eb8680999e6756f620ca76d42aba07cab, found sha256:9754d7df2ae14e039a2c9d9e856de170a329aaac5ffd5373edeefa57d631f78c",
+       "tool_call_id": "call_01M35W0EHSM10GF0CPQ31NS93B",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "acceptance_evidence": [
+         {
+          "criterion_id": "AC-1",
+          "evidence": [
+           {
+            "kind": "tool-call",
+            "produced_by": "worker",
+            "ref": "functions.write_file çağrısı stale_precondition hatası verdi; değişiklik uygulanmadı."
+           }
+          ]
+         },
+         {
+          "criterion_id": "AC-2",
+          "evidence": [
+           {
+            "kind": "tool-call",
+            "produced_by": "worker",
+            "ref": "functions.read_file check.mjs çıktısı kontrolün add(2,3) === 5 ve ok yazdırdığını gösterdi; ancak kaynak değişikliği uygulanamadığı için komut çalıştırılmadı."
+           }
+          ]
+         }
+        ],
+        "commands_run": [],
+        "decisions_made": [
+         "Paketin stop condition kuralı gereği, kaynak özeti uyuşmadığı için uygulama durduruldu."
+        ],
+        "skipped_checks": [
+         {
+          "check": "node check.mjs",
+          "reason": "src-add.mjs için kaynak bütünlüğü doğrulanamadı ve değişiklik uygulanamadı."
+         }
+        ],
+        "status": "needs_context",
+        "summary": "src-add.mjs kaynak dosyası paket oluşturulduktan sonra değişmiş görünüyor; beklenen özet sha256:75cfacb7faac086c50b23ac4b29a709eb8680999e6756f620ca76d42aba07cab iken mevcut özet sha256:9754d7df2ae14e039a2c9d9e856de170a329aaac5ffd5373edeefa57d631f78c. Güvenli biçimde değişiklik uygulanmadı.",
+        "unresolved_risks": [
+         "Paket ile mevcut src-add.mjs arasındaki farkın nedeni bilinmiyor."
+        ]
+       },
+       "name": "task_report",
+       "provider_call_id": "call_wh3ckllWE5bDra8fLAhTM6Oq",
+       "tool_call_id": "call_01M35W0QB0ZZW3SPFTJ3D0VAZK",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_wh3ckllWE5bDra8fLAhTM6Oq",
+       "text": "report recorded; end your turn now",
+       "tool_call_id": "call_01M35W0QB0ZZW3SPFTJ3D0VAZK",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": []
+    }
+   ],
+   "before": {
+    "requests": 6,
+    "estimated_tokens": [
+     5975,
+     6649,
+     6724,
+     6813,
+     6920,
+     7222
+    ],
+    "fixed_prefix_tokens": [
+     5713,
+     5713,
+     5713,
+     5713,
+     5713,
+     5713
+    ],
+    "provider_input_tokens": [
+     5080,
+     5669,
+     5800,
+     5947,
+     6160,
+     6601
+    ],
+    "provider_cache_read_tokens": [
+     0,
+     0,
+     0,
+     4608,
+     0,
+     5632
+    ]
+   }
+  },
+  "attempt2": {
+   "session": "ses_01M35W1A4NJE9CW0MKGJTGAHX5",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "text": "Task task_01M35W0280FQM3H0FM7ACC9456 (implementer): src-add.mjs dosyasında doğrulanmış hatayı minimal değişiklikle düzelt: add(a,b) şu anda a - b döndürüyor, a + b döndürmeli. Yalnızca src-add.mjs değiştir; check.mjs dosyasını değiştirme. check.mjs add(2,3) sonucunun 5 olduğunu kontrol edip ok yazdırıyor. Geniş keşif veya ek altyapı gerekmiyor. Tam diff ve komut çıkışı/çıkış koduyla raporla.\n\nYour task packet is in the system context; use it first and read only inside its scope.\n\nYou may change only: src-add.mjs.\n\nIf the packet is insufficient or a cited source changed, stop and report status needs_context.\n\nWhen you are done, call the `task_report` tool exactly once as your last action with your status, summary and\nacceptance_evidence per criterion (evidence kinds: tool-call|test-run|file|artifact|event; ref = a tool call id from this attempt, produced_by: worker).\nChanged files and the diff are computed by the harness; do not list them. If the tool is unavailable, reply with the same object in one ```json block.",
+       "type": "text"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "name": "implementation"
+       },
+       "name": "load_skill",
+       "provider_call_id": "call_o7xM6kzloJa2SZARATvmSQqC",
+       "tool_call_id": "call_01M35W1CFS4JK4PGNARRBG2GJD",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_o7xM6kzloJa2SZARATvmSQqC",
+       "text": "Skill implementation (.ai/skills/implementation/SKILL.md):\n# Implementation\n\n## When this applies\n\n- A packet grants one objective, explicit ownership and acceptance criteria.\n- A follow-up delta packet extends an already approved objective.\n\n## When it does not\n\n- Ownership or criteria are missing or ambiguous. Ask first.\n- The cause of the required behavior is unknown; that is `debugging`.\n- The work is judging someone else's diff; that is `code-review`.\n\n## Required inputs\n\n- The objective and its acceptance criteria.\n- Owned, readable and forbidden paths.\n- Verification commands and the browser policy for this task.\n- Verified facts and decisions, each with provenance.\n\n## Procedure\n\n1. Confirm objective, criteria and ownership are unambiguous; ask rather than guess.\n2. Read the current content of every file you will change. Never edit from remembered or summarized content.\n3. Match the file you are in: its naming, layering, error handling and test style are the local standard, whatever your own preference.\n4. Change one behavior at a time, keeping the tree compiling or passing between units.\n5. Verify incrementally at the cheapest sufficient rung of `.ai/protocols/core/verification.md`; do not batch every check to the end.\n6. Add or update only the tests an acceptance criterion requires, and make each new test fail before the change.\n7. Re-read the complete diff hunk by hunk, deleting anything the objective does not require.\n8. Assemble the completion packet, including the checks deliberately skipped and the decisions taken.\n\n## Tools\n\nEdits limited to owned paths; reads limited to the read scope; the verification commands the packet names; the project's registered technology skills when they match the owned work. Never add a dependency, a tool or a browser harness as a side effect.\n\n## Verification\n\nEach criterion maps to named evidence. Every new test fails before the change and passes after it. The diff carries no unrelated formatting, no debug output and no file outside ownership. Every command is recorded with its outcome.\n\n## Stop and escalate\n\nStop when the objective requires a forbidden path, when criteria conflict with the code, when a packet fact proves false, when a required check fails for a cause outside the objective, when the change is outgrowing the approved scope, or when the only remaining idea repeats an approach that already failed.\n\n## Output contract\n\nA completion packet matching `.ai/schemas/completion-packet.schema.json`: status, summary, changed_files, commands_run with outcomes, checks_skipped, loaded_skills, decisions_made and unresolved_risks.",
+       "tool_call_id": "call_01M35W1CFS4JK4PGNARRBG2GJD",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "arguments": {
+        "path": "src-add.mjs"
+       },
+       "name": "read_file",
+       "provider_call_id": "call_f5x4NAJ2IN6pgGzvxxweUvUa",
+       "tool_call_id": "call_01M35W1EKEH2HMA8SVH7X0QDY7",
+       "type": "tool_call"
+      },
+      {
+       "arguments": {
+        "path": "check.mjs"
+       },
+       "name": "read_file",
+       "provider_call_id": "call_TGdhhBJKTheDSKQqg7eASN7I",
+       "tool_call_id": "call_01M35W1EKENNW74K88N6K9A8C7",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_f5x4NAJ2IN6pgGzvxxweUvUa",
+       "text": "export function add(a, b) {\r\n  return a - b;\r\n}\r\n",
+       "tool_call_id": "call_01M35W1EKEH2HMA8SVH7X0QDY7",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_TGdhhBJKTheDSKQqg7eASN7I",
+       "text": "import { add } from './src-add.mjs';\r\nif (add(2, 3) !== 5) { console.error('add is wrong'); process.exit(1); }\r\nconsole.log('ok');\r\n",
+       "tool_call_id": "call_01M35W1EKENNW74K88N6K9A8C7",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "expected": {
+         "src-add.mjs": "sha256:9754d7df2ae14e039a2c9d9e856de170a329aaac5ffd5373edeefa57d631f78c"
+        },
+        "patch": "*** Begin Patch\n*** Update File: src-add.mjs\n@@\n export function add(a, b) {\n-  return a - b;\n+  return a + b;\n }\n*** End Patch"
+       },
+       "name": "apply_patch",
+       "provider_call_id": "call_PFXratrCnAf27QG2gr3q3Zqm",
+       "tool_call_id": "call_01M35W1M4SHM9JCYAG0R0X4VWP",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": true,
+       "provider_call_id": "call_PFXratrCnAf27QG2gr3q3Zqm",
+       "text": "Error [invalid_arguments]: the patch contains no file changes",
+       "tool_call_id": "call_01M35W1M4SHM9JCYAG0R0X4VWP",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "content": "export function add(a, b) {\n  return a + b;\n}\n",
+        "expected_digest": "sha256:9754d7df2ae14e039a2c9d9e856de170a329aaac5ffd5373edeefa57d631f78c",
+        "path": "src-add.mjs"
+       },
+       "name": "write_file",
+       "provider_call_id": "call_0AS5lBZ6gOQTmcp6BN2XjPFD",
+       "tool_call_id": "call_01M35W1QNZZ901FM485CA8ZVZP",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_0AS5lBZ6gOQTmcp6BN2XjPFD",
+       "text": "updated src-add.mjs (46 bytes)",
+       "tool_call_id": "call_01M35W1QNZZ901FM485CA8ZVZP",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "argv": [
+         "node",
+         "check.mjs"
+        ]
+       },
+       "name": "exec",
+       "provider_call_id": "call_TDpvuzlqxoRWLaGyj3k88lGA",
+       "tool_call_id": "call_01M35W1V2QJ99KP9FRA3P3826W",
+       "type": "tool_call"
+      },
+      {
+       "arguments": {
+        "context_lines": 3,
+        "paths": [
+         "src-add.mjs"
+        ]
+       },
+       "name": "git_diff",
+       "provider_call_id": "call_keIQRUFkY6dDuA8gABEYxGUJ",
+       "tool_call_id": "call_01M35W1V2QESCYCMQ3JP5MCNW8",
+       "type": "tool_call"
+      },
+      {
+       "arguments": {
+        "path": "src-add.mjs"
+       },
+       "name": "read_file",
+       "provider_call_id": "call_E38E9594xQySTkDky2Y97ciS",
+       "tool_call_id": "call_01M35W1V2QCMVY1TWCXPQD0NS3",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_TDpvuzlqxoRWLaGyj3k88lGA",
+       "text": "$ node check.mjs\nexit code 0\n--- stdout ---\nok\n",
+       "tool_call_id": "call_01M35W1V2QJ99KP9FRA3P3826W",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_keIQRUFkY6dDuA8gABEYxGUJ",
+       "text": "diff --git a/src-add.mjs b/src-add.mjs\nindex 29b3851..7d65831 100644\n--- a/src-add.mjs\n+++ b/src-add.mjs\n@@ -1,3 +1,3 @@\n export function add(a, b) {\n-  return a - b;\n+  return a + b;\n }\n",
+       "tool_call_id": "call_01M35W1V2QESCYCMQ3JP5MCNW8",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_E38E9594xQySTkDky2Y97ciS",
+       "text": "export function add(a, b) {\n  return a + b;\n}\n",
+       "tool_call_id": "call_01M35W1V2QCMVY1TWCXPQD0NS3",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "name": "verification"
+       },
+       "name": "load_skill",
+       "provider_call_id": "call_71PqxPloZGFJ6XurK9BRJyNy",
+       "tool_call_id": "call_01M35W1X8JFBZQRW0K9MXN2DGC",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_71PqxPloZGFJ6XurK9BRJyNy",
+       "text": "Skill verification (.ai/skills/verification/SKILL.md):\n# Verification\n\n## When this applies\n\n- A worker is about to report an objective complete.\n- An orchestrator must judge whether a returned claim is supported.\n- A reviewer must confirm that reported evidence proves what it claims.\n\n## When it does not\n\n- Nothing has changed yet. Verification proves claims, it does not explore.\n- The claim is about taste or design; that is `code-review`.\n- The evidence was produced and read in this same step and nothing has changed since.\n\n## Required inputs\n\n- Each approved acceptance criterion, stated as a claim.\n- The diff, and the commands the packet authorizes.\n- The risk tier, which sets whether independent review is required.\n\n## Procedure\n\n1. List the approved criteria; each becomes exactly one claim to prove.\n2. For each claim, name the observation that would show it false.\n3. Choose the lowest rung of `.ai/protocols/core/verification.md` that can produce that observation; `references/evidence-ladder.md` maps common claims to sufficient evidence.\n4. Run the check exactly as recorded, and read its output rather than its exit code.\n5. Confirm the check had subjects: a suite that matched zero tests proves nothing.\n6. Stop at the first sufficient evidence for each claim; do not climb further for reassurance.\n7. Record every command, working directory and outcome, plus every check not run and why.\n8. Order independent review where the protocol requires it for this tier.\n\n## Tools\n\nDiff, search and static inspection; the type, lint and test commands the project already declares. A headed browser stays opt-in under the protocol, and no verification step may create test or browser infrastructure that did not exist.\n\n## Verification\n\nVerify the verification: every criterion has exactly one named evidence; no command was paraphrased; no pass is reported for a check that did not execute; the skipped list is explicit rather than implied.\n\n## Stop and escalate\n\nEscalate when a check fails for a cause outside the change, when no available evidence can settle a criterion, when proving a claim would require new infrastructure or a browser, or when the evidence contradicts the completion claim.\n\n## Output contract\n\nA verification record: claim to command to outcome, the rung reached for each claim, checks skipped with reasons, and an explicit statement naming any criterion that remains unproven.",
+       "tool_call_id": "call_01M35W1X8JFBZQRW0K9MXN2DGC",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "",
+       "type": "thinking"
+      },
+      {
+       "arguments": {
+        "acceptance_evidence": [
+         {
+          "criterion_id": "AC-1",
+          "evidence": [
+           {
+            "kind": "file",
+            "produced_by": "worker",
+            "ref": "functions.read_file src-add.mjs (post-change): add returns a + b"
+           },
+           {
+            "kind": "tool-call",
+            "produced_by": "worker",
+            "ref": "functions.git_diff src-add.mjs: - a - b / + a + b"
+           }
+          ]
+         },
+         {
+          "criterion_id": "AC-2",
+          "evidence": [
+           {
+            "kind": "test-run",
+            "produced_by": "worker",
+            "ref": "functions.exec node check.mjs: exit code 0; stdout ok"
+           }
+          ]
+         }
+        ],
+        "commands_run": [
+         {
+          "command": "node check.mjs",
+          "evidence": {
+           "kind": "test-run",
+           "produced_by": "worker",
+           "ref": "functions.exec node check.mjs: exit code 0; stdout ok"
+          },
+          "exit_code": 0
+         }
+        ],
+        "decisions_made": [
+         "Yalnızca src-add.mjs güncellendi; mevcut export ve fonksiyon imzası korundu.",
+         "Değişiklik, doğrulanmış güncel pre-image üzerinden yalnızca çıkarma operatörünün toplama operatörüyle değiştirilmesiyle sınırlandı."
+        ],
+        "skipped_checks": [
+         {
+          "check": "Geniş test/build/lint ve tarayıcı doğrulaması",
+          "reason": "Bu tek operatörlü değişiklik ve packet kapsamı için node check.mjs yeterli."
+         }
+        ],
+        "status": "completed",
+        "summary": "src-add.mjs içindeki tek operatör değişikliğiyle add(a,b) artık a + b döndürüyor. check.mjs değiştirilmedi; doğrulama komutu stdout üzerinde \"ok\" yazdırarak sıfır çıkış koduyla tamamlandı.",
+        "unresolved_risks": []
+       },
+       "name": "task_report",
+       "provider_call_id": "call_nY1ztHsQKTY3iGfZGumVbPrl",
+       "tool_call_id": "call_01M35W290E8BDF06BFP1JT959F",
+       "type": "tool_call"
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "is_error": false,
+       "provider_call_id": "call_nY1ztHsQKTY3iGfZGumVbPrl",
+       "text": "report recorded; end your turn now",
+       "tool_call_id": "call_01M35W290E8BDF06BFP1JT959F",
+       "type": "tool_result"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": []
+    }
+   ],
+   "before": {
+    "requests": 8,
+    "estimated_tokens": [
+     6326,
+     7000,
+     7075,
+     7164,
+     7227,
+     7345,
+     7966,
+     8295
+    ],
+    "fixed_prefix_tokens": [
+     6064,
+     6064,
+     6064,
+     6064,
+     6064,
+     6064,
+     6064,
+     6064
+    ],
+    "provider_input_tokens": [
+     5498,
+     6090,
+     6221,
+     6463,
+     6626,
+     6877,
+     7408,
+     7963
+    ],
+    "provider_cache_read_tokens": [
+     0,
+     0,
+     0,
+     0,
+     5632,
+     0,
+     4608,
+     0
+    ]
+   }
+  }
+ }
+}

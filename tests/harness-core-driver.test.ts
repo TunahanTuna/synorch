@@ -10,6 +10,8 @@ import {
   digestOf,
   ProviderFailure,
   StoreFailure,
+  type ContextBuilder,
+  type ContextBuildInput,
   type EventReadItem,
   type EventStore,
   type ModelRequest,
@@ -36,6 +38,7 @@ import {
   textTurn,
   toolTurn,
   type BackendScript,
+  type RecordingGatewayOptions,
   type ScriptStep,
   type ToolHandler,
 } from "../src/harness/core/testing.ts";
@@ -60,7 +63,13 @@ interface Harness {
 
 async function harness(
   adapter: ScriptedModelAdapter | ScriptedBackendAdapter,
-  options: { readonly handler?: ToolHandler; readonly wrap?: (store: EventStore) => EventStore; readonly driver?: AgentDriverOptions } = {},
+  options: {
+    readonly handler?: ToolHandler;
+    readonly wrap?: (store: EventStore) => EventStore;
+    readonly driver?: AgentDriverOptions;
+    readonly gateway?: RecordingGatewayOptions;
+    readonly context?: (base: ContextBuilder) => ContextBuilder;
+  } = {},
 ): Promise<Harness> {
   const home = await mkdtemp(path.join(tmpdir(), "synorch-driver-"));
   homes.push(home);
@@ -74,12 +83,13 @@ async function harness(
   const events = options.wrap?.(store) ?? store;
   const blobs = createBlobStore(home);
   const registry = testRegistry();
-  const gateway = new RecordingToolGateway(events, options.handler);
+  const gateway = new RecordingToolGateway(events, options.handler, options.gateway);
+  const base = createLogContextBuilder(events, blobs, registry);
   const driver = createAgentDriver({
     events,
     blobs,
     router: testRouter(adapter),
-    context: createLogContextBuilder(events, blobs, registry),
+    context: options.context?.(base) ?? base,
     tools: registry,
     gateway,
     credentials: async () => testCredential(),
@@ -556,3 +566,89 @@ function prefixStore(store: EventStore, lastSeq: number): EventStore {
     close: async () => undefined,
   };
 }
+
+test("AC-d1 a succeeded terminal tool ends the turn: the rest of the batch is skipped and no further request is sent", async () => {
+  const adapter = new ScriptedModelAdapter([
+    lazy((request) =>
+      toolTurn(request, [
+        { id: "p-report", name: "task_report", arguments: { status: "completed", summary: "done" } },
+        { id: "p-read", name: "read_file", arguments: { path: "src/a.ts" } },
+      ]),
+    ),
+    lazy((request) => textTurn(request, "never requested")),
+  ]);
+  const h = await harness(adapter, { gateway: { refs: true, terminalTools: ["task_report"] } });
+  const outcome = await h.driver.runTurn(h.input(), new AbortController().signal);
+  assert.equal(outcome.outcome, "completed");
+  assert.equal(outcome.steps, 1);
+  assert.equal(adapter.requests.length, 1, "no model request after the terminal tool");
+  assert.deepEqual(h.gateway.invocations.map((call) => call.tool_name), ["task_report"], "the call after the terminal tool never runs");
+  const events = await h.log();
+  const results = ofType(events, "message/recorded").flatMap((event) => (event.data.role === "tool" ? (event.data.message?.content ?? []) : []));
+  assert.deepEqual(
+    results.map((part) => (part.type === "tool_result" ? [part.provider_call_id, part.is_error, part.text] : [])),
+    [
+      ["p-report", false, "[#1] ran task_report"],
+      ["p-read", true, "not executed: turn ended by task_report"],
+    ],
+  );
+  assert.equal(ofType(events, "step/ended").at(-1)?.data.state, "settled");
+  assert.equal(ofType(events, "turn/ended").at(-1)?.data.outcome, "completed");
+});
+
+test("AC-d1 a rejected terminal tool call does not end the turn (the model gets its correction round)", async () => {
+  const adapter = new ScriptedModelAdapter([
+    lazy((request) => toolTurn(request, [{ id: "p-report", name: "task_report", arguments: {} }])),
+    lazy((request) => toolTurn(request, [{ id: "p-report-2", name: "task_report", arguments: { status: "completed", summary: "fixed" } }])),
+    lazy((request) => textTurn(request, "never requested")),
+  ]);
+  let first = true;
+  const handler: ToolHandler = async (request) => {
+    if (first) {
+      first = false;
+      return { status: "error", text: "", truncated: false, redactions: 0, error: { code: "invalid_arguments", message: "AC-1: evidence #9 not found" } };
+    }
+    return { status: "ok", text: `ran ${request.tool_name}`, truncated: false, redactions: 0 };
+  };
+  const h = await harness(adapter, { handler, gateway: { refs: true, terminalTools: ["task_report"] } });
+  const outcome = await h.driver.runTurn(h.input(), new AbortController().signal);
+  assert.equal(outcome.outcome, "completed");
+  assert.equal(adapter.requests.length, 2, "one correction request, then the accepted report ends the turn");
+  const correction = adapter.requests[1]?.messages.at(-1)?.content[0];
+  assert.ok(correction?.type === "tool_result" && correction.text === "[#1] Error [invalid_arguments]: AC-1: evidence #9 not found");
+});
+
+test("AC-d2 the backend bridge returns and records the same [#n]-rendered text as the model path", async () => {
+  let seen = "";
+  const adapter = new ScriptedBackendAdapter(async function* (tools) {
+    yield { type: "backend_init", backend_session_id: "b", model_id: "test-backend" as never, auth_source: "subscription", tools: ["mcp__synorch__read_file"] };
+    seen = (await tools.call({ providerCallId: "toolu_1", name: "mcp__synorch__read_file", arguments: { path: "src/a.ts" } }, new AbortController().signal)).text;
+    yield {
+      type: "done",
+      stop_reason: "stop",
+      message: { role: "assistant", content: [{ type: "tool_call", provider_call_id: "toolu_1", name: "read_file", arguments: { path: "src/a.ts" } }] },
+    };
+  });
+  const h = await harness(adapter, { gateway: { refs: true } });
+  assert.equal((await h.driver.runTurn(h.input(), new AbortController().signal)).outcome, "completed");
+  assert.equal(seen, "[#1] ran read_file");
+  const recorded = ofType(await h.log(), "message/recorded").find((event) => event.data.role === "tool")?.data.message?.content[0];
+  assert.ok(recorded?.type === "tool_result" && recorded.text === "[#1] ran read_file");
+});
+
+test("AC-d7 the driver passes TurnInput.sources through to the context builder unchanged", async () => {
+  const adapter = new ScriptedModelAdapter([lazy((request) => textTurn(request, "ok")), lazy((request) => textTurn(request, "ok"))]);
+  const seen: ContextBuildInput[] = [];
+  const spy = (base: ContextBuilder): ContextBuilder => ({
+    build: (input, signal) => {
+      seen.push(input);
+      return base.build(input, signal);
+    },
+  });
+  const h = await harness(adapter, { context: spy });
+  const sources = async () => undefined;
+  await h.driver.runTurn(h.input({ sources }), new AbortController().signal);
+  assert.equal(seen[0]?.sources, sources);
+  await h.driver.runTurn(h.input(), new AbortController().signal);
+  assert.equal("sources" in (seen[1] ?? {}), false, "no reader is invented when the turn has none");
+});

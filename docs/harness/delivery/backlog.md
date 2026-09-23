@@ -27,6 +27,7 @@
 - Entegrasyon → ürün sahibi denemesi.
 
 ### K1.5 — Ürün sahibinin 2026-09-24 istekleri (K1 testinden hemen sonra) ⭐
+0. **K1.6 (sürüyor, 2026-09-24):** Claude Code tarzı izin modları (ask/auto/full/plan, Shift+Tab, `/permissions`, reddetmek yerine sor); reviewer'lar workspace'in tamamını okur; görevler arası ölçütler entegrasyon review'una; ret yerine revize turu; çift basılan pano düzeltmesi.
 0. K1 artıkları: görselleri modele gerçekten gönder (adapter image parts), footer kotasına worker kullanımını kat, `/review` → ADR-09 dispatchReview, `/commit` seçici staging, orkestrasyon 1 saat tool timeout.
 1. **Çoklu sağlayıcı model görünürlüğü:** OpenAI ve Anthropic'e birlikte giriş yapıldıysa `/model` ve model seçici **her iki sağlayıcının modellerini** gösterir (ChatGPT aboneliği modelleri + Claude modelleri; Claude aboneliği Claude Code köprüsüyle, API key ile doğrudan).
 2. **Çapraz sağlayıcılı orkestrasyon:** tier/rol başına farklı sağlayıcı seçilebilir. Örnek hedef yapılandırma:

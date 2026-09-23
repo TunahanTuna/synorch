@@ -14,6 +14,8 @@ Bu dosyalar **uygulama konfigürasyonu değil tasarım girdisidir**. Kabul edilm
 
 > Ek (2026-09-23): ürün konuşma öncelikli bir kodlama ajanına dönüyor. Önce [harness-context.yaml](./harness-context.yaml), [ürün gereksinimleri](./foundation/product-requirements.md), [ADR-21](./decisions/ADR-21-conversation-first-runtime.md), [konuşma runtime tasarımı](./design/conversation-runtime.md), [TUI deneyimi](./design/tui-experience.md) ve [uygulama planı §8](./implementation-plan.md#8-konuşma-öncelikli-çekirdek-dalgası) okunur.
 
+> **Plan ve hatırlatıcılar:** [delivery/backlog.md](./delivery/backlog.md) — sıradaki dalgalar, ürün sahibi istekleri ve yapılacaklar listesi.
+
 ## Okuma sırası
 
 1. [Mevcut durum ve kapsam](./foundation/current-state.md)

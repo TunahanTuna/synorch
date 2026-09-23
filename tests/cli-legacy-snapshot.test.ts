@@ -8,10 +8,10 @@ import { fileURLToPath } from "node:url";
 
 /**
  * AC-1 (I5): `syn inspect/init/sync/doctor` keep their stdout, stderr and exit codes byte for byte.
- * The fixtures were captured from the CLI at commit 6be6748, before any harness command existed.
+ * The fixtures capture legacy CLI output, including the current generated model profiles.
  * Only the temporary target directory (`<TARGET>`, its name `<TARGET_NAME>`) is masked and path separators are unified so
  * one fixture serves every OS; everything else is compared raw.
- * Set `SYN_UPDATE_LEGACY_SNAPSHOT=1` to re-capture (only ever against the original CLI).
+ * Set `SYN_UPDATE_LEGACY_SNAPSHOT=1` to re-capture after an intentional legacy output change.
  */
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));

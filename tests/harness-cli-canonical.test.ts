@@ -183,7 +183,7 @@ test("a missing orchestrator route suggests the canonical model profile", async 
     const io = capture({ cwd: sandbox.workspace });
     const code = await runHarnessCommand(["run", "anything", "--plain"], io.io, overridesFor(sandbox));
     assert.equal(code, 2);
-    assert.match(io.stderr(), /the canonical model profiles suggest openai\/gpt-6-astra or anthropic\/fable-5/);
+    assert.match(io.stderr(), /the canonical model profiles suggest openai\/gpt-6-sol or anthropic\/opus-5\.5/);
   } finally {
     await sandbox.cleanup();
   }

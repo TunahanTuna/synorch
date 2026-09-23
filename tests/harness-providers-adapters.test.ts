@@ -347,3 +347,60 @@ test("stream grammar checker rejects malformed sequences", () => {
   assert.ok(checkStreamGrammar([start, { type: "tool_call_delta", index: 0, provider_call_id: "a", arguments_fragment: "{" }, { type: "done", stop_reason: "stop", message: { role: "assistant", content: [] } }]).length > 0);
   assert.ok(checkStreamGrammar([start, { type: "done", stop_reason: "stop", message: { role: "assistant", content: [] } }, { type: "text_delta", index: 0, text: "late" }]).length > 0);
 });
+
+const CACHE = { key: "ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4:implementer", stable_system_blocks: 2 };
+
+function cachedRequestOverrides() {
+  const block = (id: string, source: "harness" | "constitution" | "packet" | "memory", trust: "harness" | "project" | "untrusted", text: string) => ({ id, source, trust, text, digest: digestText(text) });
+  return {
+    max_output_tokens: 1000,
+    cache: CACHE,
+    system: [
+      block("harness:implementer", "harness", "harness", "Harness rules."),
+      block("constitution", "constitution", "project", "Constitution."),
+      block("packet:task_1", "packet", "project", "Task packet."),
+      block("memory:m1", "memory", "untrusted", "Recalled note."),
+    ],
+    tools: [
+      { name: "read_file", description: "Read a workspace file", input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+      { name: "task_report", description: "Finish the attempt", input_schema: { type: "object", properties: { status: { type: "string" } }, required: ["status"] } },
+    ],
+    messages: [
+      { role: "user" as const, content: [{ type: "text" as const, text: "go" }] },
+      { role: "assistant" as const, content: [{ type: "tool_call" as const, provider_call_id: "toolu_1", name: "read_file", arguments: { path: "a" } }] },
+      { role: "tool" as const, content: [{ type: "tool_result" as const, tool_call_id: "call_01K5T3Q8Z4X9V2M6N7P0R1S2TD" as never, provider_call_id: "toolu_1", is_error: false, text: "[#1] a" }] },
+    ],
+  };
+}
+
+test("AC-d3 openai-chatgpt and openai-responses send prompt_cache_key from ModelRequest.cache, and nothing without it", async () => {
+  for (const [create, route] of [
+    [createOpenAIChatGPTAdapter, chatgptRoute],
+    [createOpenAIResponsesAdapter, responsesRoute],
+  ] as const) {
+    const fetch = fakeFetch(async () => sseResponse(await fixture("responses-text-and-tool.sse")));
+    await run(create({ fetch: fetch.fetch }), route, new AbortController().signal, { cache: CACHE });
+    await run(create({ fetch: fetch.fetch }), route);
+    const [cached, plain] = fetch.requests.map((request) => JSON.parse(request.body) as Record<string, unknown>);
+    assert.equal(cached?.prompt_cache_key, CACHE.key, route.adapter_id);
+    assert.equal("prompt_cache_key" in (plain ?? {}), false, `${route.adapter_id} sends no key without a cache hint`);
+    assert.equal(cached?.instructions, plain?.instructions, "the hint never changes what the model sees");
+  }
+});
+
+test("AC-d3 anthropic-messages puts cache_control after the tool list, the last stable system block and the newest history block (fixture)", async () => {
+  const fetch = fakeFetch(async () => sseResponse(await fixture("anthropic-max-tokens.sse")));
+  await run(createAnthropicMessagesAdapter({ fetch: fetch.fetch }), anthropicRoute, new AbortController().signal, cachedRequestOverrides());
+  const body = JSON.parse(fetch.requests[0]?.body ?? "{}") as Record<string, unknown>;
+  const expected = JSON.parse(await fixture("anthropic-cache-request.json")) as Record<string, unknown>;
+  assert.deepEqual({ system: body.system, tools: body.tools, messages: body.messages }, expected);
+  const breakpoints = JSON.stringify(body).split('"cache_control"').length - 1;
+  assert.ok(breakpoints <= 4, "Anthropic allows at most four cache breakpoints");
+
+  const plainFetch = fakeFetch(async () => sseResponse(await fixture("anthropic-max-tokens.sse")));
+  const { cache: _unused, ...uncached } = cachedRequestOverrides();
+  await run(createAnthropicMessagesAdapter({ fetch: plainFetch.fetch }), anthropicRoute, new AbortController().signal, uncached);
+  const plain = JSON.parse(plainFetch.requests[0]?.body ?? "{}") as Record<string, unknown>;
+  assert.equal(plain.system, "Harness rules.\n\nConstitution.\n\nTask packet.", "without a hint the system prompt stays one string");
+  assert.ok(!JSON.stringify(plain).includes("cache_control"));
+});

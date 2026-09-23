@@ -160,7 +160,7 @@ test("blocks are trust-ordered: harness, then project instructions, skills and p
   };
   const store = memoryStore([memory("evd-abc", "evidence", "stale", true), memory("dec-old", "decision", "superseded", false), memory("cpt-live", "concept", "active", false)]);
   const result = await builder({
-    instructions: { constitution: "Constitution text", protocols: [{ id: "core.orchestration", text: "Protocol text" }], roles: { implementer: "Repo role text" } },
+    instructions: { constitution: "Constitution text", protocols: [{ id: "core.verification", text: "Protocol text" }, { id: "core.orchestration", text: "Orchestration protocol" }], roles: { implementer: "Repo role text" } },
     skills,
     memory: { store, projectId: "proj-1234abcd", branch: "main" },
   }).build(input(packet()), new AbortController().signal);

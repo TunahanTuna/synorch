@@ -176,6 +176,8 @@ function buildBody(variant: Variant, request: ModelRequest): PreparedBody | { re
     stream: true,
     include: ["reasoning.encrypted_content"],
   };
+  // Prompt caching (ADR-20, F16): a key stable per session and role routes every step to the same cache.
+  if (request.cache !== undefined) body.prompt_cache_key = request.cache.key;
   if (request.reasoning_effort !== undefined) body.reasoning = { effort: request.reasoning_effort, summary: "auto" };
   if (request.max_output_tokens !== undefined) {
     if (variant.subscription) warnings.push("max_output_tokens is not sent to the ChatGPT backend");

@@ -101,6 +101,24 @@ function decodeThinkingOpaque(opaque: string): { signature?: string; redacted?: 
   }
 }
 
+const EPHEMERAL = { type: "ephemeral" } as const;
+
+/**
+ * Trusted instructions as text blocks: the first `cache.stable_system_blocks` blocks (byte-stable
+ * for the session) carry the `cache_control` breakpoint; the variable trusted blocks (packet)
+ * follow uncached. Untrusted blocks never enter `system`; they go to the first user message.
+ */
+function cachedSystem(request: ModelRequest): Block[] {
+  const stableCount = request.cache?.stable_system_blocks ?? 0;
+  const trusted = (blocks: typeof request.system) => blocks.filter((block) => block.trust !== "untrusted").map((block) => block.text);
+  const stable = trusted(request.system.slice(0, stableCount)).join("\n\n");
+  const rest = trusted(request.system.slice(stableCount)).join("\n\n");
+  const blocks: Block[] = [];
+  if (stable !== "") blocks.push({ type: "text", text: stable, cache_control: EPHEMERAL });
+  if (rest !== "") blocks.push({ type: "text", text: rest });
+  return blocks;
+}
+
 function buildMessagesBody(request: ModelRequest): Built | { readonly error: string } {
   const warnings: string[] = [];
   const { instructions, untrusted } = splitSystemBlocks(request.system);
@@ -150,10 +168,20 @@ function buildMessagesBody(request: ModelRequest): Built | { readonly error: str
     messages,
     stream: true,
   };
-  if (instructions !== "") body.system = instructions;
-  if (request.tools.length > 0) {
-    body.tools = request.tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema }));
+  const tools = request.tools.map((tool): Block => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema }));
+  if (request.cache === undefined) {
+    if (instructions !== "") body.system = instructions;
+  } else {
+    // Prompt caching (ADR-20): breakpoints after the tool list, after the last session-stable system
+    // block and after the newest history block, so each step reads the previous step's prefix.
+    const system = cachedSystem(request);
+    if (system.length > 0) body.system = system;
+    const lastTool = tools.at(-1);
+    if (lastTool !== undefined) lastTool.cache_control = EPHEMERAL;
+    const lastBlock = messages.at(-1)?.content.at(-1);
+    if (lastBlock !== undefined && lastBlock.type !== "thinking" && lastBlock.type !== "redacted_thinking") lastBlock.cache_control = EPHEMERAL;
   }
+  if (tools.length > 0) body.tools = tools;
   if (request.reasoning_effort !== undefined) {
     const budget = THINKING_BUDGETS[request.reasoning_effort];
     if (budget < maxTokens) body.thinking = { type: "enabled", budget_tokens: budget };

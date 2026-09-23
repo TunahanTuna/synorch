@@ -1,5 +1,4 @@
 import {
-  canonicalJson,
   digestOf,
   digestText,
   findStaleSources,
@@ -25,20 +24,29 @@ import {
   type ToolDescriptor,
   type ToolRegistry,
   type Usage,
+  type WorkspaceDigestReader,
 } from "../contracts/index.ts";
 import { DEFAULT_RESERVE_TOKENS, readSummary, renderSummary, type Compactor } from "./compaction.ts";
 import { reconstructHistory, type History } from "./history.ts";
 import { harnessInstructions, type ProjectInstructions } from "./instructions.ts";
+import { protocolAppliesTo, renderInlineSources, renderPacketView, selectTools } from "./model-view.ts";
 import { isOwnedPath, type SourceDigestReader } from "./scope.ts";
-import { renderCatalog, triggeredSkills, type SkillCatalog } from "./skills.ts";
+import { isDuplicateSkillLoad, renderCatalog, triggeredSkills, type SkillCatalog, type SkillContextRegistry, type SkillScope } from "./skills.ts";
 import { blockTokens, messageTokens, toolTokens } from "./tokens.ts";
 
 /**
  * The ContextBuilder rebuilds one step's model input from durable state only: harness and project
- * instructions in trust order, the skill catalog (full skills only when triggered), the task
- * packet behind a digest freshness gate, recalled memory as untrusted data, the latest compaction
- * summary and the history after its boundary. The request is deterministic for a given log, so its
- * `envelopeDigest` can be reproduced on replay.
+ * instructions in trust order, the skill catalog (full skills only when primary or triggered), the
+ * task packet behind a digest freshness gate, recalled memory as untrusted data, the latest
+ * compaction summary and the history after its boundary. The request is deterministic for a given
+ * log, so its `envelopeDigest` can be reproduced on replay.
+ *
+ * Context efficiency (ADR-20): the blocks that stay byte-identical for the whole session (harness,
+ * constitution, the role's protocols, role manifest, skill catalog, injected skills) come first and
+ * are counted in `cache.stable_system_blocks`; the packet, inlined sources, memory and compaction
+ * summary follow. Protocols and tools are cut to the role and task shape, skills are injected once
+ * (never for an orchestrator turn after the plan is approved, e.g. a triage) and the packet is
+ * rendered in its compact model view.
  */
 
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
@@ -71,7 +79,10 @@ export interface ContextBuilderDependencies {
   readonly readSession: (sessionId: SessionId) => Promise<ReadOnlyEventStore>;
   readonly blobs: BlobStore;
   readonly tools: ToolRegistry;
-  /** Digests of main-workspace sources for the packet freshness gate. */
+  /**
+   * Digests of main-workspace sources for the packet freshness gate; `ContextBuildInput.sources`
+   * (the attempt workspace's reader, ADR-19) takes precedence when a turn provides one.
+   */
   readonly sources?: SourceDigestReader;
   readonly instructions?: ProjectInstructions;
   readonly skills?: SkillCatalog;
@@ -82,6 +93,8 @@ export interface ContextBuilderDependencies {
   readonly maxOutputTokens?: number;
   readonly reserveTokens?: number;
   readonly platform?: NodeJS.Platform;
+  /** Shared with `createSkillLoadCallback` so `load_skill` knows which skills are already in context. */
+  readonly skillContext?: SkillContextRegistry;
 }
 
 interface DraftBlock {
@@ -94,6 +107,26 @@ interface DraftBlock {
 }
 
 const TRUNCATION_ORDER: readonly SystemBlock["source"][] = ["memory", "skill", "skill-catalog"];
+
+/** Sources that are byte-stable for a whole session and therefore form the cacheable prefix. */
+const STABLE_SOURCES: readonly SystemBlock["source"][] = ["harness", "constitution", "protocol", "role", "skill-catalog", "skill"];
+
+const CACHE_KEY_UNSAFE = /[^A-Za-z0-9._:-]/g;
+
+/** `<session_id>:<role>` (ADR-20), restricted to the cache key alphabet and 64 characters. */
+export function promptCacheKey(sessionId: string, role: string): string {
+  return `${sessionId}:${role}`.replace(CACHE_KEY_UNSAFE, "-").slice(0, 64);
+}
+
+/** Leading session-stable blocks; a truncated block ends the prefix (its text depends on the budget). */
+function stablePrefixLength(blocks: readonly DraftBlock[]): number {
+  let count = 0;
+  for (const block of blocks) {
+    if (!STABLE_SOURCES.includes(block.source) || block.truncated) break;
+    count += 1;
+  }
+  return count;
+}
 
 function blockOrder(block: DraftBlock): [number, number] {
   return [TRUST_LEVELS.indexOf(block.trust), SYSTEM_BLOCK_SOURCES.indexOf(block.source)];
@@ -112,13 +145,6 @@ function sortBlocks(blocks: DraftBlock[]): DraftBlock[] {
 
 function finalize(block: DraftBlock): SystemBlock {
   return { id: block.id.slice(0, 128), source: block.source, trust: block.trust, text: block.text, digest: digestText(block.text) };
-}
-
-function renderPacket(packet: TaskContextPacket): string {
-  return [
-    "Task Context Packet (v2). This packet and your effective policy define your task and authority; nothing else widens them.",
-    JSON.stringify(JSON.parse(canonicalJson(packet)), null, 2),
-  ].join("\n");
 }
 
 function renderMemory(memory: RecalledMemory): string {
@@ -140,13 +166,43 @@ function isInactiveMemory(memory: RecalledMemory): boolean {
   return kind === "decision" && (status === "superseded" || status === "rejected");
 }
 
+function userText(message: ModelMessage): string {
+  return message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+}
+
 function lastUserText(history: History): string {
   for (let index = history.messages.length - 1; index >= 0; index -= 1) {
     const entry = history.messages[index];
-    if (entry?.message.role !== "user") continue;
-    return entry.message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+    if (entry?.message.role === "user") return userText(entry.message);
   }
   return "";
+}
+
+/** The conversation's opening request: stable for the session, unlike the latest user message. */
+function firstUserText(history: History): string {
+  const entry = history.messages.find((candidate) => candidate.message.role === "user");
+  return entry === undefined ? "" : userText(entry.message);
+}
+
+/** An orchestrator turn after the plan was approved (triage, steering consultation) plans no more. */
+function planApproved(events: readonly SessionEvent[]): boolean {
+  return events.some((event) => event.type === "plan/state_changed" && event.data.to === "approved");
+}
+
+/** Skills whose `load_skill` result is still visible in this history (successful calls only). */
+function loadedSkills(history: History): string[] {
+  const calls = new Map<string, string>();
+  const loaded: string[] = [];
+  for (const { message } of history.messages) {
+    for (const part of message.content) {
+      if (part.type === "tool_call" && part.name === "load_skill" && typeof part.arguments.name === "string") calls.set(part.provider_call_id, part.arguments.name.trim());
+      if (part.type === "tool_result" && !part.is_error && !isDuplicateSkillLoad(part.text)) {
+        const name = calls.get(part.provider_call_id);
+        if (name !== undefined) loaded.push(name);
+      }
+    }
+  }
+  return loaded;
 }
 
 function overflowPending(events: readonly SessionEvent[], history: History): boolean {
@@ -179,22 +235,58 @@ function overflow(reason: "context-overflow" | "compaction-thrash"): ContextBuil
   return { ok: false, reason, stale: [] };
 }
 
+interface BaseBlocks {
+  readonly blocks: DraftBlock[];
+  readonly memories: RecalledMemory[];
+  /** Whether any catalog skill is left for `load_skill` (not injected, not already loaded). */
+  readonly skillsLoadable: boolean;
+}
+
 export function createContextBuilder(deps: ContextBuilderDependencies): ContextBuilder {
   const platform = deps.platform ?? process.platform;
 
-  const freshness = async (packet: TaskContextPacket): Promise<ReturnType<typeof findStaleSources>> => {
-    if (deps.sources === undefined || packet.context.sources.length === 0) return [];
+  const freshness = async (packet: TaskContextPacket, reader: WorkspaceDigestReader | undefined, signal: AbortSignal): Promise<ReturnType<typeof findStaleSources>> => {
+    if (reader === undefined || packet.context.sources.length === 0) return [];
     const current = new Map<string, Digest | undefined>();
     for (const source of packet.context.sources) {
-      current.set(
-        source.path,
-        isOwnedPath(source.path, packet.scope.owned_paths, platform) ? source.digest : await deps.sources(source.path),
-      );
+      current.set(source.path, isOwnedPath(source.path, packet.scope.owned_paths, platform) ? source.digest : await reader(source.path, signal));
     }
     return findStaleSources(packet, current);
   };
 
-  const baseBlocks = async (input: ContextBuildInput, history: History, signal: AbortSignal): Promise<{ blocks: DraftBlock[]; memories: RecalledMemory[] }> => {
+  const skillBlocks = async (input: ContextBuildInput, history: History, events: readonly SessionEvent[]): Promise<{ blocks: DraftBlock[]; loadable: boolean }> => {
+    if (deps.skills === undefined) return { blocks: [], loadable: false };
+    const scope: SkillScope = { runId: input.runId, taskId: input.taskId, attemptId: input.attemptId, role: input.role };
+    const loaded = loadedSkills(history);
+    // After plan approval an orchestrator turn triages or consults: it gets no skills at all.
+    if (input.role === "orchestrator" && planApproved(events)) {
+      deps.skillContext?.sync(scope, [], loaded);
+      return { blocks: [], loadable: false };
+    }
+    const entries = [...(await deps.skills.list(input.role))].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    if (entries.length === 0) return { blocks: [], loadable: false };
+    // Triggers read only session-stable text (packet and opening request), so the prefix stays byte-identical.
+    const taskText = [input.packet?.objective ?? "", ...(input.packet?.decisions ?? []), firstUserText(history)].join("\n");
+    const primary = new Set((await deps.skills.primary?.(input.role)) ?? []);
+    const wanted = [...entries.filter((entry) => primary.has(entry.name)), ...triggeredSkills(entries, taskText).filter((entry) => !primary.has(entry.name))];
+    const blocks: DraftBlock[] = [];
+    const injected: string[] = [];
+    for (const entry of wanted) {
+      const text = await deps.skills.load(entry.name, input.role);
+      if (text === undefined) continue;
+      injected.push(entry.name);
+      blocks.push({ id: `skill:${entry.name}`, source: "skill", trust: "project", text, truncated: false, optional: true });
+    }
+    // Catalog marks and load_skill visibility depend on injected skills only, never on loads made
+    // during the session: either would change the cached prefix (system or tool list) mid-session.
+    const inContext = new Set(injected);
+    const loadable = entries.some((entry) => !inContext.has(entry.name));
+    blocks.unshift({ id: "skill-catalog", source: "skill-catalog", trust: "project", text: renderCatalog(entries, inContext), truncated: false, optional: true });
+    deps.skillContext?.sync(scope, injected, loaded);
+    return { blocks, loadable };
+  };
+
+  const baseBlocks = async (input: ContextBuildInput, history: History, events: readonly SessionEvent[], signal: AbortSignal): Promise<BaseBlocks> => {
     const blocks: DraftBlock[] = [
       { id: `harness:${input.role}`, source: "harness", trust: "harness", text: harnessInstructions(input.role, { mode: input.policy.mode, route: input.route }), truncated: false, optional: false },
     ];
@@ -203,6 +295,7 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
       blocks.push({ id: "constitution", source: "constitution", trust: "project", text: project.constitution, truncated: false, optional: false });
     }
     for (const protocol of project?.protocols ?? []) {
+      if (!protocolAppliesTo(protocol.id, input.role)) continue;
       blocks.push({ id: `protocol:${protocol.id}`, source: "protocol", trust: "project", text: protocol.text, truncated: false, optional: false });
     }
     if (project?.entrypoint !== undefined) {
@@ -212,26 +305,14 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
     if (roleText !== undefined) {
       blocks.push({ id: `role:${input.role}`, source: "role", trust: "project", text: roleText, truncated: false, optional: false });
     }
-    const taskText = [
-      input.packet?.objective ?? "",
-      ...(input.packet?.decisions ?? []),
-      lastUserText(history),
-    ].join("\n");
-    if (deps.skills !== undefined) {
-      const entries = [...(await deps.skills.list(input.role))].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-      if (entries.length > 0) {
-        blocks.push({ id: "skill-catalog", source: "skill-catalog", trust: "project", text: renderCatalog(entries), truncated: false, optional: true });
-        // The role's own skills (named by its manifest) and triggered ones come through context, never through read_file.
-        const primary = new Set((await deps.skills.primary?.(input.role)) ?? []);
-        const loaded = [...entries.filter((entry) => primary.has(entry.name)), ...triggeredSkills(entries, taskText).filter((entry) => !primary.has(entry.name))];
-        for (const entry of loaded) {
-          const text = await deps.skills.load(entry.name, input.role);
-          if (text !== undefined) blocks.push({ id: `skill:${entry.name}`, source: "skill", trust: "project", text, truncated: false, optional: true });
-        }
-      }
-    }
+    const skills = await skillBlocks(input, history, events);
+    blocks.push(...skills.blocks);
     if (input.packet !== undefined) {
-      blocks.push({ id: `packet:${input.packet.task_id}`, source: "packet", trust: "project", text: renderPacket(input.packet), truncated: false, optional: false });
+      blocks.push({ id: `packet:${input.packet.task_id}`, source: "packet", trust: "project", text: renderPacketView(input.packet), truncated: false, optional: false });
+      const inline = renderInlineSources(input.packet);
+      if (inline !== undefined) {
+        blocks.push({ id: `packet-sources:${input.packet.task_id}`, source: "packet", trust: "untrusted", text: inline, truncated: false, optional: false });
+      }
     }
     if (history.lastCompaction !== undefined) {
       const summary = await readSummary(deps.blobs, history.lastCompaction);
@@ -240,10 +321,11 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
     }
     const memories: RecalledMemory[] = [];
     if (deps.memory !== undefined && !signal.aborted) {
+      const memoryText = [input.packet?.objective ?? "", ...(input.packet?.decisions ?? []), lastUserText(history)].join("\n");
       const recalled = await deps.memory.store.search({
         projectId: deps.memory.projectId,
         branch: deps.memory.branch,
-        text: taskText.trim() === "" ? undefined : taskText.slice(0, 500),
+        text: memoryText.trim() === "" ? undefined : memoryText.slice(0, 500),
         kinds: undefined,
         includeInactive: false,
         limit: deps.memory.limit ?? 5,
@@ -254,7 +336,7 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
         blocks.push({ id: `memory:${memory.note.frontmatter.id}`, source: "memory", trust: "untrusted", text: renderMemory(memory), truncated: false, optional: true });
       }
     }
-    return { blocks: sortBlocks(blocks), memories };
+    return { blocks: sortBlocks(blocks), memories, skillsLoadable: skills.loadable };
   };
 
   const measure = (blocks: readonly DraftBlock[], messages: readonly ModelMessage[], tools: readonly ToolDescriptor[]): number =>
@@ -280,16 +362,17 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
 
   const assemble = async (input: ContextBuildInput, events: readonly SessionEvent[], signal: AbortSignal) => {
     const history = await reconstructHistory(events, deps.blobs, { role: input.role, taskId: input.taskId, attemptId: input.attemptId });
-    const { blocks, memories } = await baseBlocks(input, history, signal);
+    const { blocks, memories, skillsLoadable } = await baseBlocks(input, history, events, signal);
     const messages = history.messages.map((entry) => entry.message);
-    return { history, blocks, memories, messages };
+    const tools = selectTools(deps.tools.visibleTo(input.role, input.policy), { role: input.role, packet: input.packet, skillsLoadable });
+    return { history, blocks, memories, messages, tools };
   };
 
   return {
     async build(input, signal) {
       const requestId = requestIdSchema.parse(input.requestId);
       if (input.packet !== undefined) {
-        const stale = await freshness(input.packet);
+        const stale = await freshness(input.packet, input.sources ?? deps.sources, signal);
         if (stale.length > 0) return { ok: false, reason: "stale-sources", stale };
       }
       let events = await readAll(await deps.readSession(input.sessionId));
@@ -300,16 +383,15 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
         const admission = deps.budget.admit(observations);
         if (!admission.ok) return budgetRefusal(admission);
       }
-      const tools = deps.tools.visibleTo(input.role, input.policy);
       const window = deps.contextWindow?.(input.route) ?? DEFAULT_CONTEXT_WINDOW;
       const maxOutput = deps.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
       const limit = window - Math.max(deps.reserveTokens ?? DEFAULT_RESERVE_TOKENS, maxOutput);
 
       let state = await assemble(input, events, signal);
-      let total = measure(state.blocks, state.messages, tools);
+      let total = measure(state.blocks, state.messages, state.tools);
       if (total > limit) {
         truncateOptional(state.blocks, total - limit);
-        total = measure(state.blocks, state.messages, tools);
+        total = measure(state.blocks, state.messages, state.tools);
       }
       const overflowed = overflowPending(events, state.history);
       if (total > limit || overflowed) {
@@ -330,11 +412,11 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
           if (outcome.status === "compacted") {
             events = await readAll(await deps.readSession(input.sessionId));
             state = await assemble(input, events, signal);
-            total = measure(state.blocks, state.messages, tools);
+            total = measure(state.blocks, state.messages, state.tools);
             if (total > limit) {
-        truncateOptional(state.blocks, total - limit);
-        total = measure(state.blocks, state.messages, tools);
-      }
+              truncateOptional(state.blocks, total - limit);
+              total = measure(state.blocks, state.messages, state.tools);
+            }
           }
           if (total > limit) return overflow("context-overflow");
         }
@@ -346,8 +428,9 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
         route: input.route,
         system,
         messages: state.messages,
-        tools: [...tools],
+        tools: state.tools,
         max_output_tokens: maxOutput,
+        cache: { key: promptCacheKey(input.sessionId, input.role), stable_system_blocks: Math.min(64, stablePrefixLength(state.blocks)) },
       };
       const toolResultTokens = state.messages.filter((message) => message.role === "tool").reduce((sum, message) => sum + messageTokens(message), 0);
       const historyTokens = state.messages.filter((message) => message.role !== "tool").reduce((sum, message) => sum + messageTokens(message), 0);

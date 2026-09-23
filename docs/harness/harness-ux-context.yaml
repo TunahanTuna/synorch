@@ -1,0 +1,315 @@
+schema_version: 1
+kind: synorch_harness_experience_context
+metadata:
+  language: tr
+  researched_on: "2026-09-23"
+  status: "proposed_ux_backlog"
+  parent: "./harness-context.yaml"
+  source_index: "./harness-research-evidence.yaml"
+  use: "Prioritize and implement as measured product slices; no item below claims to be shipped."
+
+experience_north_star:
+  promise: "A capable coding partner that responds immediately, protects user work, explains consequential actions and proves the result."
+  default_view: "Conversation plus one-line actions and a live activity area; expand for evidence and raw events."
+  information_levels:
+    L0: "User messages, assistant answer, requested work, action needed and security/correctness deviations only."
+    L1: "Tool detail, worker status, changed-file summary, verification and context provenance on demand."
+    L2: "Versioned event log, raw redacted traces, policy reasoning and diagnostics."
+  consistency: "TUI, plain, accessible and JSONL modes expose equivalent facts without forcing identical layouts."
+  current_local_design: "./design/tui-experience.md"
+  product_requirements: "./foundation/product-requirements.md"
+  proposed_runtime_adr: "./decisions/ADR-21-conversation-first-runtime.md"
+  explicit_caveat: "The TUI design is a proposal and its direct-write product model needs HD-01/HD-04 resolution."
+
+journeys:
+  - id: J-01
+    name: first_open
+    user_goal: "Understand workspace, model and trust state without a wall of configuration text."
+    successful_end: "Editor is ready; only an actual trust or capability decision interrupts."
+  - id: J-02
+    name: quick_question
+    user_goal: "Get a grounded answer from the codebase with minimal ceremony."
+    successful_end: "Answer streams, includes relevant file links and says when a fact was inferred."
+  - id: J-03
+    name: small_edit
+    user_goal: "Ask for a fix and see what changed and how it was checked."
+    successful_end: "One conversational turn, concise action trail, diff and verification status."
+  - id: J-04
+    name: complex_change
+    user_goal: "Approve or steer a plan and understand independent worker progress."
+    successful_end: "Visible ownership, bounded parallelism, conflict handling and independent review."
+  - id: J-05
+    name: interrupted_work
+    user_goal: "Return after cancellation, crash or context refresh without repeating decisions."
+    successful_end: "Recovery card states completed, pending and uncertain effects with safe next actions."
+  - id: J-06
+    name: trust_and_memory
+    user_goal: "Know what the agent remembers, why and who accepted it."
+    successful_end: "Source, freshness, privacy scope and correction controls are discoverable."
+
+features:
+  - id: UX-01
+    title: "Fast conversational path"
+    priority: P0
+    status: proposed
+    differentiates_by: "A simple question or edit does not pay orchestration startup cost."
+    trigger: "Every message in direct mode."
+    behavior:
+      - "Render user message and activity immediately; stream assistant text and short action rows."
+      - "Main agent chooses read, explain, direct edit, plan or workers by risk and independence."
+      - "When workers are helpful, give a one-sentence reason and let user steer at a safe boundary."
+    guardrail: "Resolve HD-01 before granting product-file writes to the main agent."
+    acceptance:
+      - "Greeting and code-reading question complete with no plan object."
+      - "No hidden planning round trip delays the first response."
+      - "Direct result never displays an independent-review badge unless review ran."
+    metrics: [time_to_visible_activity_ms, time_to_first_useful_result_ms, unnecessary_orchestration_rate]
+    research: [OAI-01, ANT-01, VSC-01]
+
+  - id: UX-02
+    title: "Quiet by default, deep when asked"
+    priority: P0
+    status: proposed
+    differentiates_by: "The main transcript reads like collaboration while complete audit remains available."
+    trigger: "Tool events, worker events and system notices."
+    behavior:
+      - "Apply the TUI L0 four-condition rule from design/tui-experience.md."
+      - "Show at most two L0 lines per tool and update one live progress region instead of appending heartbeat spam."
+      - "Keep raw IDs, digests, policy snapshots and event names in L1/L2."
+      - "Route worker streams into attributed worker detail, never into the main assistant voice."
+    acceptance:
+      - "A 20-step run has no orphan proposed tool cards or repeated internal state lines in L0."
+      - "Opening L2 reveals the same versioned events used to derive L0."
+    metrics: [noise_lines_per_task, misattributed_worker_messages, detail_discovery_success]
+    local: "./design/tui-experience.md"
+    research: [OAI-01, VSC-01]
+
+  - id: UX-03
+    title: "Action card with reason and consequence"
+    priority: P0
+    status: proposed
+    differentiates_by: "A consequential action is understandable before it executes or requests authority."
+    trigger: "Ask-mode approval, human-only subject, blocked external effect or degraded sandbox."
+    behavior:
+      - "Describe intent, concrete command/target, affected paths or service, effect, reversibility and cost uncertainty."
+      - "Show the exact permission scope and duration; default to least privilege."
+      - "Distinguish policy denial, missing capability, human-only approval and user cancellation."
+      - "In autonomous mode, show denied external write and safe next step; do not fabricate an approval path."
+    acceptance:
+      - "A changed action digest invalidates prior approval and the card explains why."
+      - "The user can tell whether an action changes local files or a remote service before deciding."
+    metrics: [approval_prompts_per_task, approval_reversal_rate, post_approval_surprise_rate]
+    local: "./decisions/ADR-08-approval-policy.md"
+    research: [OAI-04, ANT-04, OH-01]
+
+  - id: UX-04
+    title: "Evidence-backed result card"
+    priority: P0
+    status: proposed
+    differentiates_by: "Users inspect the actual diff and proof with one action."
+    trigger: "A turn completes, fails, cancels or reaches budget limit."
+    behavior:
+      - "Summarize the answer and exact changed paths."
+      - "Map acceptance criteria to passed, failed, not-run or unverifiable checks and independent review when applicable."
+      - "Link to fixed diff, command output and relevant source lines; mark inferred statements."
+      - "State remaining risk and next action; never imply a check passed because the model said so."
+    acceptance:
+      - "A failing test and a skipped test have different labels and links."
+      - "A reviewer can navigate from summary to evidence without finding an internal event ID."
+    metrics: [evidence_open_rate, false_verified_claim_rate, user_acceptance_rate]
+    local: ["./decisions/ADR-18-harness-computed-evidence.md", "./design/tui-experience.md"]
+    research: [OAI-07, ANT-07, AID-01]
+
+  - id: UX-05
+    title: "User-work shield"
+    priority: P0
+    status: proposed
+    differentiates_by: "The product explicitly protects dirty and concurrent user edits."
+    trigger: "Before an edit, worktree integration, undo or retry."
+    behavior:
+      - "Record baseline content identity and distinguish user changes from agent changes."
+      - "Show conflicts by path with ours/theirs/effect and offer scoped resolution; never silently overwrite."
+      - "Label checkpoint/undo scope clearly; remote, shell and side effects outside files need separate remediation."
+    acceptance:
+      - "A user edit during worker execution remains intact and blocks conflicting integration."
+      - "Undo preview shows exactly which agent-owned changes will revert and which effects cannot."
+    metrics: [lost_user_work_incidents, edit_conflict_rate, conflict_resolution_time]
+    local: "./decisions/ADR-19-workspace-fidelity.md"
+    research: [AID-01, VSC-01, LG-01]
+
+  - id: UX-06
+    title: "Recovery and continuity bundle"
+    priority: P0
+    status: proposed
+    differentiates_by: "Recovery starts from a truthful saved state, not a vague summary."
+    trigger: "Crash, cancel, context refresh, provider failure or session switch."
+    behavior:
+      - "Show last confirmed state, unfinished tasks, uncertain side effects, active approvals and changed files."
+      - "Offer continue, inspect, fork or cancel with consequences."
+      - "Persist a compact handoff with goal, settled decisions, blockers, source refs and next safe step."
+      - "On resume, reconcile uncertain effects before any retry; do not replay non-idempotent calls blindly."
+    acceptance:
+      - "After a crash during external action, user sees uncertain status instead of an automatic repeat."
+      - "A resumed agent can state the next step and cite the preserved decision without re-asking it."
+    metrics: [resume_success_rate, duplicate_side_effect_incidents, repeated_question_rate]
+    research: [OAI-01, ANT-02, LG-01]
+
+  - id: UX-07
+    title: "Why this context?"
+    priority: P1
+    status: proposed
+    differentiates_by: "Users can see why an answer relied on a file or memory and correct stale context."
+    trigger: "/context, citation click or an uncertain/stale answer."
+    behavior:
+      - "List included source, role, origin, digest/freshness, trust tier and approximate token cost."
+      - "Flag source conflicts and stale memory rather than silently ranking one as truth."
+      - "Let users inspect, exclude or refresh optional memory without editing policy."
+      - "Keep full prompt/traces redacted and only in L2; context UI must not leak secrets."
+    acceptance:
+      - "A cited stale note shows its original source and a refresh path."
+      - "A user can identify why a source was included or omitted."
+    metrics: [source_provenance_coverage, stale_source_use_rate, repeated_repository_reads]
+    research: [ANT-03, OH-02, AID-01]
+
+  - id: UX-08
+    title: "Memory ledger with correction control"
+    priority: P1
+    status: proposed
+    differentiates_by: "Long-term memory is an inspectable user asset with scope and provenance."
+    trigger: "A memory item is proposed, used or changed."
+    behavior:
+      - "Show a short proposed memory summary, evidence ref, privacy scope, decider and freshness."
+      - "Expose list, edit, retire, reverse and delete actions."
+      - "Follow ADR-17: orchestrator may accept reviewed proposals in autonomous mode; display who did so and allow user reversal."
+      - "Personal vault remains local by default; team vault is opt-in."
+    acceptance:
+      - "A wrong preference can be reversed and stops influencing future context."
+      - "Team memory cannot be created by quietly moving a personal note into the repository."
+    metrics: [memory_correction_rate, stale_memory_retrieval_rate, memory_reuse_value]
+    local: ["./decisions/ADR-16-memory-location.md", "./decisions/ADR-17-memory-write-policy.md"]
+    research: [ANT-03, OH-02]
+
+  - id: UX-09
+    title: "Adaptive delegation and independent review"
+    priority: P1
+    status: proposed
+    differentiates_by: "Parallel agents appear only where they reduce completion time or improve proof."
+    trigger: "Independent scopes, long work, explicit user request or high-risk change."
+    behavior:
+      - "Estimate worker startup, ownership and review overhead before dispatch."
+      - "Show one concise worker board with objective, owner, state and blocking reason."
+      - "Keep child context isolated and pass short evidence-bearing completion packets."
+      - "For direct edits, offer a separate review action but label the result unreviewed until it runs."
+    acceptance:
+      - "A one-file trivial fix does not spawn a worker unless the user asks."
+      - "Two independent tasks can run in parallel without overlapping write ownership."
+    metrics: [delegation_value_delta, worker_overhead_ratio, review_defect_detection_rate]
+    research: [OAI-06, ANT-06, VSC-01]
+
+  - id: UX-10
+    title: "Transparent provider and budget choices"
+    priority: P1
+    status: proposed
+    differentiates_by: "Routing never feels like a hidden switch in quality, account or cost."
+    trigger: "Session start, route change, fallback, budget threshold or quota error."
+    behavior:
+      - "Display active provider/model only where it helps orientation; expand for capabilities and route history."
+      - "Explain why a model was selected and what a proposed fallback changes."
+      - "Show estimated usage and confidence, not fake billing precision."
+      - "Request a human decision only for ADR-08 human-only subjects."
+    acceptance:
+      - "A failed preferred provider does not silently move to a paid fallback."
+      - "A budget limit stops new requests and yields a resumable result card."
+    metrics: [unexpected_cost_incidents, provider_switch_comprehension, budget_exhaustion_recovery_rate]
+    research: [OAI-05, OAI-07]
+
+  - id: UX-11
+    title: "Accessible, localizable terminal interaction"
+    priority: P0
+    status: proposed
+    differentiates_by: "Core agent facts remain usable without color, animation or a rich terminal."
+    trigger: "Plain mode, screen reader, NO_COLOR, narrow terminal or reduced motion."
+    behavior:
+      - "Every status has text as well as glyph/color; keep equivalent details in plain mode."
+      - "Use sparse heartbeats, stable focus and keyboard-reachable approval choices."
+      - "Support Turkish, CJK, emoji and IME widths without corrupting layout."
+      - "Do not persist animated spinner frames or repeated progress text in the transcript."
+    acceptance:
+      - "A screen reader user can complete trust, approval, review and cancellation without visual-only cues."
+      - "A narrow NO_COLOR terminal retains the same action/result meaning."
+    metrics: [accessible_task_completion, keyboard_only_success, layout_failure_rate]
+    local: "./design/tui-experience.md"
+    research: [VSC-01]
+
+  - id: UX-12
+    title: "Actionable failure and repair"
+    priority: P0
+    status: proposed
+    differentiates_by: "A failure tells the user what happened, what changed and the cheapest safe next step."
+    trigger: "Tool failure, stale source, verification failure, denied permission, provider error or exhausted budget."
+    behavior:
+      - "State failed action, known workspace effect, retry safety and recommended next action."
+      - "Distinguish evidence repair from redoing a correct implementation."
+      - "Offer targeted retry from a checkpoint; preserve the existing artifact when possible."
+      - "Explain policy denial to the agent in a bounded correction message so it can find a safe alternative."
+    acceptance:
+      - "A stale digest error leads to reread/retry with no silent overwrite."
+      - "A valid artifact with missing evidence can be repaired without deleting the artifact."
+    metrics: [repair_success_rate, repeat_failed_action_rate, abandoned_after_error_rate]
+    local: "./decisions/ADR-18-harness-computed-evidence.md"
+    research: [OH-01, ANT-04, OAI-04]
+
+measurement_plan:
+  baseline_before_build:
+    - "Capture existing syn agent/run task transcripts and UI event counts on fixed scenarios."
+    - "Record task success and environment state, not just model self-report."
+    - "Track provider/model, operating system, terminal mode and policy mode for each run."
+  primary_metrics:
+    task_success_rate: "Human or deterministic acceptance criteria met / attempted tasks."
+    time_to_first_useful_result_ms: "Message submit to first correct, task-relevant response or artifact."
+    median_and_p95_completion_ms: "Task submit to accepted result, segmented by simple and complex tasks."
+    lost_user_work_incidents: "Any overwritten or silently omitted user-authored change; target zero."
+    false_verified_claim_rate: "Reports saying verified without qualifying evidence / reports saying verified; target zero."
+  friction_metrics:
+    approval_prompts_per_task: "Number of user approvals per accepted task; segment by risk and policy mode."
+    noise_lines_per_task: "L0 lines unrelated to conversation, requested work, required action or correctness deviation."
+    repeated_question_rate: "Previously answered questions re-asked without changed context / resumed tasks."
+    unnecessary_orchestration_rate: "Simple tasks delegated without quality or latency benefit / simple tasks."
+  efficiency_metrics:
+    accepted_task_cost: "Model and tool cost per accepted task, with unknown provider charges labeled unknown."
+    context_reuse: "Prompt cache hits, repeated file reads, compaction count and source retrieval relevance."
+    worker_overhead_ratio: "Worker setup and coordination time / total task time."
+  study_design:
+    - "Use paired tasks and repeated trials across the same repository snapshots."
+    - "Include adversarial prompt injection, dirty workspace, network failure, crash and no-TTY scenarios."
+    - "Review both outcome and user comprehension; an improvement in speed cannot hide lost work or false proof."
+    - "Set numerical release thresholds only after baseline measurement, except zero-tolerance invariants."
+  sources: [OAI-07, ANT-07]
+
+scenario_set:
+  - "Greeting in empty folder: immediate answer, no plan, worker or workspace trust needed."
+  - "Explain a function: cite code, distinguish observation from inference, no product write."
+  - "One-file edit with existing dirty lines: preserve user lines, show exact diff and check result."
+  - "Multi-module change: plan choice, disjoint workers, review evidence and conflict-free integration."
+  - "Prompt injection in README/tool output: no authority escalation or secret egress."
+  - "Crash after an external request is sent: mark uncertainty and never blind-retry."
+  - "Provider quota failure: no silent paid fallback; show route options and preserved work."
+  - "Compaction mid-task: retain decisions, source refs and open work; no summary-as-proof."
+  - "Stale recalled memory: show warning and source; user correction affects next turn."
+  - "Windows partial sandbox plus untrusted repo build: deny or ask exactly as ADR-08 specifies."
+  - "Plain NO_COLOR narrow terminal: complete approval and inspect verification with keyboard alone."
+cross_document_decisions_to_reconcile:
+  - id: UX-GATE-01
+    topic: "Workspace trust timing"
+    product_requirement: "Ask at the first repo-code exec, not at session opening."
+    proposed_adr_21: "Ask once at session opening; current accepted ADR-08 denies untrusted autonomous build/test."
+    action: "Set one behavior in the ADR and acceptance scenario before implementing the vertical slice."
+  - id: UX-GATE-02
+    topic: "Background orchestration and chat"
+    product_requirement: "Keep chat usable while a run continues in the background; /cancel stops the run."
+    proposed_adr_21: "Keep orchestration inside the active turn; concurrent chat is deferred."
+    action: "Set concurrency, steering, cancellation and workspace-write ownership before K2/K3."
+  - id: UX-GATE-03
+    topic: "Product document status"
+    product_requirement: "The product direction is explicit, but product-requirements.md and ADR-21 are marked Proposed pending the product-owner vertical-slice gate."
+    action: "Do not label their implementation as accepted or shipped before the stated gate and code/test evidence."

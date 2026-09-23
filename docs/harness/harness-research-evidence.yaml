@@ -1,0 +1,225 @@
+schema_version: 1
+kind: synorch_harness_research_index
+metadata:
+  language: tr
+  reviewed_on: "2026-09-23"
+  status: "external_source_findings"
+  purpose: "Primary-source evidence behind harness-context.yaml and harness-ux-context.yaml. URLs are research references, not automatically imported product requirements."
+  method:
+    - "Prefer official product documentation, protocol specifications and maintainers' engineering publications."
+    - "Separate source observation from Synorch recommendation; inspect current docs before implementation because upstream behavior changes."
+    - "Retain Synorch accepted ADRs as local authority when external products choose different defaults."
+
+sources:
+  - id: OAI-01
+    publisher: OpenAI
+    title: "Unlocking the Codex harness: how we built the App Server"
+    url: "https://openai.com/index/unlocking-the-codex-harness/"
+    observed: "Codex exposes durable thread/turn/item lifecycles, started/delta/completed events, reconnectable history, sandboxed tools and bidirectional approval requests to several clients."
+    synorch_inference: "Separate a durable event model from L0/L1/L2 presentation and support replayable user-facing action items."
+    used_by: [HCTX-01, HCTX-02, UX-01, UX-02, UX-06]
+
+  - id: OAI-02
+    publisher: OpenAI
+    title: "Introducing the Agents API"
+    url: "https://openai.com/index/introducing-the-agents-api/"
+    observed: "The API describes long-running agent work with context compaction, lazy tool discovery and separately contextualized parallel subagents."
+    synorch_inference: "Keep context budgets, deferred tool discovery and bounded delegation explicit in the design."
+    used_by: [HCTX-03, HCTX-04, HCTX-09]
+
+  - id: OAI-03
+    publisher: OpenAI
+    title: "Sandbox Agents guide"
+    url: "https://developers.openai.com/api/docs/guides/agents/sandboxes"
+    observed: "Distinguishes harness control plane from isolated execution plane; documents workspace and credential boundaries, run state and recovery."
+    synorch_inference: "Expose sandbox capability truth and keep credentials outside task context and artifacts."
+    used_by: [HCTX-05, HCTX-07, HCTX-08]
+
+  - id: OAI-04
+    publisher: OpenAI
+    title: "Running Codex safely / guardrails and approvals"
+    urls:
+      - "https://openai.com/index/running-codex-safely/"
+      - "https://developers.openai.com/api/docs/guides/agents/guardrails-approvals"
+      - "https://developers.openai.com/api/docs/guides/agent-builder-safety"
+    observed: "Sandbox restrictions, approval policy and prompt-injection defenses are distinct layers; tool outputs and external content are lower-trust material."
+    synorch_inference: "Make deny reasons and safe alternatives visible without letting a model or tool grant its own authority."
+    caveat: "Codex auto-review or another vendor classifier is not a built-in Synorch capability; Agent Builder product lifecycle is separate from the general security principle."
+    used_by: [HCTX-05, HCTX-06, UX-03, UX-12]
+
+  - id: OAI-05
+    publisher: OpenAI
+    title: "Agents API observability"
+    url: "https://developers.openai.com/api/docs/guides/agents-api/observability"
+    observed: "Agent activity and usage can be attributed across root and subagent runs; reported usage may be incomplete."
+    synorch_inference: "Show cost as an estimate with unknowns, route history and per-task budgets."
+    used_by: [HCTX-08, UX-10]
+
+  - id: OAI-06
+    publisher: OpenAI
+    title: "Agents API multi-agent guide"
+    url: "https://developers.openai.com/api/docs/guides/agents-api/multi-agent"
+    observed: "Parallel agents help with bounded independent work; shared files require ownership and coordination."
+    synorch_inference: "Delegate only when scope separation or independent review justifies coordination overhead."
+    used_by: [HCTX-09, UX-09]
+
+  - id: OAI-07
+    publisher: OpenAI
+    title: "Agent evals and tracing"
+    urls:
+      - "https://developers.openai.com/api/docs/guides/agent-evals"
+      - "https://developers.openai.com/api/docs/guides/agents-api/tracing"
+    observed: "Traces show steps and failures; datasets, graders and repeated eval runs reveal task and policy regressions."
+    synorch_inference: "Use environment outcomes, evidence quality, latency and user-work safety as release measurements."
+    used_by: [HCTX-10, HCTX-13, UX-04, UX-10]
+
+  - id: OAI-08
+    publisher: OpenAI
+    title: "Tool search"
+    url: "https://developers.openai.com/api/docs/guides/tools-tool-search"
+    observed: "Deferred discovery can avoid sending every tool schema in each prompt."
+    synorch_inference: "A small permanent capability index and lazy detailed schemas should be measured for both retrieval accuracy and latency."
+    used_by: [HCTX-12]
+
+  - id: ANT-01
+    publisher: Anthropic
+    title: "How Claude Code works / best practices"
+    urls:
+      - "https://code.claude.com/docs/en/how-claude-code-works"
+      - "https://code.claude.com/docs/en/best-practices"
+    observed: "Claude Code gathers context, takes actions and verifies; users can interrupt and steer an active session."
+    synorch_inference: "Use a responsive conversational loop with explicit progress and safe steering points."
+    used_by: [HCTX-01, UX-01]
+
+  - id: ANT-02
+    publisher: Anthropic
+    title: "Managed Agents / checkpointing"
+    urls:
+      - "https://www.anthropic.com/engineering/managed-agents"
+      - "https://code.claude.com/docs/en/checkpointing"
+    observed: "Durable session history, harness execution and sandbox are separate responsibilities; checkpoint rewind has limits for effects outside managed file edits."
+    synorch_inference: "Offer exact recovery/undo scope and reconcile external effects before retry."
+    used_by: [HCTX-02, HCTX-08, UX-06]
+
+  - id: ANT-03
+    publisher: Anthropic
+    title: "Effective context engineering / Claude Code memory and skills"
+    urls:
+      - "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+      - "https://code.claude.com/docs/en/memory"
+      - "https://code.claude.com/docs/en/skills"
+      - "https://code.claude.com/docs/en/features-overview"
+    observed: "Short always-on instructions, scoped rules, on-demand skills/subagents and compaction conserve context; users can inspect context and memory."
+    synorch_inference: "Expose provenance and token cost and keep source material lower-trust than policy."
+    used_by: [HCTX-03, HCTX-04, HCTX-11, HCTX-12, UX-07, UX-08]
+
+  - id: ANT-04
+    publisher: Anthropic
+    title: "Claude Code permissions, hooks and sandboxing"
+    urls:
+      - "https://code.claude.com/docs/en/permissions"
+      - "https://code.claude.com/docs/en/hooks"
+      - "https://code.claude.com/docs/en/sandboxing"
+      - "https://www.anthropic.com/engineering/claude-code-auto-mode"
+    observed: "Permission decisions, deterministic hooks and OS sandbox are different mechanisms. Anthropic also describes automatic risk assessment, with known residual risk."
+    synorch_inference: "Keep ADR-08 hard rails and host enforcement as independent controls; use risk assessment only as supplementary signal."
+    caveat: "Do not copy Claude's modes or claim native Windows sandbox coverage for Synorch."
+    used_by: [HCTX-05, HCTX-06, UX-03, UX-12]
+
+  - id: ANT-05
+    publisher: Anthropic
+    title: "Claude Code sandboxing / containment"
+    urls:
+      - "https://www.anthropic.com/engineering/claude-code-sandboxing"
+      - "https://www.anthropic.com/engineering/how-we-contain-claude"
+    observed: "Sandboxing reduces routine permission friction while containment still needs layered controls."
+    synorch_inference: "Measure friction but never trade away truthful platform limitations or hard rails."
+    used_by: [HCTX-07]
+
+  - id: ANT-06
+    publisher: Anthropic
+    title: "Subagents / effective harnesses for long-running agents"
+    urls:
+      - "https://code.claude.com/docs/en/sub-agents"
+      - "https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents"
+      - "https://www.anthropic.com/engineering/harness-design-long-running-apps"
+    observed: "Subagents isolate context and return summaries; long-running work benefits from explicit progress and verification, with additional coordination cost."
+    synorch_inference: "Use adaptive delegation and checkpoints rather than mandatory multi-agent process on every task."
+    used_by: [HCTX-09, UX-09]
+
+  - id: ANT-07
+    publisher: Anthropic
+    title: "Demystifying evals for AI agents"
+    url: "https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents"
+    observed: "Agent evaluations need outcome checks, repeated trials and appropriate graders; transcript impressions alone are weak evidence."
+    synorch_inference: "Measure accepted task outcome, proof, failure recovery and real user friction in paired scenarios."
+    used_by: [HCTX-10, HCTX-13, UX-04]
+
+  - id: OH-01
+    publisher: OpenHands
+    title: "Agent architecture, runtime and security"
+    urls:
+      - "https://github.com/OpenHands/docs/blob/main/sdk/arch/agent.mdx"
+      - "https://github.com/OpenHands/docs/blob/main/openhands/usage/architecture/runtime.mdx"
+      - "https://docs.openhands.dev/sdk/guides/security"
+    observed: "An event-based agent loop, isolated runtime and risk-aware security decisions are separate concerns."
+    synorch_inference: "Give denials actionable feedback and report sandbox enforcement honestly."
+    used_by: [HCTX-07, UX-03, UX-12]
+
+  - id: OH-02
+    publisher: OpenHands
+    title: "Context condenser and persistent memory"
+    urls:
+      - "https://docs.openhands.dev/sdk/guides/context-condenser"
+      - "https://docs.openhands.dev/sdk/guides/persistent-memory"
+    observed: "History can be condensed separately from persistent memory; memory is treated as untrusted and protected from secrets."
+    synorch_inference: "Keep compaction and memory separate, with source, freshness, scope and user correction."
+    used_by: [HCTX-04, HCTX-11, UX-07, UX-08]
+
+  - id: LG-01
+    publisher: LangGraph
+    title: "Persistence and human-in-the-loop"
+    urls:
+      - "https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/"
+      - "https://langchain-ai.github.io/langgraphjs/how-tos/cross-thread-persistence-functional/"
+    observed: "Checkpoints enable pause/resume and cross-thread state; resumed nodes may re-execute, making idempotency important for side effects."
+    synorch_inference: "Use idempotency keys, uncertain-effect state and explicit compensation for actions outside the workspace."
+    used_by: [HCTX-02, HCTX-13, UX-05, UX-06]
+
+  - id: AID-01
+    publisher: Aider
+    title: "Repository map, lint/test and Git integration"
+    urls:
+      - "https://aider.chat/docs/repomap.html"
+      - "https://aider.chat/docs/usage/lint-test.html"
+      - "https://aider.chat/docs/git.html"
+    observed: "Symbol-aware repository mapping, test/lint feedback and inspectable diffs help coding agents work with bounded context."
+    synorch_inference: "Prefer selective code maps and visible proof; do not auto-commit user changes as an implicit UX feature."
+    used_by: [HCTX-03, HCTX-10, UX-04, UX-05, UX-07]
+
+  - id: VSC-01
+    publisher: Microsoft
+    title: "VS Code agent sessions, approvals and harnesses"
+    urls:
+      - "https://code.visualstudio.com/docs/agents/run/sessions/manage-sessions"
+      - "https://code.visualstudio.com/docs/agents/run/approvals"
+      - "https://code.visualstudio.com/docs/agents/run/agent-harnesses"
+    observed: "Agent UX includes session states, steering, permission controls, worktree isolation and review of changes."
+    synorch_inference: "Make active mode and action needed visible, while keeping default transcript quiet and accessible."
+    used_by: [HCTX-01, UX-01, UX-02, UX-05, UX-09, UX-11]
+
+  - id: MCP-01
+    publisher: Model Context Protocol
+    title: "MCP tools and elicitation specification"
+    urls:
+      - "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+      - "https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation"
+    observed: "Tools advertise schemas and structured results; elicitation handles user input and cancel/decline, but server-provided metadata is not a host authorization grant."
+    synorch_inference: "Validate typed inputs/outputs and keep MCP actions under the same permission and audit gateway."
+    caveat: "Pin the protocol version implemented by Synorch; newer protocol revisions may change optional flows and deprecate facilities."
+    used_by: [HCTX-03, HCTX-05, HCTX-12]
+
+research_boundaries:
+  - "Vendor claims about latency or approval reduction are context-specific benchmarks, not Synorch performance promises."
+  - "Open-source tool design is evidence for patterns, not a reason to copy its license, defaults or security model."
+  - "No new feature in these YAML files is implemented merely by documenting it."

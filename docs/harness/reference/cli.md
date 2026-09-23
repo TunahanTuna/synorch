@@ -282,3 +282,20 @@ Kapsanmayanlar: "yüksek riskli değişiklik" ve "çalışırken kullanıcı dü
 - `ask_user` `syn run`'da yalnız etkileşimli (TTY) plain/TUI renderer'da bağlıdır; `syn agent`'ta cevap steer döngüsünden gelir.
 - Kanonik model profilleri yalnız ipucudur; route'a dönüşmez (ücretli sağlayıcı seçimi depo metnine bırakılmaz).
 - Gerçek hesaplarla (ChatGPT OAuth, Anthropic, `claude` köprüsü) uçtan uca çalışma ve `--probe-model` doğrulanmadı; Linux/macOS host'larda koşulmadı.
+
+## 17. Zengin görünümler (K1-U3, `src/harness/tui/views/**`)
+
+Görünüm modelleri `src/harness/contracts/views.ts`'tedir (şema değil, düz TypeScript tipleri). Veriyi oturum (U2) üretir; renderer yalnız çizer. Her görünüm saf bir `render*(view, ctx)` fonksiyonudur (`ctx`: glyph seti, renk teması, genişlik, saat), pi-tui `Component` biçimine yapısal olarak uyan bileşenlerle bağlanır (pi-tui yalnız `pi-tui-renderer.ts`'te import edilir, ADR-04) ve plain modda aynı metni verir.
+
+| Görünüm | Model | Komut / tetik | Notlar |
+| --- | --- | --- | --- |
+| Canlı orkestrasyon panosu | `OrchestrationView` | oturum `setBoard(view)` çağırır | Görev başına satır: durum glyph'i (§7.3), rol, model, etkinlik, süre; review kararı. 6 görevden fazlası katlanır. `done: true` olunca özet transcript'e **bir kez** sabitlenir. Plain modda pano yok: `workers:` ve `task i/n key:` değişiklik satırları (§12). |
+| Orkestrasyon grafiği | `OrchestrationView` | `/graph` → `showGraph(view)`; panodayken `g` (editör boşsa) veya Ctrl+G | Topolojik seviyeler, kutu çizgili kenarlar (ascii'de `+-\|`), seviye atlayan kenarlar ara slotlardan geçer. Çalışan yol vurgulanır: aktif görev çift çerçeve (`╔═╗`, ascii `#`), kenarlar accent renk. Sığmazsa seviyeler dikey sarılır. Döngü varsa uyarı satırı. |
+| Kullanım istatistikleri | `UsageView` | `/usage` → `showView(view)` | Model başına tablo (req, in, out, cache, maliyet), sağlayıcı ve tier başına oturum/bugün çubukları, abonelik kota ölçerleri (%70 sarı, %90 kırmızı), API key için `$` (`~` tahmin). Dar ekranda sütunlar sağdan düşer. |
+| Kanıt kartı (UX-04) | `EvidenceView` | `/evidence` → `showView(view)` | Kriter → kanıt (Synorch'un koştuğu komut + exit, reviewer kararı). Rozet: `independently reviewed` / `not independently reviewed`. Worker beyanı `claimed by worker, not run by Synorch` olarak ayrılır. |
+| Aksiyon kartı (UX-03) | `ActionView` | `showView(view)` | What / Why / Effect (yerel mi uzak mı, geri alınabilir mi) / Paths / Scope; uyarı renkli çerçeve. |
+| Why kartı (X6) | `WhyView` | `/why` → `showView(view)` | Karar, policy katmanı + kaynak, kural ve kod, değiştirme yolu (`/allow …`, `/trust`). |
+
+Renderer kancaları (`ViewHost`): `PiTuiRenderer` ve `PlainLineRenderer` `showView`, `showGraph`, `setBoard` sunar. pi-tui'de pano transcript ile aktivite satırı arasındaki slottadır; pano varken spinner zamanlayıcısı çalışır. Glyph setleri `rich`/`safe`/`ascii` (`safe`: WGL4 + kutu çizgisi, çubuklarda yarım blok; `ascii`: 7-bit), 16 renk, `NO_COLOR` altında tüm token'lar kimliktir. Tüm satırlar genişliğe sığar (60 sütun testli). Testler: `tests/harness-tui-views-render.test.ts`, `tests/harness-tui-views-screen.test.ts` (`@xterm/headless`).
+
+Bilinen sınırlar: `/graph`, `/usage`, `/evidence`, `/why` komutlarının CLI'ye bağlanması ve verinin olaylardan üretilmesi U2/entegrasyon işidir. `g` tuşu yalnız pano canlıyken ve editör boşken grafiğe geçer (yazmaya `g` ile başlamak için önce başka bir karakter girilmeli; Ctrl+G her zaman çalışır). Büyük planlarda (≳12 görev) geniş grafik uzun kenarlar üretebilir; dikey düzen her zaman okunur kalır.

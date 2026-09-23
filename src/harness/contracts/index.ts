@@ -2,6 +2,7 @@ export * from "./auth.ts";
 export * from "./common.ts";
 export * from "./digest.ts";
 export * from "./errors.ts";
+export * from "./evidence.ts";
 export * from "./events.ts";
 export * from "./ids.ts";
 export * from "./jsonl.ts";

@@ -27,6 +27,12 @@ export interface ContextBuildInput {
   readonly policy: EffectivePolicy;
   readonly packet: TaskContextPacket | undefined;
   readonly requestId: RequestId;
+  /**
+   * Reads the current digests of the packet's sources in the workspace the packet was computed
+   * against (the attempt workspace for `context.digest_scheme: workspace-raw-v1`, ADR-19). When
+   * absent the builder falls back to its own configured reader (pre-ADR-19 behaviour).
+   */
+  readonly sources?: WorkspaceDigestReader;
 }
 
 export interface ContextBlockReport {
@@ -76,6 +82,8 @@ export interface TurnInput {
   readonly userMessage: string | undefined;
   readonly trigger: "user" | "orchestrator" | "steer" | "follow-up" | "dispatch";
   readonly maxSteps: number;
+  /** Passed through to `ContextBuildInput.sources` (ADR-19); set by the worker manager per attempt. */
+  readonly sources?: WorkspaceDigestReader;
 }
 
 export interface TurnOutcome {
@@ -108,6 +116,27 @@ export interface AgentDriver {
   steer(text: string): void;
 }
 
+/**
+ * Why a writing attempt that wanted a worktree runs in `scoped-dir` instead (ADR-19). A fallback
+ * is recorded in `attempt/started.isolation.fallback` and never leaves an orphan worktree or owner
+ * file behind. `high-risk` writing tasks never fall back; they fail with `sandbox_insufficient`.
+ */
+export const ISOLATION_FALLBACK_REASONS = ["worktree-create-failed", "path-too-long", "git-unavailable"] as const;
+export type IsolationFallbackReason = (typeof ISOLATION_FALLBACK_REASONS)[number];
+
+/**
+ * Ignored dependency directories linked (junction/symlink) from the main tree into a worktree so
+ * verification commands find installed dependencies (ADR-19). Linked only when git ignores them,
+ * they exist in the main tree and no owned path overlaps them; they are read-only by policy.
+ */
+export const DEPENDENCY_LINK_DIRECTORIES = ["node_modules", ".venv", "venv", ".tox"] as const;
+
+/**
+ * Digest of one file in one workspace root with the single workspace scheme (`workspaceDigest`,
+ * ADR-19); undefined when the file does not exist. Paths are workspace-relative.
+ */
+export type WorkspaceDigestReader = (relativePath: string, signal?: AbortSignal) => Promise<Digest | undefined>;
+
 export interface IsolatedWorkspace {
   readonly mode: "worktree" | "scoped-dir" | "shared-read-only";
   readonly root: string;
@@ -115,6 +144,21 @@ export interface IsolatedWorkspace {
   /** Diff of the isolated workspace against its base, pinned as an artifact digest. */
   snapshot(signal: AbortSignal): Promise<{ readonly artifactDigest: Digest; readonly changedPaths: readonly string[] }>;
   dispose(): Promise<void>;
+  /**
+   * The workspace digest of a file in *this* root (ADR-19). Packet sources and known facts are
+   * computed with it after isolation, so they match what the worker's tools see.
+   */
+  readonly digest?: WorkspaceDigestReader;
+  /** True when this is an earlier attempt's workspace of the same task, reset and reused. */
+  readonly reused?: boolean;
+  /** Set when a worktree was wanted but the provider fell back to `scoped-dir`. */
+  readonly fallback?: { readonly from: "worktree"; readonly reason: IsolationFallbackReason; readonly detail: string };
+  /** Dirty or untracked read inputs copied from the main tree (recorded in the baseline, never integrated back). */
+  readonly overlaid?: readonly string[];
+  /** Dependency directories linked from the main tree (`DEPENDENCY_LINK_DIRECTORIES`). */
+  readonly dependencyLinks?: readonly string[];
+  /** Submodule (gitlink) paths of the base commit; an owned path inside one is refused at create. */
+  readonly submodules?: readonly string[];
 }
 
 export interface IsolationCreateOptions {
@@ -123,12 +167,27 @@ export interface IsolationCreateOptions {
    * the isolated workspace holding the pinned artifact under review.
    */
   readonly readRoot?: string;
+  /**
+   * An earlier attempt's workspace of the same task (retry, repair, revision). The provider resets
+   * it to its base (then applies the caller's seed artifact, if any) instead of creating a new
+   * worktree; the caller keeps ownership and disposes it when the task settles (ADR-19).
+   */
+  readonly reuse?: IsolatedWorkspace;
+  /**
+   * Main-tree read inputs (packet read paths and cited sources) to overlay into a worktree when
+   * they are dirty or untracked in the main tree. Owned paths are never overlaid.
+   */
+  readonly overlay?: readonly string[];
 }
 
-/** Creates per-attempt isolation (ADR-07). Owned by orchestration. */
+/** Creates per-attempt isolation (ADR-07, ADR-19). Owned by orchestration. */
 export interface IsolationProvider {
   create(packet: TaskContextPacket, attemptId: AttemptId, signal: AbortSignal, options?: IsolationCreateOptions): Promise<IsolatedWorkspace>;
-  /** Applies a reviewed artifact onto the main workspace; the caller records it as `task/integrated`. */
+  /**
+   * Applies a reviewed artifact onto the main workspace; the caller records it as `task/integrated`.
+   * Conflicts are detected by `ContentIdentity` (git blob id through the tree's own filters, ADR-19)
+   * and written content is converted to the main tree's representation (EOL, filters).
+   */
   integrate(workspace: IsolatedWorkspace, expectedArtifact: Digest, signal: AbortSignal): Promise<void>;
 }
 

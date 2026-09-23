@@ -8,6 +8,23 @@ import {
   HUMAN_ONLY_APPROVAL_SUBJECTS,
   approvalRequestSchema,
   authStatusSchema,
+  DEFAULT_ORCHESTRATION_BUDGETS,
+  evidenceRefSchema,
+  evidenceResolutionSchema,
+  foldPathCase,
+  formatEvidenceCorrection,
+  harnessEvidenceSchema,
+  isCaseInsensitivePlatform,
+  modelRequestSchema,
+  normalizePathUnicode,
+  orchestrationBudgetsSchema,
+  parseToolRef,
+  promptCacheSchema,
+  renderToolResultText,
+  REPORT_CORRECTION_ROUNDS,
+  sameContent,
+  TOOL_EVIDENCE_RESOLUTION_ORDER,
+  workspaceDigest,
   canonicalJson,
   completionPacketSchema,
   createId,
@@ -108,6 +125,10 @@ const EXAMPLE_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "session-manifest": sessionManifestSchema,
   "segment-header": segmentHeaderSchema,
   "session-lease": sessionLeaseSchema,
+  "evidence-resolution": evidenceResolutionSchema,
+  "harness-evidence": harnessEvidenceSchema,
+  "orchestration-budgets": orchestrationBudgetsSchema,
+  "prompt-cache": promptCacheSchema,
 };
 
 const SPECIAL_EXAMPLES = new Set(["session-event", "transition"]);
@@ -278,7 +299,7 @@ test("the shared glob matcher: ** spans segments, literals cover subtrees, grant
 
 test("event payload versions: new fields bump the version, older versions still parse, a v1 event cannot carry a v2 field", () => {
   assert.equal(EVENT_VERSIONS["session/resumed"], 2);
-  assert.equal(EVENT_VERSIONS["attempt/started"], 2);
+  assert.equal(EVENT_VERSIONS["attempt/started"], 3, "v3 added isolation reuse/fallback/overlay/dependency links/submodules (ADR-19)");
   assert.equal(EVENT_VERSIONS["tool/policy_decided"], 2);
   assert.equal(EVENT_VERSIONS["task/integrated"], 1);
   assert.equal(EVENT_VERSIONS["session/closed"], 1);
@@ -486,4 +507,136 @@ test("privilege escalation through packet mutation is rejected", async () => {
   assert.equal(mutate((copy) => { copy.write_mode = "read-only"; }), false);
   assert.equal(mutate((copy) => { copy.isolation = "shared-read-only"; }), false);
   assert.equal(mutate((copy) => { copy.grants = ["*"]; }), false);
+});
+
+const envelopeOf = (type: string, version: number, data: Record<string, unknown>, actor: Record<string, unknown> = { kind: "orchestrator", role: "orchestrator" }) => ({
+  schema_version: 1,
+  event_id: createId("event"),
+  session_id: createId("session"),
+  seq: 5,
+  event_version: version,
+  timestamp: "2026-09-23T12:00:00Z",
+  actor,
+  type,
+  data,
+});
+
+test("ADR-18 short refs: [#n] rendering is the one model-visible tool result form and #n parses back", () => {
+  assert.equal(renderToolResultText(3, { text: "ok\n", error: undefined }), "[#3] ok\n");
+  assert.equal(renderToolResultText(4, { text: "", error: undefined }), "[#4] ok");
+  assert.equal(
+    renderToolResultText(5, { text: "", error: { code: "stale_precondition", message: "re-read src/a.ts" } }),
+    "[#5] Error [stale_precondition]: re-read src/a.ts",
+  );
+  assert.equal(renderToolResultText(undefined, { text: "partial", error: { code: "timeout", message: "late" } }), "partial\nError [timeout]: late");
+  assert.equal(parseToolRef("#5"), 5);
+  assert.equal(parseToolRef("[#12] exec node check.mjs exit 0"), 12);
+  assert.equal(parseToolRef("`#7`"), 7);
+  assert.equal(parseToolRef("#0"), undefined);
+  assert.equal(parseToolRef("#5a"), undefined);
+  assert.equal(parseToolRef("functions.exec node check.mjs"), undefined);
+  assert.deepEqual([...TOOL_EVIDENCE_RESOLUTION_ORDER], ["tool-call-id", "short-ref", "provider-call-id", "tool-name-args", "path-token"]);
+  const text = formatEvidenceCorrection(
+    [{ criterionId: "AC-1", ref: "functions.exec node check.mjs", reason: "matches no tool call" }],
+    [{ ref: 5, toolName: "exec", summary: "node check.mjs -> exit 0" }],
+    REPORT_CORRECTION_ROUNDS,
+  );
+  assert.match(text, /- AC-1: 'functions\.exec node check\.mjs' matches no tool call/);
+  assert.match(text, /#5 exec node check\.mjs -> exit 0/);
+  assert.match(text, /1 correction left/);
+});
+
+test("ADR-18 harness evidence: harness-* kinds are harness-produced only, and completion harness refs must be recorded", async () => {
+  assert.equal(evidenceRefSchema.safeParse({ kind: "harness-verification", ref: "ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4#12", produced_by: "harness" }).success, true);
+  assert.equal(evidenceRefSchema.safeParse({ kind: "harness-verification", ref: "x", produced_by: "worker" }).success, false, "a worker cannot mint harness evidence");
+  assert.equal(evidenceRefSchema.safeParse({ kind: "tool-call", ref: "#3", produced_by: "harness" }).success, false, "the harness produces only harness-* kinds");
+  const examples = await loadDocExamples();
+  const completion = examples.find(
+    (example) => example.name === "completion-packet" && example.expectation === "valid" && (example.items[0] as { harness_evidence?: unknown }).harness_evidence !== undefined,
+  );
+  assert.ok(completion !== undefined, "a completion example with harness evidence exists");
+  const withHarness = completionPacketSchema.parse(completion.items[0]);
+  assert.ok(withHarness.harness_evidence !== undefined);
+  const forged = structuredClone(completion.items[0]) as { acceptance_evidence: { evidence: { ref: string }[] }[] };
+  const first = forged.acceptance_evidence.flatMap((entry) => entry.evidence).find((evidence) => evidence.ref.startsWith("ses_"));
+  assert.ok(first !== undefined);
+  first.ref = "ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4#999";
+  assert.equal(completionPacketSchema.safeParse(forged).success, false, "harness evidence must name a harness_evidence record");
+  assert.deepEqual(DEFAULT_ORCHESTRATION_BUDGETS, { triage_retries: 1, evidence_repairs: 2, review_revisions: 2 });
+  assert.equal(orchestrationBudgetsSchema.safeParse({ triage_retries: 9 }).success, false);
+});
+
+test("ADR-18 events: attempt/verification_ran and attempt/repair_requested are v1; tool/call_proposed v2 carries the short ref", () => {
+  const attempt = { attempt_id: "att_01K5T3Q8Z4X9V2M6N7P0R1S2T8", task_id: "task_01K5T3Q8Z4X9V2M6N7P0R1S2T6" };
+  const ran = (data: Record<string, unknown>) => envelopeOf("attempt/verification_ran", 1, { ...attempt, ordinal: 1, command: "node check.mjs", duration_ms: 120, output_excerpt: "ok", ...data });
+  assert.equal(parseSessionEvent(ran({ argv: ["node", "check.mjs"], status: "passed", termination: "exited", exit_code: 0 })).status, "ok");
+  assert.equal(parseSessionEvent(ran({ argv: ["node", "check.mjs"], status: "passed", termination: "exited", exit_code: 1 })).status, "invalid");
+  assert.equal(parseSessionEvent(ran({ status: "not-run", exit_code: null, reason: "not expressible as argv" })).status, "ok");
+  assert.equal(parseSessionEvent(ran({ status: "not-run", exit_code: null })).status, "invalid", "not-run needs a reason");
+  const repair = (round: number) => envelopeOf("attempt/repair_requested", 1, { ...attempt, kind: "evidence-repair", round, budget: 2, problems: ["AC-1 has no resolvable evidence"] });
+  assert.equal(parseSessionEvent(repair(1)).status, "ok");
+  assert.equal(parseSessionEvent(repair(3)).status, "invalid", "a round beyond the budget is impossible");
+  const proposed = (version: number, extra: Record<string, unknown>) =>
+    envelopeOf("tool/call_proposed", version, { tool_call_id: "call_01K5T3Q8Z4X9V2M6N7P0R1S2TE", provider_call_id: "fc_1", tool_name: "exec", args_digest: sha256("args"), ...extra }, { kind: "worker", role: "implementer" });
+  assert.equal(EVENT_VERSIONS["tool/call_proposed"], 2);
+  assert.equal(EVENT_VERSIONS["tool/result_recorded"], 2);
+  assert.equal(EVENT_VERSIONS["attempt/verification_ran"], 1);
+  assert.equal(parseSessionEvent(proposed(1, {})).status, "ok", "v1 calls without a ref stay readable");
+  assert.equal(parseSessionEvent(proposed(2, { ref: 3 })).status, "ok");
+  assert.equal(parseSessionEvent(proposed(1, { ref: 3 })).status, "invalid");
+  const recorded = (version: number, result: Record<string, unknown>) =>
+    envelopeOf("tool/result_recorded", version, { tool_call_id: "call_01K5T3Q8Z4X9V2M6N7P0R1S2TE", state: "succeeded", duration_ms: 3, result: { status: "ok", text: "x", truncated: false, redactions: 0, ...result } });
+  assert.equal(parseSessionEvent(recorded(2, { digest: sha256("x") })).status, "ok");
+  assert.equal(parseSessionEvent(recorded(1, { digest: sha256("x") })).status, "invalid", "result.digest needs v2");
+});
+
+test("ADR-19 workspace digest is raw sha256 of the attempt's bytes; content identity never crosses schemes", () => {
+  const lf = new TextEncoder().encode("a\nb\n");
+  const crlf = new TextEncoder().encode("a\r\nb\r\n");
+  assert.equal(workspaceDigest(lf), sha256(lf));
+  assert.notEqual(workspaceDigest(lf), workspaceDigest(crlf), "an EOL flip is a change the precondition must see");
+  assert.equal(digestText("a\r\nb\r\n"), digestText("a\nb\n"), "digestText stays the ledger's LF-folded text digest");
+  assert.equal(sameContent({ scheme: "git-blob", oid: "e69de29" }, { scheme: "git-blob", oid: "e69de29" }), true);
+  assert.equal(sameContent({ scheme: "git-blob", oid: "e69de29" }, { scheme: "workspace", digest: workspaceDigest(lf) }), false);
+});
+
+test("ADR-19 attempt/started v3 records reuse, fallback, overlay, dependency links and submodules", () => {
+  const started = (version: number, isolation: Record<string, unknown>) =>
+    envelopeOf("attempt/started", version, {
+      attempt_id: "att_01K5T3Q8Z4X9V2M6N7P0R1S2T8",
+      task_id: "task_01K5T3Q8Z4X9V2M6N7P0R1S2T6",
+      role: "implementer",
+      route: { provider_id: "openai", model_id: "gpt-5.6-luna", adapter_id: "openai-chatgpt", adapter_kind: "model", auth_method: "oauth-subscription", profile: "default" },
+      packet_digest: sha256("packet"),
+      isolation: { mode: "scoped-dir", ...isolation },
+    });
+  const v3 = { fallback: { from: "worktree", reason: "path-too-long", detail: "worktree path exceeds 260 characters" }, overlaid: ["src/lib.mjs"], dependency_links: ["node_modules"], reused: true, submodules: ["vendor/lib"] };
+  assert.equal(parseSessionEvent(started(3, v3)).status, "ok");
+  assert.equal(parseSessionEvent(started(2, v3)).status, "invalid");
+  assert.equal(parseSessionEvent(started(2, {})).status, "ok");
+  assert.equal(parseSessionEvent(started(3, { fallback: { from: "worktree", reason: "because", detail: "x" } })).status, "invalid");
+});
+
+test("ADR-19 path policy: NFC everywhere, one length-preserving case fold without Turkish tailoring", () => {
+  const nfd = "src/şehir.ts";
+  assert.equal(normalizePathUnicode(nfd), "src/şehir.ts");
+  assert.equal(matchesPathPattern(nfd, "src/şehir.ts", { caseInsensitive: false }), true, "an NFD name matches its NFC grant");
+  assert.equal(foldPathCase("readme.md"), foldPathCase("Readme.MD"));
+  assert.equal(foldPathCase("ı"), "I", "dotless i folds with I");
+  assert.equal(foldPathCase("İ"), "İ", "dotted capital I folds only to itself");
+  assert.notEqual(foldPathCase("şehir"), foldPathCase("ŞEHİR"), "as on NTFS, these are different names");
+  assert.equal(foldPathCase("straße"), "STRAßE", "a multi-code-point upper case is kept, the fold is length-preserving");
+  assert.equal(matchesPathPattern("SRC/Auth/a.ts", "src/**/[a-z].ts", { caseInsensitive: true }), true);
+  assert.equal(matchesPathPattern(".GIT/config", ".git", { caseInsensitive: true }), true);
+  assert.equal(hasReservedSegment("src/.Git/config"), true);
+  assert.equal(isCaseInsensitivePlatform("win32"), true);
+  assert.equal(isCaseInsensitivePlatform("darwin"), true);
+  assert.equal(isCaseInsensitivePlatform("linux"), false);
+});
+
+test("ADR-20 prompt cache: an optional request hint with a bounded key", () => {
+  assert.equal(promptCacheSchema.safeParse({ key: "ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4:implementer", stable_system_blocks: 5 }).success, true);
+  assert.equal(promptCacheSchema.safeParse({ key: "has space", stable_system_blocks: 1 }).success, false);
+  assert.ok("cache" in modelRequestSchema.shape);
+  assert.equal(modelRequestSchema.shape.cache.safeParse(undefined).success, true, "requests without a cache hint stay valid");
 });

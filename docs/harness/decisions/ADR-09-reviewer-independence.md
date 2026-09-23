@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Kısmen değiştirildi: [ADR-18](./ADR-18-harness-computed-evidence.md) (2026-09-23). Değişen madde: her `met` hükmü reviewer'ın kendi ürettiği **veya harness'in hesapladığı** (`produced_by: harness`: harness doğrulama çalıştırması, sabitlenmiş diff) en az bir kanıta dayanır; worker kanıtı tek başına yine yetmez. Reviewer işaretçileri toleranslı çözülür, tek düzeltme turu vardır; düzeltmeden sonra çözülmeyen işaretçi review'ü `invalid` yapmaz, bağımsız kanıtı kalmayan `met` `unverifiable` sayılır ve sonuç `revise` geri bildirimidir. Diğer maddeler geçerlidir.
 
 ## Date
 
@@ -16,7 +16,7 @@ Bir modelin "bitti" demesi teslim için yeterli değildir; reviewer implementer 
 
 - Reviewer ayrı bir attempt ve ayrı context'te çalışır; girdisi taze bir packet'tir: sabitlenmiş artifact digest'i, completion packet'i ve kabul ölçütleri. Implementer transkripti asla verilmez.
 - Review packet'inde `independence.separate_context` her zaman `true`'dur; bir attempt kendini inceleyemez.
-- Her `met` kararı reviewer'ın kendi ürettiği en az bir kanıta (`produced_by: reviewer`) dayanır; `accept` tüm ölçütler `met` ve blocker bulgu yokken mümkündür (şema uygular).
+- Her `met` kararı reviewer'ın kendi ürettiği en az bir kanıta (`produced_by: reviewer`) dayanır — ADR-18 ile harness'in hesapladığı kanıt (`produced_by: harness`) da bağımsız sayılır; `accept` tüm ölçütler `met` ve blocker bulgu yokken mümkündür (şema uygular).
 - Router mümkünse farklı model/provider tercih eder; aynıysa `same_provider`/`same_model` kaydedilir.
 - `standard` ve `high-risk` görevlerde review zorunlu; `trivial` görevlerde isteğe bağlıdır.
 

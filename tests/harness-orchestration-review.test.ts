@@ -133,7 +133,7 @@ test("report tools are the claim channel; attempt sessions and the integrate ste
     const started = ofType(events, "attempt/started");
     assert.equal(started.length, 2);
     for (const attempt of started) {
-      assert.equal(attempt.event_version, 2);
+      assert.ok(attempt.event_version >= 2, "session_id arrived in attempt/started v2");
       const turn = runtime.driver.turns.find((entry) => entry.input.attemptId === attempt.data.attempt_id);
       assert.equal(attempt.data.session_id, turn?.input.sessionId);
     }

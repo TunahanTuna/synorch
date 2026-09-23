@@ -9,6 +9,7 @@ import {
   HARNESS_SCHEMA_VERSION,
 } from "./common.ts";
 import { digestSchema } from "./digest.ts";
+import { checkVerificationOutcome, HARNESS_VERIFICATION_STATUSES, REPAIR_KINDS, repairProblemsSchema, toolRefOrdinalSchema } from "./evidence.ts";
 import {
   approvalIdSchema,
   attemptIdSchema,
@@ -44,7 +45,8 @@ import {
   RUN_STATES,
   TASK_STATES,
 } from "./state.ts";
-import { SANDBOX_ENFORCEMENT, toolResultSchema } from "./tools.ts";
+import { ISOLATION_FALLBACK_REASONS } from "./runtime.ts";
+import { PROCESS_TERMINATIONS, SANDBOX_ENFORCEMENT, toolResultSchema } from "./tools.ts";
 
 /**
  * The session event log is the single source of truth. Every line of a segment (after the header)
@@ -193,6 +195,18 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
         mode: z.enum(["worktree", "scoped-dir", "shared-read-only"]),
         path: z.string().min(1).optional(),
         base_commit: z.string().min(1).optional(),
+        /** v3: the workspace of an earlier attempt of the same task, reset and reused (ADR-19). */
+        reused: z.boolean().optional(),
+        /** v3: a worktree could not be created and the attempt fell back to `scoped-dir`. */
+        fallback: z
+          .strictObject({ from: z.literal("worktree"), reason: z.enum(ISOLATION_FALLBACK_REASONS), detail: z.string().min(1).max(2000) })
+          .optional(),
+        /** v3: dirty or untracked read inputs copied from the main tree into the worktree. */
+        overlaid: z.array(pathPatternSchema).max(512).optional(),
+        /** v3: ignored dependency directories linked into the worktree (read-only by policy). */
+        dependency_links: z.array(pathPatternSchema).max(32).optional(),
+        /** v3: submodule (gitlink) paths of the base commit; never populated, never writable. */
+        submodules: z.array(pathPatternSchema).max(256).optional(),
       }),
       /** v2: the attempt's own session, where its turns, tool calls and report live. */
       session_id: sessionIdSchema.optional(),
@@ -208,6 +222,43 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
       completion_digest: digestSchema,
       blob: blobRefSchema,
     }),
+  ),
+  eventOf(
+    "attempt/verification_ran",
+    z
+      .strictObject({
+        attempt_id: attemptIdSchema,
+        task_id: taskIdSchema,
+        /** 1-based position of the command in the packet's `verification.commands`. */
+        ordinal: z.int().min(1).max(100),
+        command: z.string().min(1).max(4000),
+        /** The argv the harness ran; absent when the command could not be expressed as argv. */
+        argv: z.array(z.string()).min(1).max(256).optional(),
+        status: z.enum(HARNESS_VERIFICATION_STATUSES),
+        termination: z.enum(PROCESS_TERMINATIONS).optional(),
+        exit_code: z.int().nullable(),
+        duration_ms: z.int().min(0),
+        /** Head and tail of stdout+stderr, redacted; the full output is `output_blob`. */
+        output_excerpt: z.string().max(4096),
+        output_blob: blobRefSchema.optional(),
+        /** Pinned artifact the command verified (the attempt's diff when it ran). */
+        artifact_digest: digestSchema.optional(),
+        reason: z.string().min(1).max(500).optional(),
+      })
+      .superRefine(checkVerificationOutcome),
+  ),
+  eventOf(
+    "attempt/repair_requested",
+    z.strictObject({
+      attempt_id: attemptIdSchema,
+      task_id: taskIdSchema,
+      kind: z.enum(REPAIR_KINDS),
+      /** 1-based repair round of this attempt; never above `budget`. */
+      round: z.int().min(1),
+      /** The task's `evidence_repairs` budget when the round was requested. */
+      budget: z.int().min(0),
+      problems: repairProblemsSchema,
+    }).refine((repair) => repair.round <= repair.budget, { path: ["round"], message: "a repair round cannot exceed its budget" }),
   ),
   eventOf(
     "task/integrated",
@@ -283,6 +334,8 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
       tool_name: z.string().min(1),
       args_digest: digestSchema,
       args_blob: blobRefSchema.optional(),
+      /** v2: the short ref ordinal (`[#n]`) of this call within its attempt (ADR-18). */
+      ref: toolRefOrdinalSchema.optional(),
     }),
   ),
   eventOf(
@@ -381,7 +434,16 @@ export type SessionEventOf<T extends SessionEventType> = Extract<SessionEvent, {
 export const EVENT_FIELD_VERSIONS = {
   "session/opened": { config_ignored: 2 },
   "session/resumed": { torn_tail: 2 },
-  "attempt/started": { session_id: 2 },
+  "attempt/started": {
+    session_id: 2,
+    "isolation.reused": 3,
+    "isolation.fallback": 3,
+    "isolation.overlaid": 3,
+    "isolation.dependency_links": 3,
+    "isolation.submodules": 3,
+  },
+  "tool/call_proposed": { ref: 2 },
+  "tool/result_recorded": { "result.digest": 2 },
   "tool/policy_decided": { "action.escapes": 2 },
   "policy/snapshot": { "policy.exec_confinement": 2, "policy.verification_commands": 2, "policy.workspace_trusted": 3 },
 } as const satisfies { readonly [T in SessionEventType]?: Readonly<Record<string, number>> };

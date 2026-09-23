@@ -9,7 +9,8 @@ import {
   workerRoleSchema,
   type WorkerRole,
 } from "./common.ts";
-import { digestOf, digestSchema, type Digest } from "./digest.ts";
+import { digestOf, digestSchema, SOURCE_DIGEST_SCHEMES, type Digest } from "./digest.ts";
+import { evidenceResolutionSchema, harnessEvidenceSchema, repairCountsSchema } from "./evidence.ts";
 import {
   acceptanceCriterionIdSchema,
   attemptIdSchema,
@@ -224,6 +225,23 @@ const knownFactSchema = z.strictObject({
 
 export const TASK_PACKET_SCHEMA_VERSION = 2 as const;
 
+/** Per-file and total caps for read_paths contents inlined into a packet (ADR-20). */
+export const INLINE_SOURCE_MAX_BYTES = 8 * 1024;
+export const INLINE_SOURCES_MAX_TOTAL_BYTES = 32 * 1024;
+
+const utf8Length = (text: string): number => new TextEncoder().encode(text).length;
+
+/**
+ * A small read_paths file inlined into the packet so the worker need not read it again. `digest`
+ * is the source's digest (same scheme as `context.sources`); `truncated` content is a prefix.
+ */
+const inlineSourceSchema = z.strictObject({
+  path: pathPatternSchema,
+  digest: digestSchema,
+  content: z.string().refine((text) => utf8Length(text) <= INLINE_SOURCE_MAX_BYTES, `inline content is at most ${INLINE_SOURCE_MAX_BYTES} bytes`),
+  truncated: z.boolean(),
+});
+
 export const taskContextPacketSchema = z
   .strictObject({
     schema_version: z.literal(TASK_PACKET_SCHEMA_VERSION),
@@ -260,6 +278,14 @@ export const taskContextPacketSchema = z
       created_at: timestampSchema,
       project_snapshot: digestSchema.optional(),
       sources: z.array(z.strictObject({ path: pathPatternSchema, digest: digestSchema })),
+      /**
+       * How `sources` and `known_facts` digests were computed (ADR-19). `workspace-raw-v1`: raw bytes
+       * in the attempt's own workspace after isolation, so they are valid write preconditions there.
+       * Absent means `text-lf-v1` (pre-ADR-19 packets); readers compare with the same scheme.
+       */
+      digest_scheme: z.enum(SOURCE_DIGEST_SCHEMES).optional(),
+      /** Small read_paths contents inlined for the worker (ADR-20); each one is a listed source. */
+      inline_sources: z.array(inlineSourceSchema).max(32).optional(),
     }),
     expected_report: z.array(z.string().min(1)).min(1),
   })
@@ -288,6 +314,20 @@ export const taskContextPacketSchema = z
           message: "every known fact must cite a source listed in context.sources with the same digest",
         });
       }
+    }
+    let inlined = 0;
+    for (const [index, inline] of (packet.context.inline_sources ?? []).entries()) {
+      inlined += utf8Length(inline.content);
+      if (!sourced.has(`${inline.path}\u0000${inline.digest}`)) {
+        context.addIssue({
+          code: "custom",
+          path: ["context", "inline_sources", index, "digest"],
+          message: "an inlined source must be listed in context.sources with the same digest",
+        });
+      }
+    }
+    if (inlined > INLINE_SOURCES_MAX_TOTAL_BYTES) {
+      context.addIssue({ code: "custom", path: ["context", "inline_sources"], message: `inlined sources exceed ${INLINE_SOURCES_MAX_TOTAL_BYTES} bytes in total` });
     }
   });
 export type TaskContextPacket = z.infer<typeof taskContextPacketSchema>;
@@ -349,8 +389,38 @@ export const completionPacketSchema = z
     unresolved_risks: z.array(nonEmptyTextSchema),
     recommended_context_updates: z.array(nonEmptyTextSchema),
     root_cause: z.string().min(1).optional(),
+    /** Facts the harness computed itself after the worker's turn (ADR-18): verification runs, the diff. */
+    harness_evidence: harnessEvidenceSchema.optional(),
+    /** How every model-written pointer resolved (or why it did not), after the correction round. */
+    evidence_resolution: z.array(evidenceResolutionSchema).max(200).optional(),
+    repairs: repairCountsSchema.optional(),
   })
   .superRefine((packet, context) => {
+    const harnessRefs = new Set([
+      ...(packet.harness_evidence?.verification ?? []).map((record) => `${record.evidence.kind}\u0000${record.evidence.ref}`),
+      ...(packet.harness_evidence?.diff === undefined ? [] : [`${packet.harness_evidence.diff.evidence.kind}\u0000${packet.harness_evidence.diff.evidence.ref}`]),
+    ]);
+    for (const [index, entry] of packet.acceptance_evidence.entries()) {
+      for (const [position, evidence] of entry.evidence.entries()) {
+        if (evidence.produced_by === "harness" && !harnessRefs.has(`${evidence.kind}\u0000${evidence.ref}`)) {
+          context.addIssue({
+            code: "custom",
+            path: ["acceptance_evidence", index, "evidence", position],
+            message: "harness evidence must be one of the records in harness_evidence",
+          });
+        }
+      }
+    }
+    const diff = packet.harness_evidence?.diff;
+    if (diff !== undefined) {
+      if (diff.evidence.ref !== packet.artifact_digest) {
+        context.addIssue({ code: "custom", path: ["harness_evidence", "diff", "evidence", "ref"], message: "the harness diff points at the pinned artifact digest" });
+      }
+      const reported = new Set(packet.changed_paths.map((change) => change.path));
+      if (diff.changed_paths.length !== reported.size || diff.changed_paths.some((path) => !reported.has(path))) {
+        context.addIssue({ code: "custom", path: ["harness_evidence", "diff", "changed_paths"], message: "the harness diff lists exactly the changed paths" });
+      }
+    }
     for (const [index, change] of packet.changed_paths.entries()) {
       if (isReservedWritePattern(change.path)) {
         context.addIssue({ code: "custom", path: ["changed_paths", index, "path"], message: "reserved path reported as changed" });
@@ -374,6 +444,12 @@ export const completionPacketSchema = z
 export type CompletionPacket = z.infer<typeof completionPacketSchema>;
 
 export const FINDING_SEVERITIES = ["blocker", "major", "minor", "info"] as const;
+
+/**
+ * Evidence that is independent of the reviewed worker (ADR-09 as amended by ADR-18): what the
+ * reviewer produced itself, or what the harness computed (never the worker's claim).
+ */
+const INDEPENDENT_REVIEW_PRODUCERS: ReadonlySet<string> = new Set(["reviewer", "harness"]);
 export const REVIEW_DECISIONS = ["accept", "revise", "block"] as const;
 
 const reviewCriterionSchema = z.strictObject({
@@ -410,6 +486,9 @@ export const reviewPacketSchema = z
     criteria: z.array(reviewCriterionSchema).min(1),
     findings: z.array(reviewFindingSchema),
     decision: z.enum(REVIEW_DECISIONS),
+    /** How the reviewer's pointers resolved after its correction round (ADR-18). */
+    evidence_resolution: z.array(evidenceResolutionSchema).max(200).optional(),
+    repairs: repairCountsSchema.pick({ report_corrections: true }).optional(),
   })
   .superRefine((review, context) => {
     if (review.reviewed_attempt_id === review.reviewer_attempt_id) {
@@ -417,11 +496,11 @@ export const reviewPacketSchema = z
     }
     report(context, checkUniqueCriteria(review.criteria.map((criterion) => ({ id: criterion.criterion_id })), ["criteria"]));
     for (const [index, criterion] of review.criteria.entries()) {
-      if (criterion.verdict === "met" && !criterion.evidence.some((evidence) => evidence.produced_by === "reviewer")) {
+      if (criterion.verdict === "met" && !criterion.evidence.some((evidence) => INDEPENDENT_REVIEW_PRODUCERS.has(evidence.produced_by))) {
         context.addIssue({
           code: "custom",
           path: ["criteria", index, "evidence"],
-          message: "a met verdict needs at least one piece of evidence the reviewer produced itself",
+          message: "a met verdict needs at least one piece of evidence the reviewer produced itself or the harness computed",
         });
       }
     }
@@ -475,7 +554,9 @@ export function packetDigest(packet: AnyTaskPacket | CompletionPacket | ReviewPa
 
 /**
  * Freshness gate for dispatch: every cited source must still hash to the digest in the packet.
- * `current` maps workspace-relative paths to their present digests (undefined = missing).
+ * `current` maps workspace-relative paths to their present digests (undefined = missing), computed
+ * with the packet's `context.digest_scheme` in the workspace the packet was computed against (the
+ * attempt workspace for `workspace-raw-v1`, ADR-19).
  */
 export function findStaleSources(
   packet: TaskContextPacket,

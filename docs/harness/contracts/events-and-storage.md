@@ -50,7 +50,9 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | `task/created` | `task_id`, `plan_id`, `key`, `role`, `depends_on`, `owned_paths`, `risk` | Hayır | orchestration |
 | `task/state_changed` | `task_id`, `from`, `to`, `reason` | Hayır | orchestration |
 | `task/packet_issued` | `task_id`, `kind`, `packet_digest`, `blob` | Worker'a packet | orchestration |
-| `attempt/started` (v2) | `attempt_id`, `task_id`, `role`, `route`, `packet_digest`, `isolation`, `session_id?` (v2: attempt'in kendi session'ı) | Hayır | orchestration |
+| `attempt/started` (v3) | `attempt_id`, `task_id`, `role`, `route`, `packet_digest`, `isolation`, `session_id?` (v2: attempt'in kendi session'ı); v3 (ADR-19): `isolation.reused?`, `isolation.fallback?{from: worktree, reason, detail}`, `isolation.overlaid?[]`, `isolation.dependency_links?[]`, `isolation.submodules?[]` | Hayır | orchestration |
+| `attempt/verification_ran` | `attempt_id`, `task_id`, `ordinal`, `command`, `argv?`, `status` (`passed`\|`failed`\|`not-run`), `termination?`, `exit_code`, `duration_ms`, `output_excerpt` (≤ 4 KiB, redakte), `output_blob?`, `artifact_digest?`, `reason?` — harness'in koştuğu doğrulama komutu (ADR-18) | Onarım turunda sorun olarak | orchestration |
+| `attempt/repair_requested` | `attempt_id`, `task_id`, `kind` (`evidence-repair`\|`verification-repair`), `round` (≤ `budget`), `budget`, `problems[]` — aynı attempt session'ının session içi onarımı (ADR-18) | Sorunlar evet (onarım mesajı) | orchestration |
 | `attempt/state_changed` | `attempt_id`, `from`, `to`, `reason` | Hayır | orchestration |
 | `task/integrated` | `task_id`, `attempt_id`, `artifact_digest`, `paths[]` | Hayır | orchestration |
 | `attempt/completion_recorded` | `attempt_id`, `task_id`, `status`, `completion_digest`, `blob` | Orchestrator'a | orchestration |
@@ -62,10 +64,10 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | `model/response_settled` | `request_id`, `stop_reason`, `usage?` | Hayır | core |
 | `model/response_failed` | `request_id`, `error`, `partial_blob?` | Gerekli hata | core |
 | `provider/usage` | `request_id`, `usage`, `quota?` | Hayır | core |
-| `tool/call_proposed` | `tool_call_id`, `request_id?`, `provider_call_id`, `tool_name`, `args_digest`, `args_blob?` | Call evet | tools |
+| `tool/call_proposed` (v2) | `tool_call_id`, `request_id?`, `provider_call_id`, `tool_name`, `args_digest`, `args_blob?`, `ref?` (v2: attempt içi kısa ref sırası, `[#n]`, ADR-18) | Call evet | tools |
 | `tool/policy_decided` (v2) | `tool_call_id`, `action` (v2: `action.escapes?`), `decision` | Hayır | tools/policy |
 | `tool/execution_started` | `tool_call_id`, `sandbox_enforcement` | Hayır | tools |
-| `tool/result_recorded` | `tool_call_id`, `state`, `result`, `duration_ms` | Result evet | tools |
+| `tool/result_recorded` (v2) | `tool_call_id`, `state`, `result` (v2: `result.digest?`, ADR-19), `duration_ms` | Result evet (`[#n] …`) | tools |
 | `tool/interrupted` | `tool_call_id`, `outcome: unknown`, `idempotent` | Bildirim | core (recovery) |
 | `context/compacted` | `from_seq`, `to_seq`, `first_kept_seq`, `method`, `summary_blob`, `trigger`, token sayıları | Özet evet | context |
 | `context/source_changed` | `task_id?`, `path`, `expected`, `actual` | Bildirim | context |
@@ -84,7 +86,7 @@ Eşleşme invariant'ları: her `tool/call_proposed` bir `tool/result_recorded` v
 
 `parseSessionEvent(raw)` üç sonuç verir: `ok`, `unsupported` (bilinmeyen `type` veya bilinen tipte daha yüksek `event_version`), `invalid` (bilinen tip şemaya uymuyor = bozulma). `unsupported` sessizce atlanmaz; projection "bu session daha yeni bir sürümle yazılmış" hatası verir ve yazma için açmaz. Payload değişikliği: alan eklemek bile `event_version` artırır; okuyucu eski sürümleri desteklemeye devam eder; eski log hiçbir zaman yeniden yazılmaz.
 
-Sürümlü alanlar `EVENT_FIELD_VERSIONS` tablosundadır (tip → alan → alanı getiren sürüm); `EVENT_VERSIONS[type]` bu tablodaki en yüksek sürümdür ve yazıcılar her zaman onu damgalar. Yeni alanlar şemada opsiyoneldir, böylece eski sürüm olaylar aynı şemayla okunur; daha eski sürümle damgalanmış ama yeni alanı taşıyan olay `invalid`'dir (o sürüm yazamazdı). Dalga 2a: `session/resumed` v2 (`torn_tail`), `attempt/started` v2 (`session_id`), `tool/policy_decided` v2 (`action.escapes`); `task/integrated` yeni tip (v1) — onu tanımayan eski okuyucu `unsupported` raporlar. Güvenlik düzeltmesi: `session/opened` v2 (`config_ignored`). Exec kısıtı: `policy/snapshot` v2 (`policy.exec_confinement`, `policy.verification_commands`). Çalışma alanı güveni (SEC-N1): `policy/snapshot` v3 (`policy.workspace_trusted`); `trust/granted`, `trust/revoked`, `trust/used` yeni tipler (v1). Güven kararları (`syn trust`, etkileşimli tek seferlik soru) projenin `syn trust decisions` oturumuna, güvene dayanan run'ın `trust/used` olayı run günlüğüne yazılır.
+Sürümlü alanlar `EVENT_FIELD_VERSIONS` tablosundadır (tip → alan → alanı getiren sürüm); `EVENT_VERSIONS[type]` bu tablodaki en yüksek sürümdür ve yazıcılar her zaman onu damgalar. Yeni alanlar şemada opsiyoneldir, böylece eski sürüm olaylar aynı şemayla okunur; daha eski sürümle damgalanmış ama yeni alanı taşıyan olay `invalid`'dir (o sürüm yazamazdı). Dalga 2a: `session/resumed` v2 (`torn_tail`), `attempt/started` v2 (`session_id`), `tool/policy_decided` v2 (`action.escapes`); `task/integrated` yeni tip (v1) — onu tanımayan eski okuyucu `unsupported` raporlar. Güvenlik düzeltmesi: `session/opened` v2 (`config_ignored`). Exec kısıtı: `policy/snapshot` v2 (`policy.exec_confinement`, `policy.verification_commands`). Çalışma alanı güveni (SEC-N1): `policy/snapshot` v3 (`policy.workspace_trusted`); `trust/granted`, `trust/revoked`, `trust/used` yeni tipler (v1). Güven kararları (`syn trust`, etkileşimli tek seferlik soru) projenin `syn trust decisions` oturumuna, güvene dayanan run'ın `trust/used` olayı run günlüğüne yazılır. Canlı çalıştırma sağlamlaştırması (ADR-18/19): `tool/call_proposed` v2 (`ref`), `tool/result_recorded` v2 (`result.digest`), `attempt/started` v3 (`isolation.reused`, `isolation.fallback`, `isolation.overlaid`, `isolation.dependency_links`, `isolation.submodules`); `attempt/verification_ran` ve `attempt/repair_requested` yeni tipler (v1).
 
 ## 5. Disk yerleşimi
 
@@ -111,7 +113,9 @@ worktrees/<project-id>/<attempt-id>/   (ADR-07)
 
 ## 7. Digest
 
-`digestOf(value)` = `sha256(canonicalJson(value))`. Canonical JSON: anahtarlar code point sırasıyla, `undefined` üyeler atılır, sonlu olmayan sayı/bigint reddedilir. Metin kaynakları `digestText` ile satır sonları `\n`'e normalize edilerek özetlenir (statik observation ledger ile aynı kural). Runtime digest'i her zaman 64 hex'tir; kısaltılmış digest kabul edilmez.
+`digestOf(value)` = `sha256(canonicalJson(value))`. Canonical JSON: anahtarlar code point sırasıyla, `undefined` üyeler atılır, sonlu olmayan sayı/bigint reddedilir. Runtime digest'i her zaman 64 hex'tir; kısaltılmış digest kabul edilmez.
+
+**Çalışma alanı dosyaları için tek şema (ADR-19):** `workspaceDigest(bytes)` = dosyanın bir çalışma alanı kökündeki ham baytlarının SHA-256'sı; kod çözme, EOL katlama, BOM ayıklama veya filtre yoktur. Modele görünen her dosya digest'i (paket `sources`/`known_facts` — `context.digest_scheme: workspace-raw-v1`, `read_file` başlığı ve `ToolResult.digest`, `write_file`/`apply_patch` önkoşulu, completion `changed_paths` before/after) bu şemayla ve modelin çalıştığı çalışma alanında hesaplanır; iki farklı ağacın digest'i birbiriyle hiç karşılaştırılmaz. Ağaçlar arası karşılaştırma (worktree ↔ ana ağaç: integrate çakışma tespiti) `ContentIdentity` ile yapılır: git'in izlediği dosyalar için `git hash-object --path=<p>` blob kimliği (o ağacın clean filtresi ve EOL dönüşümü uygulanmış), diğerleri için `workspaceDigest`; farklı şemalar asla eşit sayılmaz ve bu kimlik modele veya pakete yazılmaz. `digestText` (satır sonları `\n`'e normalize) yalnız statik observation ledger, hafıza `source_digest` ve ADR-19 öncesi paketler (`text-lf-v1`) içindir.
 
 ## 8. Örnekler
 
@@ -385,7 +389,93 @@ Dalga 2a sürümlü olaylar (v2 alanları ve yeni `task/integrated`):
     repo_identity: "git:5f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275"
 ```
 
-Reddedilmesi gerekenler: `seq: 0`, runtime kimliği olmayan kayıtlı tool call, strict payload'a fazladan alan (yetki alanı sızdırma denemesi), v2 alanı taşıyan v1 olay:
+Canlı çalıştırma sağlamlaştırması olayları (ADR-18/19):
+
+```yaml example=session-event
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2W1
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 30
+  event_version: 2
+  timestamp: "2026-09-23T12:01:00.000Z"
+  actor: { kind: worker, role: implementer, attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8 }
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+  attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+  type: tool/call_proposed
+  data:
+    tool_call_id: call_01K5T3Q8Z4X9V2M6N7P0R1S2TE
+    provider_call_id: fc_68d2a1
+    tool_name: exec
+    args_digest: "sha256:aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+    ref: 5
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2W2
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 41
+  event_version: 1
+  timestamp: "2026-09-23T12:02:00.000Z"
+  actor: { kind: orchestrator, role: orchestrator }
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+  attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+  type: attempt/verification_ran
+  data:
+    attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+    task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+    ordinal: 1
+    command: node check.mjs
+    argv: [node, check.mjs]
+    status: passed
+    termination: exited
+    exit_code: 0
+    duration_ms: 212
+    output_excerpt: "ok\n"
+    artifact_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2W3
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 42
+  event_version: 1
+  timestamp: "2026-09-23T12:02:01.000Z"
+  actor: { kind: orchestrator, role: orchestrator }
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+  type: attempt/repair_requested
+  data:
+    attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+    task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+    kind: evidence-repair
+    round: 1
+    budget: 2
+    problems: ["AC-2: 'the tests pass' names no tool call, ref or path of this attempt"]
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2W4
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 20
+  event_version: 3
+  timestamp: "2026-09-23T12:00:30.000Z"
+  actor: { kind: orchestrator, role: orchestrator }
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+  type: attempt/started
+  data:
+    attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+    task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+    role: implementer
+    route: { provider_id: openai, model_id: gpt-5.6-luna, adapter_id: openai-chatgpt, adapter_kind: model, auth_method: oauth-subscription, profile: default }
+    packet_digest: "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+    isolation:
+      mode: worktree
+      path: /home/dev/.synorch/worktrees/syn-smoke-2fecb8f8/att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+      base_commit: 62f0b12
+      reused: false
+      overlaid: [check.mjs]
+      dependency_links: [node_modules]
+    session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T7
+```
+
+Reddedilmesi gerekenler: `seq: 0`, runtime kimliği olmayan kayıtlı tool call, strict payload'a fazladan alan (yetki alanı sızdırma denemesi), v2 alanı taşıyan v1 olay, sıfırdan farklı çıkışla `passed` doğrulama, bütçeyi aşan onarım turu:
 
 ```yaml example=session-event invalid
 - schema_version: 1
@@ -449,6 +539,54 @@ Reddedilmesi gerekenler: `seq: 0`, runtime kimliği olmayan kayıtlı tool call,
     workspace_root: /home/dev/synorch
     repo_identity: "git:5f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275f2e2275"
     source: repository
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2W5
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 30
+  event_version: 1
+  timestamp: "2026-09-23T12:01:00.000Z"
+  actor: { kind: worker, role: implementer }
+  type: tool/call_proposed
+  data:
+    tool_call_id: call_01K5T3Q8Z4X9V2M6N7P0R1S2TE
+    provider_call_id: fc_68d2a1
+    tool_name: exec
+    args_digest: "sha256:aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+    ref: 5
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2W6
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 41
+  event_version: 1
+  timestamp: "2026-09-23T12:02:00.000Z"
+  actor: { kind: orchestrator, role: orchestrator }
+  type: attempt/verification_ran
+  data:
+    attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+    task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+    ordinal: 1
+    command: node check.mjs
+    argv: [node, check.mjs]
+    status: passed
+    termination: exited
+    exit_code: 1
+    duration_ms: 212
+    output_excerpt: "fail\n"
+- schema_version: 1
+  event_id: evt_01K5T3Q8Z4X9V2M6N7P0R1S2W7
+  session_id: ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4
+  seq: 43
+  event_version: 1
+  timestamp: "2026-09-23T12:02:02.000Z"
+  actor: { kind: orchestrator, role: orchestrator }
+  type: attempt/repair_requested
+  data:
+    attempt_id: att_01K5T3Q8Z4X9V2M6N7P0R1S2T8
+    task_id: task_01K5T3Q8Z4X9V2M6N7P0R1S2T6
+    kind: evidence-repair
+    round: 3
+    budget: 2
+    problems: ["AC-2 still has no resolvable evidence"]
 ```
 
 Son örnek: güveni yalnız kullanıcı verir (`prompt` veya `command`); depo içeriği bir güven kaynağı değildir (SEC-N1).

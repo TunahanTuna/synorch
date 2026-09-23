@@ -43,8 +43,41 @@ export function isWholeWorkspacePattern(pattern: string): boolean {
 }
 
 export function isReservedWritePattern(pattern: string): boolean {
-  const reserved: readonly string[] = RESERVED_WRITE_SEGMENTS;
-  return patternSegments(pattern).some((segment) => reserved.includes(segment.toLowerCase()));
+  const reserved = RESERVED_WRITE_SEGMENTS.map((segment) => foldPathCase(segment));
+  return patternSegments(pattern).some((segment) => reserved.includes(foldPathCase(segment)));
+}
+
+/** Platforms whose default volumes (NTFS, APFS/HFS+) compare file names case-insensitively. */
+export const CASE_INSENSITIVE_PLATFORMS = ["win32", "darwin"] as const;
+
+export function isCaseInsensitivePlatform(platform: string): boolean {
+  return (CASE_INSENSITIVE_PLATFORMS as readonly string[]).includes(platform);
+}
+
+/**
+ * Unicode form every workspace path is compared in (ADR-19): NFC. macOS may hand back NFD names
+ * (`s` + U+0327) for a file the packet names in NFC (U+015F); both are the same path.
+ */
+export function normalizePathUnicode(path: string): string {
+  return path.normalize("NFC");
+}
+
+/**
+ * The one case-folding policy for paths on case-insensitive platforms (ADR-19): NFC, then a
+ * length-preserving, locale-independent per-code-point upper-casing (a code point whose upper case
+ * is not a single code point is kept). It approximates the ordinal-ignore-case comparison NTFS and
+ * APFS apply, and it never applies Turkish tailoring: `i`/`I` fold together, `ı`/`I` fold together,
+ * `İ` folds only to itself, so `şehir` and `ŞEHİR` are different names (as they are on NTFS).
+ * Every comparison that treats paths case-insensitively (scope grants and denials, reserved
+ * segments, overlap, diff-vs-owned checks) uses this function and nothing else.
+ */
+export function foldPathCase(path: string): string {
+  let folded = "";
+  for (const character of normalizePathUnicode(path)) {
+    const upper = character.toUpperCase();
+    folded += [...upper].length === 1 ? upper : character;
+  }
+  return folded;
 }
 
 /**
@@ -54,8 +87,8 @@ export function isReservedWritePattern(pattern: string): boolean {
  * writers race, so the test only ever errs towards "overlaps".
  */
 export function pathPatternsOverlap(left: string, right: string): boolean {
-  const a = normalizeRelativePath(left).toLowerCase();
-  const b = normalizeRelativePath(right).toLowerCase();
+  const a = foldPathCase(normalizeRelativePath(left));
+  const b = foldPathCase(normalizeRelativePath(right));
   if (a === b) return true;
   const aStatic = staticPrefix(a);
   const bStatic = staticPrefix(b);
@@ -89,8 +122,8 @@ const segmentPatternCache = new Map<string, RegExp>();
  * is matched case-insensitively.
  */
 export function matchesPathPattern(candidate: string, pattern: string, options: PathMatchOptions): boolean {
-  const pathSegments = patternSegments(candidate);
-  const globSegments = patternSegments(pattern);
+  const pathSegments = patternSegments(normalizePathUnicode(candidate));
+  const globSegments = patternSegments(normalizePathUnicode(pattern));
   if (globSegments.length === 1 && globSegments[0] === ".") return true;
   if (!GLOB_CHARACTERS.test(pattern)) {
     if (globSegments.length > pathSegments.length) return false;
@@ -108,10 +141,10 @@ export function matchesAnyPathPattern(candidate: string, patterns: readonly stri
  * searching `src` is a read inside scope when the scope is `src/auth/**`.
  */
 export function isAncestorOfAnyPattern(candidate: string, patterns: readonly string[], options: PathMatchOptions): boolean {
-  const pathSegments = patternSegments(candidate);
+  const pathSegments = patternSegments(normalizePathUnicode(candidate));
   if (pathSegments.length === 1 && pathSegments[0] === ".") return patterns.length > 0;
   return patterns.some((pattern) => {
-    const prefix = staticPrefix(pattern);
+    const prefix = staticPrefix(normalizePathUnicode(pattern));
     if (prefix.length < pathSegments.length) return false;
     return pathSegments.every((segment, index) => sameSegment(prefix[index] ?? "", segment, options));
   });
@@ -123,7 +156,7 @@ export function hasReservedSegment(candidate: string): boolean {
 }
 
 function sameSegment(left: string, right: string, options: PathMatchOptions): boolean {
-  return options.caseInsensitive ? left.toLowerCase() === right.toLowerCase() : left === right;
+  return options.caseInsensitive ? foldPathCase(left) === foldPathCase(right) : left === right;
 }
 
 function matchSegments(
@@ -142,7 +175,8 @@ function matchSegments(
     return false;
   }
   if (pathIndex === pathSegments.length) return false;
-  if (!segmentRegExp(segment, options).test(pathSegments[pathIndex] ?? "")) return false;
+  const actual = pathSegments[pathIndex] ?? "";
+  if (!segmentRegExp(segment, options).test(options.caseInsensitive ? foldPathCase(actual) : actual)) return false;
   return matchSegments(pathSegments, pathIndex + 1, globSegments, globIndex + 1, options);
 }
 
@@ -150,7 +184,7 @@ function segmentRegExp(segment: string, options: PathMatchOptions): RegExp {
   const key = `${options.caseInsensitive ? "i" : "s"}:${segment}`;
   const cached = segmentPatternCache.get(key);
   if (cached !== undefined) return cached;
-  const compiled = new RegExp(`^${segmentSource(segment)}$`, options.caseInsensitive ? "iu" : "u");
+  const compiled = new RegExp(`^${segmentSource(options.caseInsensitive ? foldPathCase(segment) : segment)}$`, "u");
   segmentPatternCache.set(key, compiled);
   return compiled;
 }

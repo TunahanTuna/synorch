@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted
+Accepted. Kısmen değiştirildi: [ADR-19](./ADR-19-workspace-fidelity.md) (2026-09-23). Aşağıdaki karar maddeleri geçerlidir; ADR-19 şunları ekler veya değiştirir:
+
+- Worktree oluşturma başarısız olursa `high-risk` olmayan görev kayıtlı bir yedekle (`fallback.reason`) `scoped-dir`'e düşer; `core.longpaths` açıktır; öksüz worktree/owner dosyası kalmaz.
+- Aynı görevin retry/onarım/revizyon attempt'leri çalışma alanını sıfırlayarak yeniden kullanır (`IsolationCreateOptions.reuse`); çalışma alanı görev sonuçlanınca atılır.
+- Ana ağaçta kirli/izlenmeyen okuma girdileri worktree'ye overlay edilir; ignore edilen bağımlılık dizinleri salt okunur bağlanır; submodule içi owned path reddedilir.
+- Integrate çakışmayı ham baytla değil `ContentIdentity` (filtreli git blob kimliği) ile saptar ve içeriği ana ağacın EOL/filtre gösterimine çevirir.
+- Paket kaynak digest'leri izolasyondan sonra attempt çalışma alanında `workspaceDigest` ile hesaplanır.
+- "Kullanıcının commit edilmemiş değişiklikleri `owned_paths` ile çakışıyorsa `scoped-dir`" kuralı değişmedi.
 
 ## Date
 

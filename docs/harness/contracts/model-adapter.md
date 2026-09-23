@@ -26,7 +26,8 @@ interface ModelAdapter {
 - **İptal** `AbortSignal` ile yapılır; stream `error{code: cancelled}` ile kapanır, kısmi içerik `partial` alanında korunur. İptal edilmiş veya hatalı cevap hiçbir zaman `done` olmaz.
 - **Usage** stream içindeki `usage` olayı ve `done.usage` ile gelir; kaynak etiketi zorunludur (`provider-reported | adapter-estimated | unknown`). Abonelik kotası ayrı `quota` olayıdır; token/USD ile karıştırılmaz.
 - `prepare` desteklenmeyen özelliği (ör. görsel girdi) istek gönderilmeden `invalid_request`/`model_unavailable` olarak bildirir; **sahte emülasyon yoktur**.
-- `ModelRequest` = `request_id`, `route`, `system[]` (her blok `source`, `trust`, `digest`), `messages[]`, `tools[]`, `max_output_tokens?`, `reasoning_effort?`. İstek ContextBuilder tarafından kurulur, gönderilmeden önce blob olarak kaydedilir; `envelope_digest = digestOf(request)`.
+- `ModelRequest` = `request_id`, `route`, `system[]` (her blok `source`, `trust`, `digest`), `messages[]`, `tools[]`, `max_output_tokens?`, `reasoning_effort?`, `cache?`. İstek ContextBuilder tarafından kurulur, gönderilmeden önce blob olarak kaydedilir; `envelope_digest = digestOf(request)`.
+- **Prompt cache (ADR-20):** `cache = {key, stable_system_blocks}`. `key` bir session + rol için sabittir (ör. `<session_id>:<role>`, 1–64 `[A-Za-z0-9._:-]`). İlk `stable_system_blocks` sistem bloğu o session'ın her adımında bayt bayt aynıdır (değişken bloklar — packet, hafıza, compaction — sonra gelir). OpenAI Responses adapter'ları (`openai-chatgpt`, `openai-responses`) `prompt_cache_key = key` gönderir; `anthropic-messages` `cache_control: {type: ephemeral}` kırılma noktalarını son kararlı sistem bloğundan ve araç listesinden sonra koyar. Önbelleği desteklemeyen adapter alanı yok sayar; alan modelin gördüğünü asla değiştirmez. Tool sonucu metni `renderToolResultText` çıktısıdır (`[#n] …`, ADR-18) ve adapter'lar onu aynen gönderir.
 - `trust: untrusted` bloklar (repo metni, tool çıktısı, hafıza) hiçbir zaman talimat önceliğine yükseltilmez.
 
 ### Stream dilbilgisi
@@ -298,4 +299,17 @@ fallback: { used: true, from: { provider_id: openai, model_id: gpt-5.6-sol, adap
   expires_at: "2026-09-22T11:00:00Z"
   originator: codex_cli_rs
   obtained_at: "2026-09-22T10:00:00Z"
+```
+
+Prompt cache ipucu (ADR-20):
+
+```yaml example=prompt-cache
+- { key: "ses_01K5T3Q8Z4X9V2M6N7P0R1S2T4:implementer", stable_system_blocks: 5 }
+- { key: "run_01K5T3Q8Z4X9V2M6N7P0R1S2T3.orchestrator", stable_system_blocks: 0 }
+```
+
+```yaml example=prompt-cache invalid
+- { key: "", stable_system_blocks: 1 }
+- { key: "has spaces", stable_system_blocks: 1 }
+- { key: "ok", stable_system_blocks: -1 }
 ```

@@ -126,6 +126,19 @@ export const toolDescriptorSchema = z.strictObject({
 export type ToolDescriptor = z.infer<typeof toolDescriptorSchema>;
 
 /**
+ * Prompt caching hint (ADR-20). `key` is stable for one session and role (e.g.
+ * `<session_id>:<role>`); the OpenAI Responses adapters send it as `prompt_cache_key`. The first
+ * `stable_system_blocks` system blocks are byte-identical on every step of that session; the
+ * Anthropic Messages adapter puts its `cache_control` breakpoints after the last of them and after
+ * the tool list. Adapters that cannot cache ignore it; it never changes what the model sees.
+ */
+export const promptCacheSchema = z.strictObject({
+  key: z.string().regex(/^[A-Za-z0-9._:-]{1,64}$/, "cache key must be 1-64 [A-Za-z0-9._:-]"),
+  stable_system_blocks: z.int().min(0).max(64),
+});
+export type PromptCache = z.infer<typeof promptCacheSchema>;
+
+/**
  * Everything the model sees for one step. It is built by the ContextBuilder from the event log
  * and blobs, recorded (as a blob) before it is sent, and bound by `envelopeDigest`.
  */
@@ -137,6 +150,7 @@ export const modelRequestSchema = z.strictObject({
   tools: z.array(toolDescriptorSchema),
   max_output_tokens: z.int().positive().optional(),
   reasoning_effort: z.enum(["low", "medium", "high"]).optional(),
+  cache: promptCacheSchema.optional(),
 });
 export type ModelRequest = z.infer<typeof modelRequestSchema>;
 

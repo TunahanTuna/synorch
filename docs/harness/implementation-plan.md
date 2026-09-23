@@ -220,3 +220,130 @@ Dalga 1 iş akışlarının bildirdiği 20 sözleşme değişiklik isteği enteg
 | Glob eşleştirici | Kabul: üç kopya (I3 ×2, I4) yerine `contracts/paths.ts` içindeki saf eşleştirici. |
 
 Olay sürümleme kuralı uygulandı: yeni alanlar opsiyonel, `EVENT_FIELD_VERSIONS` tablosu tip sürümünü yükseltir, eski sürüm olaylar okunmaya devam eder, eski sürümle damgalanmış yeni alan `invalid`'dir. Kapı: `pnpm check` 507 test, 506 geçti, 1 platform atlaması, 0 hata. Sonraki adım I5-B (composition root, e2e); bilmesi gerekenler runtime-seams.md'de: `credentials` resolver'ı auth sağlayıcılarına bağlamak, rapor araçlarının kayıtta hazır olması (callback gerekmez), `MemoryStore.decide` sonucunu olay olarak yazmak, router yapılandırmasını `ModelRouterConfig`'e çevirmek.
+
+## 7. Canlı çalıştırma sağlamlaştırma dalgası
+
+> Durum: `accepted` plan, 2026-09-23. Taban: `harness` dalında W0 commit'i (`docs(harness): ADR-18..20 and contracts for live-run hardening`). Kararlar: [ADR-18](./decisions/ADR-18-harness-computed-evidence.md) (D1 harness'in hesapladığı kanıt, D2 doğru iş atılmaz, D3 model dostu düzenleme araçları), [ADR-19](./decisions/ADR-19-workspace-fidelity.md) (D4 çalışma alanı sadakati), [ADR-20](./decisions/ADR-20-context-efficiency.md) (D5 verimlilik). Kanıt: iki canlı çalıştırmanın denetimleri — Denetim A (F1–F19, model biçimi ve bağlam boyutu) ve Denetim B (B1–B12, Windows/git ortamı). Kabul ölçütleri bulgu kimliklerine bağlıdır.
+
+### 7.1 W0 — sözleşmeler (tamamlandı)
+
+W0 yalnız sözleşme ekledi; davranış değişmedi, yeni alanların hepsi opsiyoneldir. Özet: `contracts/evidence.ts` (kısa ref `[#n]`, `renderToolResultText`, `parseToolRef`, çözüm yöntemleri ve sırası, `evidenceResolutionSchema`, harness doğrulama/diff kanıtı, `REPAIR_KINDS`, `REPORT_CORRECTION_ROUNDS = 1`, `orchestrationBudgetsSchema`, `formatEvidenceCorrection`); `common.ts` (`harness-verification`, `harness-diff`, üretici `harness`); `digest.ts` (`workspaceDigest`, `SOURCE_DIGEST_SCHEMES`, `ContentIdentity`); `paths.ts` (`normalizePathUnicode`, `foldPathCase`, `CASE_INSENSITIVE_PLATFORMS`; paylaşılan eşleştirici artık bu politikayı uygular); `tools.ts` (`ends_turn`, `ToolResult.digest`, `AttemptFileLedger`, `ToolExecutionContext.ref/files`, `ToolCallOutcome.ref/endsTurn`); `model.ts` (`ModelRequest.cache`); `packets.ts` (completion `harness_evidence`/`evidence_resolution`/`repairs`, review `evidence_resolution`/`repairs`, reviewer için harness kanıtı bağımsız, paket `context.digest_scheme`/`inline_sources`); `events.ts` (`attempt/verification_ran`, `attempt/repair_requested`, `tool/call_proposed` v2, `tool/result_recorded` v2, `attempt/started` v3); `runtime.ts` (`IsolatedWorkspace.digest/reused/fallback/overlaid/dependencyLinks/submodules`, `IsolationCreateOptions.reuse/overlay`, `ContextBuildInput.sources`, `TurnInput.sources`, `WorkspaceDigestReader`). Ayrıntı: [task-packets §8](./contracts/task-packets.md#8-harness-kanıtı-çözümleme-ve-onarım-adr-18), [tools](./contracts/tools.md), [events-and-storage](./contracts/events-and-storage.md), [runtime-seams §7–§10](./contracts/runtime-seams.md).
+
+### 7.2 Çalışma kuralları
+
+§1 kuralları geçerlidir: sözleşmeler donmuştur (eksik görülen alan için sözleşme değişiklik isteği, CCR); `owned_paths` kümeleri ayrıktır; modüller yalnız `contracts` import eder; her iş akışı teslimden önce `pnpm check` çalıştırır (0 hata). Yeni runtime bağımlılığı yoktur. Aşağıda adı geçmeyen dosyalar (ör. `src/harness/memory/**`, `src/harness/tui/**`, `src/harness/store/**`) bu dalgada değişmez.
+
+### 7.3 İş akışları
+
+#### W1a — araçlar: düzenleme, kısa ref, dosya defteri (D3 + `[#n]` ataması)
+
+| | |
+| --- | --- |
+| **owned_paths** | `src/harness/tools/**` (**hariç** `src/harness/tools/builtin/control-tools.ts`), `src/harness/policy/**`, `tests/harness-tools-*.test.ts`, `tests/harness-policy-*.test.ts`, `tests/harness-security-policy.test.ts`, `tests/fixtures/sandbox/**`, `tests/fixtures/tools/**` (yeni), `docs/harness/reference/tools-and-policy.md` |
+| **read_paths** | contracts, `docs/harness/contracts/{tools,runtime-seams,task-packets}.md`, ADR-18/19/20, Denetim A/B |
+| **Sağladığı seam'ler** | `ToolCallOutcome.ref` + `tool/call_proposed.ref` (v2), `ToolCallOutcome.endsTurn`, `ToolExecutionContext.ref/files`, `ToolResult.digest` (+ `tool/result_recorded` v2) |
+
+Kabul ölçütleri:
+- AC-a1 (F1) Gateway her çağrıya attempt içi (attempt yoksa session içi) 1'den başlayan sıra verir, `tool/call_proposed` v2 `ref` yazar ve `ToolCallOutcome.ref` döner; resume sonrası numaralandırma kayıtlı olaylardan devam eder, bir sayı iki çağrıya verilmez.
+- AC-a2 (F11 seam) `endsTurn` yalnız `metadata.ends_turn && state === succeeded && result.status === ok` iken `true`'dur.
+- AC-a3 (F5, B2) `read_file` başlık satırı `<path> · digest sha256:<hex> · lines <a>-<b> of <n>` ve `ToolResult.digest` = attempt çalışma alanındaki ham baytların `workspaceDigest`'i; okuma deftere yazılır.
+- AC-a4 (F5) `write_file`/`apply_patch` `expected_digest`'i opsiyoneldir, varsayılanı `AttemptFileLedger.lastSeen(path)`; bilinmeyen yolda `invalid_arguments` "read the file first"; `stale_precondition` güncel digest'i ve "re-read and retry" içerir; yazma defteri günceller, aynı dosyada ardışık iki düzenleme yeniden okumadan başarılı olur.
+- AC-a5 (F6) `apply_patch`, canlı çalıştırmadaki `*** Begin Patch / *** Update File / @@` metnini aynen uygular; `*** Add File` / `*** Delete File` ve sayısız `@@` başlıklı unified diff bağlamdan konumlanır; hata mesajı kabul edilen biçimleri ve 3 satırlık örneği verir.
+- AC-a6 (B5, B6, F17) Karışık EOL dosyasında dokunulmayan satırlar bayt bayt aynı kalır; yalnız CR dosyası yamalanır; BOM korunur ve 1. satır hunk'ı eşleşir; `write_file` LF içeriği CRLF dosyaya CRLF olarak yazar (autocrlf=false fikstüründe `git diff --numstat` yalnız gerçek satırları gösterir — Denetim B fikstür 6–7).
+- AC-a7 (B4) Geçerli UTF-8 olmayan (cp1254) dosyaya `apply_patch`/`write_file` `invalid_arguments` ile reddedilir; dosya baytları değişmez.
+- AC-a8 (F18) `read_file` ve `exec` modele en çok 32 KiB (baş + son) gösterir; tamamı blob'ta, metinde "truncated; use offset/limit" notu.
+- AC-a9 (B11) Araç ve policy yol karşılaştırmaları `normalizePathUnicode`/`foldPathCase`/`isCaseInsensitivePlatform` kullanır (kendi `toLowerCase`'leri kalmaz); NFD oluşturulmuş dosya NFC owned path ile yazılabilir; owned `readme.md` ile diskteki `Readme.md` win32/darwin'de `write_file` ve izolasyonda aynı sonucu verir (Denetim B fikstür 10'un araç kısmı).
+
+#### W1b — izolasyon ve git: tek digest, integrate, overlay, dayanıklılık (D4)
+
+| | |
+| --- | --- |
+| **owned_paths** | `src/harness/orchestration/isolation.ts`, `src/harness/orchestration/git.ts`, `src/harness/orchestration/paths.ts`, `src/harness/orchestration/workspace-digest.ts` (yeni), `tests/harness-orchestration-isolation*.test.ts`, `tests/harness-security-isolation.test.ts`, `tests/fixtures/git/**` (yeni) |
+| **read_paths** | contracts, `docs/harness/contracts/{runtime-seams,events-and-storage}.md`, ADR-07, ADR-19, Denetim B (repro betikleri `k1.mjs`, `s2.mjs`…`s8.mjs`) |
+| **Sağladığı seam'ler** | `createWorkspaceDigestReader(root): WorkspaceDigestReader` ve `contentIdentity(root, path, signal): Promise<ContentIdentity \| undefined>` (`workspace-digest.ts`); `IsolatedWorkspace.digest/reused/fallback/overlaid/dependencyLinks/submodules`; `IsolationCreateOptions.reuse/overlay` davranışı |
+
+Kabul ölçütleri:
+- AC-b1 (B1) Integrate çakışmayı `ContentIdentity` ile saptar ve içeriği ana ağacın EOL/filtre gösterimine çevirir: autocrlf=true + CRLF ana ağaç, autocrlf=input + CRLF dosya, `.gitattributes eol=crlf|lf`, smudge/clean filtresi ve Git LFS (yoksa atlanır) fikstürlerinde kullanıcının dokunmadığı dosya için çakışma yoktur ve ana ağaç EOL'u korunur (Denetim B fikstür 1, 3, 4).
+- AC-b2 (K1, B2, F4) `IsolatedWorkspace.digest` her modda vardır ve worktree'de `read_file`'ın bildirdiği digest'le aynıdır; autocrlf=true + LF blob + LF ana ağaç fikstüründe attempt kökünde hesaplanan digest worktree baytlarına eşittir (fikstür 2).
+- AC-b3 (B3) `overlay` listesindeki kirli/izlenmeyen yollar worktree'ye kopyalanır, tabanda `ours` olarak işaretlenir, `changedPaths`'e ve integrate'e girmez, `overlaid` raporlanır; ignore edilen ve ana ağaçta var olan `DEPENDENCY_LINK_DIRECTORIES` owned path ile örtüşmüyorsa bağlanır ve `dependencyLinks` raporlanır; owned path asla overlay/bağlantı olmaz (fikstür 5).
+- AC-b4 (B7) `worktree add` `core.longpaths=true` ile çalışır, worktree yolu kısalır; oluşturma hatası `HarnessError`'a çevrilir, `high-risk` olmayan görev `scoped-dir`'e düşer ve `fallback{from, reason, detail}` dolar, `high-risk` yazan görev `sandbox_insufficient` alır; hiçbir durumda öksüz worktree veya `<attempt>.owner.json` kalmaz (fikstür 8).
+- AC-b5 (B8) Gitlink'ler (mode 160000) `submodules` olarak raporlanır; submodule içindeki owned path `create`'te açık hatayla reddedilir; değişiklik adayları owned path'lerin doğrudan taranmasıyla da toplanır, iş sessizce kaybolmaz (fikstür 9).
+- AC-b6 (B9) `reuse` verilince yeni worktree açılmaz: tabana sıfırlanır (`checkout -f --detach` + `clean`), `reused: true`; scoped snapshot owned path dışındaki ignore edilmiş dizinleri gezmez; 20k dosyalı depoda retry'da worktree yeniden kullanımı ve `.venv` atlayan snapshot bir süre sınırı içinde kalır (fikstür 11).
+- AC-b7 (B11) `orchestration/paths.ts` `normalizeWorkspacePath` NFC uygular; `findScopeViolations` win32/darwin'de `foldPathCase` ile karşılaştırır (fikstür 10'un izolasyon kısmı).
+
+#### W1c — kanıt, doğrulama ve akış (D1 + D2, D4 sıralaması)
+
+| | |
+| --- | --- |
+| **owned_paths** | `src/harness/orchestration/{evidence,claims,coordinator,worker-manager,recorder,attempt-log,plan,planner,delegation,budget,scheduler,capabilities,control-plane,approval,index,factories,testing}.ts`, `src/harness/tools/builtin/control-tools.ts`, `src/harness/cli/runtime.ts` (yalnız composition bağlantısı), `tests/harness-orchestration-*.test.ts` (**hariç** `tests/harness-orchestration-isolation*.test.ts`), `tests/harness-e2e-*.test.ts` (entegrasyon tabanından sonra, bkz. §7.5), `tests/fixtures/live/**` (yeni), `docs/harness/reference/orchestration-and-context.md` |
+| **read_paths** | contracts, `docs/harness/contracts/{task-packets,runtime-seams,tools,events-and-storage}.md`, ADR-09, ADR-18, ADR-19, Denetim A, iki canlı çalıştırmanın session/blob'ları |
+| **Tükettiği seam'ler** | W1a `ref`/`endsTurn`/`digest`, W1b `workspace-digest.ts` + izolasyon eklemeleri, W1d `createSkillLoadCallback` ve `TurnInput.sources` geçişi |
+
+Kabul ölçütleri:
+- AC-c1 (F1, F7, F8) `resolveEvidence` `TOOL_EVIDENCE_RESOLUTION_ORDER` sırasıyla çözer (`functions.`/`mcp__synorch__` öneki atılır, argv örtüşmesi, yol sözcüğü `:L…`/`#L…`/` (…)`/`—` ayıklanır) ve `EvidenceResolution` döner; ikinci canlı çalıştırmanın üç işaretçisi ve birinci çalıştırmanın beş işaretçisi çözülür (kayıttan replay testi).
+- AC-c2 (F2) `task_report`/`review_report` callback'leri kanıtı çağrı içinde çözer; çözülmeyende `invalid_arguments` + `formatEvidenceCorrection`, aynı session'da tek düzeltme, sonra rapor olduğu gibi kabul ve `evidence_resolution` kaydı; `ends_turn` rapor araçlarında, `task_triage`'da ve yalnız kabul edilen `plan_propose`'da işaretlidir.
+- AC-c3 (F7) Worker turundan sonra harness `verification.commands`'ı attempt çalışma alanında `SandboxRunner` + policy `verification_commands` allowlist'iyle koşar, her biri için `attempt/verification_ran` yazar, completion'a `harness_evidence` ekler; `commands_run` günlükteki `exec` çağrılarından kurulur, modelin çıkış kodu yok sayılır; argv'ye çevrilemeyen komut `not-run` + neden.
+- AC-c4 (F3) Yalnız kanıt eksik `revise` ve başarısız harness doğrulaması aynı attempt session'ında, aynı `AttemptId` ve çalışma alanıyla onarılır (`attempt/repair_requested`); bütçeler `orchestrationBudgetsSchema`'dan gelir (`maxRetries`/`maxRevisions` yerine); tükenen bütçe `task_triage` danışmasına gider, doğrudan `failed` olmaz. Replay: ikinci çalıştırma `reviewing → completed`'e ulaşır.
+- AC-c5 (F9, ADR-09 değişikliği) `verifyReview` `met` için reviewer veya harness kanıtı ister; düzeltme sonrası çözülmeyen reviewer işaretçisi düşer, bağımsız kanıtsız `met` `unverifiable` → `revise`; `invalid` yalnız bağ ihlallerinde.
+- AC-c6 (F10) Triyaj istemi ölçütleri `[resolved]` / `[unresolved: neden]` / `[missing]` gösterir.
+- AC-c7 (F4, B2, B3; ADR-19 sırası) Önce izolasyon (aynı görevin retry/onarım/revizyonunda `reuse`; `overlay` = read_paths + alıntılanan kaynaklar), sonra paket kaynakları `workspace.digest` ile (`digest_scheme: workspace-raw-v1`), sonra paket ve `attempt/started` v3; `TurnInput.sources` attempt köküne bağlanır; `dependencyLinks` attempt policy'sinde `forbidden`'a eklenir; ana ağaçtaki `createWorkspaceSourceReader` (digestText) paket kaynakları için kullanılmaz.
+- AC-c8 (F13) Görev başı `max_steps` = plan bütçesi / dispatch edilen görev sayısı, alt sınır 25.
+- AC-c9 (F19, Denetim A §4 madde 6–7) Delta notları `decisions`'a kopyalanmaz; orchestrator'ın ilk mesajındaki plan şablonu kaldırılır; küçük read_paths dosyaları `context.inline_sources` olarak (dosya ≤ 8 KiB, toplam ≤ 32 KiB) pakete girer.
+- AC-c10 `cli/runtime.ts`: rapor callback'leri, varsayılan bütçeler ve W1d'nin `createSkillLoadCallback`'i bağlanır; başka composition değişikliği yapılmaz.
+
+#### W1d — verimlilik: tur sonu, render, önbellek, rol kapsamı (D5)
+
+| | |
+| --- | --- |
+| **owned_paths** | `src/harness/context/**`, `src/harness/core/driver.ts`, `src/harness/core/testing.ts`, `src/harness/providers/responses.ts`, `src/harness/providers/anthropic-messages.ts`, `tests/harness-context-*.test.ts`, `tests/harness-core-driver.test.ts`, `tests/harness-providers-adapters.test.ts`, `tests/fixtures/providers/**` |
+| **read_paths** | contracts, `docs/harness/contracts/{model-adapter,runtime-seams,tools}.md`, ADR-20, Denetim A §4 |
+| **Sağladığı seam'ler** | `createSkillLoadCallback(deps)` (`src/harness/context/index.ts`), `TurnInput.sources → ContextBuildInput.sources` geçişi, `ModelRequest.cache` |
+
+Kabul ölçütleri:
+- AC-d1 (F11) `endsTurn` sonucu gelince driver aynı batch'teki sonraki çağrıları çalıştırmaz (sentetik "turn ended by <tool>" sonucu), turu yeni model isteği olmadan `completed` bitirir; test istek sayısını sayar.
+- AC-d2 (F1) Driver tool sonuçlarını hem model hem backend yolunda yalnız `renderToolResultText(outcome.ref, outcome.result)` ile kaydeder.
+- AC-d3 (F16) ContextBuilder `cache = {key: <session_id>:<role>, stable_system_blocks}` doldurur; kararlı bloklar önce ve iki ardışık adımda bayt bayt aynıdır (digest testi); `responses.ts` `prompt_cache_key` gönderir; `anthropic-messages.ts` son kararlı bloktan ve araç listesinden sonra `cache_control` koyar (fikstür).
+- AC-d4 (F12) Protokoller role göre seçilir (worker'a orkestrasyon, planlama, delegasyon, model yönlendirme, kullanıcı iletişimi, bağlam devri protokolleri gitmez); rol başına araç alt kümesi; `task_report`/`plan_propose` açıklamaları kısalır; implementer sistem istemi Denetim A §4 ölçümüne göre anlamlı küçülür (test karakter sayısını sabitler).
+- AC-d5 (F12) `createSkillLoadCallback` bağlamda olan skill için "already in your context" döner, tekrar yüklemeyi içeriksiz yanıtlar; triyaj turuna skill verilmez.
+- AC-d6 (F19, Denetim A §4 madde 5) Paketin model görünümü kompakttır (boş diziler, `expected_report`, modele gereksiz kimlik/digest alanları yok; `inline_sources` dosya blokları olarak); skill tetikleyici eşleştirmesi Türkçe güvenli katlama kullanır.
+- AC-d7 (B3) Freshness `ContextBuildInput.sources` verildiğinde onu kullanır; driver `TurnInput.sources`'u aynen geçirir.
+
+### 7.4 Seam'ler
+
+| Seam (contracts) | Sağlayan | Tüketen |
+| --- | --- | --- |
+| `ToolCallOutcome.ref`, `tool/call_proposed.ref` | W1a | W1d (render), W1c (`#n` çözümü) |
+| `ToolMetadata.ends_turn` → `ToolCallOutcome.endsTurn` | W1c (metadata, `control-tools.ts`) + W1a (gateway) | W1d (driver) |
+| `AttemptFileLedger`, `ToolResult.digest` | W1a | W1a (araçlar), W1c (değişen yol before/after, isteğe bağlı) |
+| `workspace-digest.ts`, `IsolatedWorkspace.*`, `IsolationCreateOptions.reuse/overlay` | W1b | W1c |
+| `TurnInput.sources` → `ContextBuildInput.sources` | W1d (geçiş + freshness) | W1c (değer verir) |
+| `createSkillLoadCallback` | W1d | W1c (`cli/runtime.ts`) |
+| `ModelRequest.cache` | W1d (context) | W1d (providers) |
+| `renderToolResultText`, `formatEvidenceCorrection`, `evidenceResolutionSchema`, `orchestrationBudgetsSchema` | contracts (W0) | W1c, W1d |
+
+Her sağlayan kendi testinde seam davranışını, her tüketen bir fake ile kendi birim testini yazar.
+
+### 7.5 Sıra ve entegrasyon
+
+```text
+Dalga W1 (paralel, W0 tabanından):  W1a   W1b   W1d        W1c (contracts + fake'lerle başlar)
+                                      \     |     /            |
+Entegrasyon (sırayla):                W1a → W1b → W1d  ──────→ W1c (birleşik tabana rebase, e2e sahibi)
+Dalga W2:                             gerçekçilik testleri (D6)
+```
+
+- W1a, W1b, W1d W0 commit'inden dallanır ve kendi dallarında `pnpm check` 0 hatayla teslim eder. Entegrasyon sahibi a → b → d sırasıyla birleştirir; sahipsiz testlerde (özellikle `tests/harness-e2e-*.test.ts`, tool sonucu metni `[#n] ` önekini alır) çıkan doğrulama kaymasını birleştirme sırasında o düzeltir.
+- W1c tükettiği seam'leri fake'lerle geliştirir, teslimden önce birleşik tabana rebase eder; e2e testleri o andan itibaren W1c'nindir.
+- Sözleşme eksikliği CCR ile entegrasyon sahibine gider; hiçbir W1 contracts'a yazmaz.
+
+### 7.6 W2 — gerçekçilik testleri (D6, sonraki dalga)
+
+- Sloppy-model scripted adapter: `functions.<tool> <args>` işaretçileri, `*** Begin Patch` yamaları, digest'siz yazma, gereksiz `load_skill`, terminal araçtan sonra metin.
+- İki canlı çalıştırmanın (run_01M35SSARRMK87VYMT770BNM3X, run_01M35VYXAC79ST06QZBAFGWT1S) transkript replay'i: ikisi de düzeltme turuyla veya turu olmadan `completed`'e ulaşır; istek sayısı ve girdi token'ı ölçülür (ADR-20 hedefi ≈ 40–45k).
+- Denetim B'nin 11 Windows/git fikstürü uçtan uca (W1a/W1b birim fikstürleri üzerine).
+
+### 7.7 Kapsam dışı
+
+- F14 (rapor girdisinde gevşek ön işleme) ve F15 (JSON bloğu geri dönüşünü sağlamlaştırma): rapor araçları artık birincil kanal ve düzeltme turu var; ihtiyaç ölçülürse sonraki dalga.
+- B12 ve hafıza `source_digest`: hafıza `digestText` kullanmaya devam eder (ADR-19'da belgelendi).
+- Triyaj için sıkıştırılmış yeni session (Denetim A §4 madde 8).

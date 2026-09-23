@@ -45,14 +45,29 @@ export const blobRefSchema = z.strictObject({
 });
 export type BlobRef = z.infer<typeof blobRefSchema>;
 
-export const EVIDENCE_KINDS = ["tool-call", "test-run", "artifact", "file", "event", "review"] as const;
-export const EVIDENCE_PRODUCERS = ["worker", "reviewer", "orchestrator", "user"] as const;
+/**
+ * Evidence kinds. The `harness-*` kinds are facts the harness computed itself (ADR-18): the result
+ * of running the packet's verification commands in the attempt workspace, and the pinned diff.
+ */
+export const HARNESS_EVIDENCE_KINDS = ["harness-verification", "harness-diff"] as const;
+export const EVIDENCE_KINDS = ["tool-call", "test-run", "artifact", "file", "event", "review", ...HARNESS_EVIDENCE_KINDS] as const;
+export const EVIDENCE_PRODUCERS = ["worker", "reviewer", "orchestrator", "user", "harness"] as const;
 
-/** A pointer to proof. Evidence is never free text: it names something the event log can resolve. */
-export const evidenceRefSchema = z.strictObject({
-  kind: z.enum(EVIDENCE_KINDS),
-  ref: nonEmptyTextSchema,
-  digest: digestSchema.optional(),
-  produced_by: z.enum(EVIDENCE_PRODUCERS),
-});
+/**
+ * A pointer to proof. Evidence is never free text: it names something the event log can resolve.
+ * `harness-*` kinds are produced by the harness and nothing else; the harness produces no other kind.
+ */
+export const evidenceRefSchema = z
+  .strictObject({
+    kind: z.enum(EVIDENCE_KINDS),
+    ref: nonEmptyTextSchema,
+    digest: digestSchema.optional(),
+    produced_by: z.enum(EVIDENCE_PRODUCERS),
+  })
+  .superRefine((evidence, context) => {
+    const harnessKind = (HARNESS_EVIDENCE_KINDS as readonly string[]).includes(evidence.kind);
+    if (harnessKind !== (evidence.produced_by === "harness")) {
+      context.addIssue({ code: "custom", path: ["produced_by"], message: "harness-* evidence is produced by the harness, and only by it" });
+    }
+  });
 export type EvidenceRef = z.infer<typeof evidenceRefSchema>;

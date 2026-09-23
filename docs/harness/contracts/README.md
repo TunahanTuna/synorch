@@ -9,10 +9,10 @@
 | [model-adapter.md](./model-adapter.md) | ModelAdapter, AgentBackendAdapter, stream, capability, hata, auth | `model.ts`, `auth.ts` |
 | [tools.md](./tools.md) | Tool metadata, gateway hattı, sonuç, sandbox | `tools.ts` |
 | [policy-and-approval.md](./policy-and-approval.md) | Etkin politika, modlar, hard rail, onay | `policy.ts`, `paths.ts` |
-| [task-packets.md](./task-packets.md) | Plan, Task Context Packet v2, delta, completion, review | `packets.ts` |
+| [task-packets.md](./task-packets.md) | Plan, Task Context Packet v2, delta, completion, review; harness kanıtı, çözümleme, onarım ve bütçeler (§8) | `packets.ts`, `evidence.ts` |
 | [cli-and-jsonl.md](./cli-and-jsonl.md) | Komutlar, renderer seçimi, JSONL frame, exit code | `jsonl.ts`, `errors.ts`, `renderer.ts` |
 | [memory.md](./memory.md) | Markdown hafıza notu, ilişki, öneri kuyruğu | `memory.ts` |
-| [runtime-seams.md](./runtime-seams.md) | ContextBuilder, AgentDriver, WorkerManager, IsolationProvider, projection, rapor araçları, glob eşleştirici | `runtime.ts`, `projection.ts`, `paths.ts` |
+| [runtime-seams.md](./runtime-seams.md) | ContextBuilder, AgentDriver, WorkerManager, IsolationProvider, projection, rapor araçları, glob eşleştirici, kısa ref/terminal araç/dosya defteri seam'leri, yol politikası | `runtime.ts`, `projection.ts`, `paths.ts`, `tools.ts`, `evidence.ts` |
 
 ## Örnek blokları
 

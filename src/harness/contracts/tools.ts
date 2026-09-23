@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { agentRoleSchema, blobRefSchema, nonEmptyTextSchema, type AgentRole } from "./common.ts";
+import { digestSchema, type Digest } from "./digest.ts";
 import type { AttemptId, RunId, TaskId, ToolCallId } from "./ids.ts";
 import { toolCallIdSchema } from "./ids.ts";
 import type { ApprovalDecision, EffectivePolicy, NormalizedAction, PolicyDecision } from "./policy.ts";
@@ -34,6 +35,12 @@ export const toolMetadataSchema = z
     cancellable: z.boolean(),
     concurrency: z.enum(["parallel", "sequential"]),
     visible_to: z.array(agentRoleSchema).min(1),
+    /**
+     * A terminal control tool (ADR-20): when a call succeeds with `status: ok` the driver ends the
+     * turn after it instead of sending another model request (`task_report`, `review_report`, an
+     * accepted `plan_propose`, `task_triage`). A rejected call (`invalid_arguments`) never ends it.
+     */
+    ends_turn: z.boolean().optional(),
   })
   .superRefine((tool, context) => {
     if ((tool.source === "builtin") !== (tool.effect_source === "builtin")) {
@@ -44,6 +51,9 @@ export const toolMetadataSchema = z
     }
     if (tool.effect === "read" && tool.network === "required") {
       context.addIssue({ code: "custom", path: ["network"], message: "a network-requiring tool cannot be classified read" });
+    }
+    if (tool.ends_turn === true && tool.effect !== "control") {
+      context.addIssue({ code: "custom", path: ["ends_turn"], message: "only control tools can end a turn" });
     }
   });
 export type ToolMetadata = z.infer<typeof toolMetadataSchema>;
@@ -73,6 +83,12 @@ export const toolResultSchema = z
     truncated: z.boolean(),
     exit_code: z.int().optional(),
     changed_paths: z.array(z.string().min(1)).optional(),
+    /**
+     * Single-file tools (`read_file`, `write_file`, `apply_patch` on one file): the workspace digest
+     * (`workspaceDigest`, ADR-19) of the file in the attempt workspace after the call. `read_file`
+     * also prints it in its header line so the model can cite it as `expected_digest`.
+     */
+    digest: digestSchema.optional(),
     redactions: z.int().min(0),
     error: z.strictObject({ code: z.enum(TOOL_ERROR_CODES), message: z.string().min(1).max(2000) }).optional(),
   })
@@ -143,8 +159,25 @@ export interface SandboxRunner {
   run(spec: ProcessSpec, signal: AbortSignal): Promise<ProcessResult>;
 }
 
+/**
+ * What one attempt has read and written, per workspace path (NFC and, on case-insensitive
+ * platforms, `foldPathCase`d). `write_file`/`apply_patch` default a missing `expected_digest` to
+ * `lastSeen(path)` (ADR-18 D3); a write records the new digest, so consecutive edits of the same
+ * file need no re-read. Scoped to one attempt (one session when there is no attempt). It is a
+ * convenience, never a permission: a path it does not know simply needs an explicit digest.
+ */
+export interface AttemptFileLedger {
+  lastSeen(path: string): Digest | undefined;
+  noteRead(path: string, digest: Digest): void;
+  noteWrite(path: string, digest: Digest | undefined): void;
+}
+
 export interface ToolExecutionContext {
   readonly toolCallId: ToolCallId;
+  /** The call's short ref ordinal (`[#n]`, ADR-18), when the gateway assigned one. */
+  readonly ref?: number;
+  /** Read/write ledger of the attempt (ADR-18 D3); absent in runtimes that do not track it. */
+  readonly files?: AttemptFileLedger;
   readonly runId: RunId;
   readonly taskId: TaskId | undefined;
   readonly attemptId: AttemptId | undefined;
@@ -178,6 +211,13 @@ export interface ToolCallOutcome {
   readonly result: ToolResult;
   readonly decision: PolicyDecision | undefined;
   readonly approval: ApprovalDecision | undefined;
+  /**
+   * Short ref ordinal the gateway assigned and recorded in `tool/call_proposed.ref` (ADR-18). The
+   * driver renders the model-visible result with `renderToolResultText(ref, result)`.
+   */
+  readonly ref?: number;
+  /** True when a terminal control tool (`ends_turn`) succeeded with `status: ok` (ADR-20). */
+  readonly endsTurn?: boolean;
 }
 
 export interface ToolInvocationScope {

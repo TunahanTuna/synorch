@@ -283,3 +283,24 @@ test("SEC-M3 recovery reverts a crashed scoped-dir attempt's partial writes from
     await workspace.cleanup();
   }
 });
+
+test("ADR-19 removing or reusing a worktree never deletes through a junction planted inside it", async () => {
+  const workspace = await createTempWorkspace({ "src/a.ts": "a\n" }, { git: true });
+  try {
+    const outside = await outsideDir(workspace);
+    await writeFile(path.join(outside, "keep.txt"), "keep\n");
+    const provider = providerFor(workspace);
+    const first = await provider.create(packet(["src/**"]), createId("attempt"), signal());
+    await link(outside, path.join(first.root, "src", "planted"));
+    const retry = await provider.create(packet(["src/**"]), createId("attempt"), signal(), { reuse: first });
+    assert.equal(retry.reused, true);
+    assert.equal(existsSync(path.join(retry.root, "src", "planted")), false, "the reset removed the planted link");
+    assert.equal(await readFile(path.join(outside, "keep.txt"), "utf8"), "keep\n", "the reset did not descend into the junction");
+    await link(outside, path.join(retry.root, "src", "planted"));
+    await retry.dispose();
+    assert.equal(existsSync(retry.root), false);
+    assert.equal(await readFile(path.join(outside, "keep.txt"), "utf8"), "keep\n", "removal did not descend into the junction");
+  } finally {
+    await workspace.cleanup();
+  }
+});

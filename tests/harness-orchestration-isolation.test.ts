@@ -4,6 +4,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { createId, deriveProjectId, HarnessError, sha256, taskContextPacketSchema, type TaskContextPacket } from "../src/harness/contracts/index.ts";
 import { createIsolationProvider, decodeArtifact, runGit } from "../src/harness/orchestration/index.ts";
+import { workspaceDirectoryName } from "../src/harness/orchestration/isolation.ts";
 import { createMemoryBlobStore, createTempWorkspace } from "../src/harness/orchestration/testing.ts";
 
 function packet(owned: string[], overrides: Partial<TaskContextPacket> = {}): TaskContextPacket {
@@ -40,7 +41,7 @@ function packet(owned: string[], overrides: Partial<TaskContextPacket> = {}): Ta
 
 const signal = () => new AbortController().signal;
 
-test("worktree isolation: the attempt writes under <home>/.synorch/worktrees/<project>/<attempt> and the main workspace is untouched until integrate", async () => {
+test("worktree isolation: the attempt writes under <home>/.synorch/worktrees/<project-hash>/<attempt-hash> and the main workspace is untouched until integrate", async () => {
   const workspace = await createTempWorkspace({ "src/a.ts": "a\n", "README.md": "r\n" }, { git: true });
   try {
     const projectId = deriveProjectId(workspace.root, process.platform);
@@ -49,7 +50,8 @@ test("worktree isolation: the attempt writes under <home>/.synorch/worktrees/<pr
     const attemptId = createId("attempt");
     const isolated = await provider.create(packet(["src/**"]), attemptId, signal());
     assert.equal(isolated.mode, "worktree");
-    assert.equal(isolated.root, path.join(workspace.home, ".synorch", "worktrees", projectId, attemptId));
+    assert.equal(isolated.root, path.join(workspace.home, ".synorch", "worktrees", workspaceDirectoryName(projectId), workspaceDirectoryName(attemptId)));
+    assert.equal(workspaceDirectoryName(attemptId).length, 12, "hashed names keep worktree paths short (B7)");
     assert.ok(isolated.baseCommit !== undefined && /^[0-9a-f]{40}$/.test(isolated.baseCommit));
     await writeFile(path.join(isolated.root, "src", "a.ts"), "changed\n");
     await writeFile(path.join(isolated.root, "src", "new.ts"), "new\n");

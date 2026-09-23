@@ -27,24 +27,13 @@ Bu belge `syn agent` ve `syn run` insan modlarının (`tui` ve `plain`) **ne gö
 
 ## 1. Bugünkü durum ve sorunlar
 
-Kaynak: `harness` @ `04e022c`. Ürün sahibinin `syn run` transcript'i ([araştırma §0](../research/ux/README.md#0-başlangıç-noktası-bugünkü-çıktı)) aşağıdaki kök nedenlere iner:
+Kaynak: `harness` @ `04e022c`. Ürün sahibinin transcript'i ([araştırma §0](../research/ux/README.md#0-başlangıç-noktası-bugünkü-çıktı)) şu kök nedenlere iner:
 
-| # | Sorun | Kaynak |
-| --- | --- | --- |
-| P1 | **Model yanlış:** `syn agent` içindeki her mesaj bir `coordinator.run()` açıyor ve plan zorunlu. "Merhaba", "bu fonksiyon ne yapıyor?" veya tek satırlık bir düzeltme de planlama turundan, görev ve worker'dan geçiyor ya da `no valid plan` ile düşüyor. Ana ajanın doğrudan cevap veya doğrudan düzenleme yolu yok. Orchestrator'ın yazma kapsamı yalnız control plane (`.ai/tasks/**`). | `cli/session.ts` `agentCommand()`, `orchestration/coordinator.ts` planlama döngüsü, `cli/role-policy.ts` |
-| P2 | Her `SessionEvent` bir satıra çevriliyor ve satırlar state machine dilinde yazılıyor: `Task task_01M… draft -> ready`, `Attempt att_… started (explorer, gpt-5.6-luna, shared-read-only)`. | `tui/describe.ts` `describeEvent()` |
-| P3 | ULID'ler 12 karaktere kırpılıp gösteriliyor (`short()`). | `describe.ts` |
-| P4 | Tool kartı üç satır ve ham JSON argüman: `┌ read_file · done 10 ms` / `│ {"path":…}` / `└ schema_version: 1`. Sonuç satırı çıktının ilk satırı, özet değil. | `tui/tool-cards.ts`, `pi-tui-renderer.ts` `ToolCardView` |
-| P5 | Autonomous modda orchestrator'ın kendi plan onayı iki audit satırı basıyor. | `describe.ts` `approval/*` |
-| P6 | Başlık 4–8 satır: yol, policy, üç route ve her canonical/config/sandbox bildirimi için bir `notice:` satırı. | `pi-tui-renderer.ts` `start()`, `cli/run-summary.ts` `headerFor()` |
-| P7 | Worker model stream'leri de renderer'a gidiyor ve atıfsız. Adapter sarmalayıcısı her isteği `{kind:"stream"}` olarak yayar ve TUI her `requestId` için yeni bir Markdown bloğu açar. Worker metni ana cevapla karışır. Worker tool çağrıları stream'den kart açar, ama `tool/*` olayları worker'ın kendi session'ında kaldığı için kart `proposed` durumunda asılı kalır. | `cli/runtime.ts` ~384, `coordinator.ts` `observe()` (yalnız run log'unu yayar) |
-| P8 | Durum satırı hep `ready`. `StatusLine` tipi var, ama `{kind:"status"}` yayan bir üretici yok. Spinner, süre, token ve iptal ipucu yok. | `grep 'kind: "status"'` → yalnız tüketiciler |
-| P9 | Sonuç `Run run_01… completed (exit 0); session ses_01…` ve ham özet olarak basılıyor. Değişen dosyalar, doğrulama ve review yok. | `cli/session.ts` `describeOutcome()` |
-| P10 | Hata standardı `Error [code]`, `ids: …`, `workspace effect: unknown; retry safe: yes` basıyor. | `describe.ts` `formatHarnessError()` |
-| P11 | `ask_user` sorusu üç `notice` satırı olarak görünüyor ve seçim listesi yok. | `cli/session.ts` `questionLines()` |
-| P12 | Slash komut çıktıları ham ID ve digest içeriyor. `/compact` yok. | `cli/slash-commands.ts` |
-
-Sonuç: Bugünkü renderer bir **olay günlüğü görüntüleyicisi**. Hedef ise bir **iş arkadaşı konuşması**. Olay günlüğü zaten kalıcı ve `syn show`, `--mode jsonl` ve `/log` ile okunabilir. Terminalin varsayılan görünümünün onu tekrarlaması gerekmez.
+- **Model yanlış.** `syn agent`'taki her mesaj `coordinator.run()` açıyor ve plan zorunlu. Doğrudan cevap veya doğrudan düzenleme yolu yok. Orchestrator yalnız `.ai/tasks/**`'a yazabiliyor. Kaynak: `cli/session.ts` `agentCommand()`, `cli/role-policy.ts`.
+- **Olay günlüğü, konuşma değil.** Her `SessionEvent` bir satıra çevriliyor: ULID'ler, `draft -> ready`, audit satırları, ham JSON tool argümanları. Kaynak: `tui/describe.ts`, `tui/tool-cards.ts`.
+- **Worker stream'leri atıfsız.** Worker metni ana cevaba karışıyor, worker tool kartları `proposed` durumunda asılı kalıyor. Kaynak: `cli/runtime.ts` ~384.
+- **Durum satırı hep `ready`.** `{kind:"status"}` yayan bir üretici yok.
+- **Başlık, sonuç ve hata metinleri makine dilinde.** 4–8 satırlık başlık var. `Run run_… completed (exit 0)` sonucu ve `Error [code] / ids / retry safe` hata bloğu basılıyor. Kaynak: `cli/run-summary.ts`, `cli/session.ts`, `describe.ts`.
 
 ## 2. Tasarım ilkeleri
 
@@ -153,78 +142,30 @@ Yükseklik bütçesi: 80×24 terminalde canlı bölge + kuyruk + aktivite + edit
 
 Kısaltmalar: **Gizli** = gösterilmez (L2'de `[event]` satırı). **Pano** = run panosundaki satırı günceller, transcript'e satır eklemez. **Aktivite** = yalnız aktivite satırının fiilini veya sayaçlarını değiştirir. "Bugün" sütunu `describe.ts`'teki karşılıktır.
 
-### 7.1 `SessionEvent` aileleri (46 tip, `src/harness/contracts/events.ts`)
+### 7.1 Olay aileleri → sunum
 
-| Olay | Bugün | L0 default | L1 ek | Not |
-| --- | --- | --- | --- | --- |
-| `session/opened` | `Session ses_… opened in …` | Gizli (başlık söylüyor) | — | |
-| `session/resumed` | `Session resumed after seq N; K state(s) recovered` | Özet satırı ([§8.8](#88-uzun-oturum-bağlam-compact-resume)). `recovered.length > 0` ise ek: `2 unfinished steps were closed, 1 tool call may have partly run` | Kurtarılan öğeler | Torn tail → K4 uyarısı |
-| `session/closed` | `Session closed (reason)` | Gizli. Çıkışta: `Saved · resume with syn agent --continue` | — | [R6](#14-runtime-önkoşulları) |
-| `run/created` | `Run run_…: <goal>` | Gizli | — | |
-| `run/state_changed` | `Run a -> b: reason` | Gizli. `waiting_for_approval` → Aktivite `Waiting for you`. Terminal durumlar raporu veya hata bloğunu tetikler. | — | |
-| `policy/snapshot` | — | Gizli | — | `/permissions` besler |
-| `route/decided` | `Route tier: prov/model (source)` | Gizli (model pano satırında görünür). `fallback.used` → K4: `! Using luna instead of astra (quota)` | Kaynak | |
-| `plan/proposed` | `Plan v1 proposed: …` | Run panosunu oluşturur | Risk, kabul ölçütleri | v>1 → `Plan updated · +1 task` |
-| `plan/state_changed` | `Plan a -> b: reason` | `approved`: Gizli. `rejected`: `Plan not approved.` `superseded`: pano yenilenir. `invalidated`: K4 + neden | — | |
-| `approval/requested` | Self-approval audit satırı veya `Approval needed (kind): …` | İnsan gerekiyorsa overlay ([§8.10](#810-onay-güven-ve-soru-istemleri)). Autonomous self-approval: **Gizli**. | — | Human-only konular (ADR-08) her modda overlay |
-| `approval/decided` | `Approval … by orchestrator (…audited)` | Kullanıcı kararıysa tek dim satır: `✓ Plan approved for this session`. Orchestrator kararı: Gizli. | Kapsam | |
-| `approval/invalidated` | `Approval appr_… invalidated: …` | K4, ID'siz: `! An earlier approval no longer applies: <neden>` | — | |
-| `task/created` | `Task key (role, risk) created` | Pano satırı (`○ waiting`) | — | |
-| `task/state_changed` | `Task task_… a -> b: reason` | Pano ([§7.3](#73-görev-durumu--pano-sözlüğü)) | — | |
-| `task/packet_issued` | — | Gizli | — | |
-| `attempt/started` | `Attempt att_… started (role, model, isolation)` | Pano: rol + model, spinner. 2. ve sonraki deneme → `retry 2` | Isolation modu | `isolation.fallback` → K4: `! update-readme runs in a scoped folder, not a git worktree (path too long)` |
-| `attempt/state_changed` | `Attempt att_… a -> b` | Gizli | — | |
-| `attempt/completion_recorded` | `Attempt att_… reported status` | Pano özet sütunu (≤ 50 karakter) | Tam özet (≤ 5 satır) | Worker beyanı; "kanıtlandı" denmez |
-| `attempt/verification_ran` | — | Pano: `checking · npm test`, sonra `checks 2/2` veya `✗ npm test (exit 1)` | `output_excerpt`'in son 10 satırı | Harness'in çalıştırdığı kontrol (ADR-18) |
-| `attempt/repair_requested` | — | Pano: `fixing evidence · round 1/2` | Sorun listesi | |
-| `task/integrated` | — | Pano: `applied · 2 files`. Rapor dosyaları buradan alır. | Yollar | |
-| `review/recorded` | `Review: decision` | Reviewer satırı: `accepted` / `changes requested` / `blocked`. `revise` → hedef satır `revising` | Gerekçenin ilk 3 satırı | |
-| `turn/started`, `turn/ended` | — | Aktivite. `max_steps`/`budget_exceeded` → K4 | — | |
-| `step/started`, `step/ended` | — | Gizli | — | |
-| `message/recorded` | — | Gizli (metin zaten aktı). Resume'da transcript'i kurar. | — | |
-| `model/request_prepared` | — | Gizli | TTFT ölçümünün başlangıcı | `/context` ve ctx% besler |
-| `model/response_settled` | — | Gizli. `stop_reason = length` → K4: `! The reply was cut off (output limit)` | Token | |
-| `model/response_failed` | `Model request failed (code): msg` | Yeniden denenecekse Aktivite: `Retrying in 4s · 2/5 · rate limited`. Nihaiyse hata bloğu | Provider mesajı | |
-| `provider/usage` | — | Alt bilgi ve aktivite sayaçları | Model başına `/cost` | Ölçüm değil tahminse `~` öneki |
-| `tool/call_proposed` | `Tool X requested` / kart | Ana ajanın tool'u: tool satırı başlar. **Koordinasyon tool'ları** (`plan_propose`, `task_spawn`, `task_status`, `ask_user`) tool satırı üretmez. Pano veya soru overlay'i olarak görünürler. | Argümanlar (alan: değer) | |
-| `tool/policy_decided` | deny → `Tool X denied: reason` | deny → `✗ Run npm publish · blocked by policy: network` | Kural | allow → Gizli |
-| `tool/execution_started` | `Tool running (sandbox partial)` | Aktivite | Sandbox düzeyi | |
-| `tool/result_recorded` | `Tool state in N ms: …` | `⎿` özeti ([§7.4](#74-tool-satırları-ve-özetleri)) | İlk 10 satır / tam diff | Süre yalnız ≥ 1 s ise |
-| `tool/interrupted` | `Tool call tc_… interrupted; outcome unknown` | K4: `⎿ interrupted · may have partly run` | — | |
-| `context/compacted` | `Context compacted: a -> b tokens` | Dim tek satır: `Context compacted · 182k → 41k tokens` | Tetik, korunan dosyalar | |
-| `context/source_changed` | `Source changed since the task packet was issued: path` | Pano satırında K4 notu: `! files changed while working` | Yol | |
-| `memory/persisted` | `Memory saved: path` | Dim tek satır: `Saved to memory · <başlık>` | Yol | |
-| `memory/proposed` | `Memory proposal queued (kind)` | Gizli. Raporda toplu: `1 memory suggestion · syn memory review` | Tür | |
-| `memory/proposal_decided` | `Memory proposal …` | Gizli | Karar | |
-| `budget/exceeded` | `Budget exceeded: …` | `action = stop` → hata bloğu. Diğer durumlarda K3/K4: `! Cost limit reached ($2.00) · finishing current step` | — | |
-| `steer/queued` | `Queued for the next safe boundary: text` | Kuyruk bölgesinde dim satır ([§8.7](#87-kesme-ve-yönlendirme)) | — | |
-| `trust/granted` | — | `✓ Trusted this folder` (session-only ise `for this session`) | Kayıt dosyası | Bugünkü trust `notice` metninin yerine |
-| `trust/used` | — | Gizli | — | |
-| `trust/revoked` | — | `syn trust --revoke` çıktısında tek satır | — | |
+Tam liste `src/harness/contracts/events.ts`'teki 46 tiptir. Burada ailelere göre gruplanmıştır. **Gizli** = yalnız L2'de `[event]` satırı. **Pano** = run panosundaki satırı günceller. **Aktivite** = yalnız aktivite satırını değiştirir.
 
-### 7.2 Stream, `notice`, `status` ve CLI metinleri
+| Aile | L0 default | Not |
+| --- | --- | --- |
+| `session/*` | Gizli. Resume → `↻ Resumed · 2h ago · …` ([§8.8](#88-uzun-oturum-bağlam-compact-resume)). Çıkış → `Saved · resume with syn agent --continue`. | Kurtarılan belirsiz tool çağrısı → K4 uyarısı |
+| `run/*`, `turn/*`, `step/*`, `message/recorded`, `model/request_prepared`, `policy/snapshot`, `task/packet_issued`, `attempt/state_changed`, `trust/used` | Gizli / Aktivite | Bitiş durumları raporu veya hata bloğunu tetikler |
+| `plan/*`, `task/*`, `attempt/*`, `review/recorded`, `task/integrated`, `attempt/verification_ran`, `attempt/repair_requested` | Pano ([§7.3](#73-görev-durumu--pano-sözlüğü)) | Satırlar: `checking · npm test`, `checks 2/2`, `fixing evidence · round 1/2`, `accepted`. `isolation.fallback` → K4 uyarısı. |
+| `approval/*` | İnsan gerekiyorsa overlay ([§8.10](#810-onay-güven-ve-soru-istemleri)). Autonomous self-approval gizli. Kullanıcı kararı tek dim satır. | |
+| `tool/*` (ana ajan) | `● Fiil arg` + `⎿ özet` ([§7.4](#74-tool-satırları-ve-özetleri)). Deny → `✗ … blocked by policy: …`. Kesinti → `⎿ interrupted · may have partly run`. | Koordinasyon tool'ları (`plan_propose`, `task_spawn`, `task_status`, `ask_user`) tool satırı üretmez |
+| `route/decided` | Gizli. Fallback → `! Using luna instead of astra (quota)` | |
+| `model/response_*`, `provider/usage` | Yeniden deneme → Aktivite `Retrying in 4s · 2/5`. Nihai hata → hata bloğu. `length` → `! The reply was cut off`. Usage → sayaçlar. | |
+| `context/compacted`, `memory/persisted`, `trust/granted` | Tek dim satır | |
+| `context/source_changed`, `budget/exceeded` | K4 uyarısı, pano notu veya hata bloğu | |
+| `memory/proposed`, `memory/proposal_decided`, `trust/revoked` | Gizli; rapor sonunda toplu not | |
+| `steer/queued` | Kuyruk satırı ([§8.7](#87-kesme-ve-yönlendirme)) | |
 
-| Kaynak | Bugün | L0 default | Not |
-| --- | --- | --- | --- |
-| `stream.start` / `backend_init` | — | Aktivite `Thinking` | |
-| `stream.text_delta` (ana ajan) | `requestId` başına Markdown bloğu | `●` madde işaretli, akan Markdown. Aynı turn'deki tool satırlarının arasına sırayla girer. | |
-| `stream.text_delta` (worker) | Ana cevapla karışık | **Transcript'e yazılmaz.** Pano satırının etkinlik alanını besler. L1'de worker başına son 3 satır. | [R1](#14-runtime-önkoşulları) |
-| `stream.thinking_delta` | Gösterilmiyor | Gizli. Aktivite `Thinking`. L1: dim, italik, en çok 5 satır. | pi varsayılanı gösterir (`hideThinkingBlock: false`), Claude Code gizler. Synorch sessiz tarafı seçer. |
-| `stream.tool_call_*` | JSON argümanlı kart | Ana ajan: tool satırı erken açılır, yol argüman tamamlanınca görünür. Worker: pano etkinliği (`editing src/cli/args.ts`). | |
-| `stream.usage` / `quota` | — | Sayaçlar. Kota < %10 → alt bilgide uyarı rengi | |
-| `stream.error` | `Model request failed …` | `cancelled` → `⎿ Interrupted` (dim). Diğerleri → yeniden deneme veya hata bloğu | |
-| `notice` `plan candidate N rejected: …` | Uyarı satırı | Gizli. Aktivite `Planning · revising (2/3)`. Son deneme de düşerse hata bloğu nedenleri listeler. | |
-| `notice` `ledger write failed` | Uyarı | K4 uyarısı kalır | Veri bütünlüğü |
-| `notice` `orchestrator triage/consultation failed` | Uyarı | Gizli (L1 uyarı); run devam ediyor | |
-| `notice` `review … is invalid` | Uyarı | Pano: `review unusable · retrying` | |
-| `notice` `workspace … is not trusted` | Hata | Hata bloğu ve `Next: syn trust` | |
-| Başlık bildirimleri (`canonical .ai: …`, profil, config, sandbox) | Her biri `notice:` satırı | Başarılı yükleme: Gizli. Uyarılar tek satırda: `! 2 warnings · /doctor`. Kısmi sandbox ayrı ifade edilir. | [§8.1](#81-başlangıç-başlığı) |
-| `ask_user` (`questionLines`) | 3 notice satırı | Soru overlay'i: `SelectList` + `Type something else…` | |
-| `status` (`StatusLine`) | Hiç yayılmıyor | Aktivite satırı ve alt bilgi | [R2](#14-runtime-önkoşulları) |
-| Interrupt bildirimleri | `INTERRUPT_NOTICES` | `⎿ Interrupted · tell Synorch what to do instead`. Alt bilgide 2 s: `Press Ctrl+C again to exit` | |
-| Run sonucu (`describeOutcome`) | `Run run_… status (exit N); session ses_…` | Doğrudan mod: yok (cevap kendisi sonuçtur). Orkestrasyon: sonuç raporu. | Exit code değişmez |
-| Hata (`formatHarnessError`) | `Error [code]` + ids + … | Hata bloğu. Kod ve kimlikler yalnız L2'de. | stderr korunur |
-| Oturum kaydı | `Session saved: ses_… (resume with …)` | `Saved · resume with syn agent --continue` | |
+### 7.2 Stream ve CLI metinleri
+
+- **Ana ajan `text_delta`:** `●` madde işaretli, akan Markdown. **Worker `text_delta`:** transcript'e yazılmaz, pano etkinliğini besler ([R1](#14-runtime-önkoşulları)). **`thinking_delta`:** gizlidir (L1'de 5 satır).
+- **Coordinator `notice`'leri** (plan adayı reddi, triage hatası): gizli, aktivite `Planning · revising (2/3)`. İstisnalar: `ledger write failed` K4 olarak kalır, güvenilmeyen klasör hata bloğu olur.
+- **Başlık bildirimleri:** Başarılı yükleme sessizdir. Uyarılar tek satırda toplanır (`! 2 warnings · /doctor`).
+- **`ask_user`:** soru overlay'i. **`describeOutcome` / `formatHarnessError`:** rapor ve hata bloğu. Kod ve kimlikler L2'de. Exit code değişmez.
 
 ### 7.3 Görev durumu → pano sözlüğü
 
@@ -838,64 +779,38 @@ Kurallar:
 
 ## 14. Runtime önkoşulları
 
-Bu tasarımın bir kısmı yalnız renderer değişikliğiyle yapılamaz. Aşağıdakiler ayrı iş kalemleridir, ve işaretliler ADR ister:
+Yalnız renderer ile yapılamayanlar:
 
-| # | Önkoşul | Neden | Etkilenen |
-| --- | --- | --- | --- |
-| R0 | **Konuşma öncelikli ana ajan döngüsü (ADR).** `syn agent` mesajı `coordinator.run()` yerine ana ajan turu açar. Ana ajan doğrudan tool'larla (read, search, edit, shell) çalışır. Orkestrasyon, ana ajanın çağırdığı bir tool'dur (örn. `workers_run(plan)`) ve bugünkü coordinator onun arkasına geçer. Ana ajanın yazma kapsamı ADR-08 ve ADR-09 ile yeniden tanımlanır: doğrudan düzenlemeler review'dan geçmez ve bu bilinçli bir üründür. | P1: "her mesaja hemen cevap", doğrudan küçük iş | `cli/session.ts`, `orchestration/coordinator.ts`, `cli/role-policy.ts`, ADR-08/09 |
-| R1 | **Stream atfı:** `{kind:"stream"}` olayına `origin: main \| {worker: task_key, attempt, role}` eklenir, ya da `request_id → attempt` eşlemesi olay olarak yayılır. | Worker metni panoya gitsin, ana cevapla karışmasın (P7) | `contracts/renderer.ts`, `cli/runtime.ts`, `orchestration/worker-manager.ts` |
-| R2 | **Durum üreticisi:** Faz değişimlerinde ve 1 Hz tick'te `{kind:"status"}` yayılır. `StatusLine`'a `phase`, `elapsedMs`, `tokens`, `costUsd`, `contextPercent`, `retry`, `mode` eklenir. | Aktivite satırı ve alt bilgi (P8) | `contracts/renderer.ts`, ana ajan döngüsü, coordinator |
-| R3 | **Plan modu:** Ana ajan için geçici bir policy daraltması (`workspace-write`/`exec` → deny) ve plan önerisini yapılandırılmış blok olarak döndüren bir tool. Plan kabulü worker run'ına veya doğrudan uygulamaya bağlanır. | [§8.5](#85-plan-modu-yürütmeden-önce-birlikte-planlama) | policy engine, planner |
-| R4 | **Worker etkinlik özeti:** Worker session'ındaki tool çağrılarının hafif bir özeti (tool + ana argüman) parent'a yayılır. | Pano etkinlik sütunu | `worker-manager.ts` |
-| R5 | **Özet paragrafı:** Orkestrasyon sonu metni `RunOutcome.final_message` olarak ayrılır. | Rapor özeti | `contracts/runtime.ts`, coordinator |
-| R6 | `--continue`, argümansız `--resume` seçicisi, `/retry <görev>`, `/review`, `/compact [odak]`. | Hata bloğu, çıkış satırı, uzun oturum | `cli/args.ts`, `cli/session.ts`, ADR-11 |
-| R7 | Tool sonuçları için yapılandırılmış meta veri (`lines`, `matches`, `diffstat`, `exit_code`, `tests_passed`): `ToolResult`'a opsiyonel `summary`. | [§7.4](#74-tool-satırları-ve-özetleri) özetleri metin ayrıştırmadan üretilir | `contracts/tools.ts`, tool uygulamaları |
-| R8 | Güven istemini oturum açılışına taşımak. `Not now` → yalnız sohbet modu (dosya okuma yok). | [§4](#4-gecikme-beklentileri) | `cli/trust.ts`, `cli/session.ts` |
-| R9 | Gecikme ölçümü: `model/request_prepared` ile ilk delta arasını ve Enter ile istek arasını ölçen telemetri (yerel, opt-in değil, yalnız olay günlüğünde). | [§4](#4-gecikme-beklentileri) ölçütleri | ana ajan döngüsü |
+- **R0 (ADR):** Konuşma öncelikli ana ajan döngüsü. Mesaj bir ana ajan turu açar ve ajan doğrudan tool'larla çalışır. Orkestrasyon bir tool'dur (`workers_run(plan)`), coordinator onun arkasına geçer. Ana ajanın yazma kapsamı ADR-08 ve ADR-09 ile yeniden tanımlanır.
+- **R1:** Stream olaylarına köken atfı (`main` veya `worker: task_key`).
+- **R2:** Faz ve 1 Hz tick ile `{kind:"status"}` üreticisi. `StatusLine`'a `phase`, `elapsedMs`, `tokens`, `costUsd`, `contextPercent` ve `mode` eklenir.
+- **R3:** Plan modu. Geçici policy daraltması ve yapılandırılmış plan önerisi.
+- **R4:** Worker tool çağrılarının hafif özeti parent'a yayılır (pano etkinliği).
+- **R5:** `RunOutcome.final_message`.
+- **R6:** `--continue`, `--resume` seçicisi, `/retry`, `/review`, `/compact`.
+- **R7:** `ToolResult`'a opsiyonel `summary` (satır sayısı, diffstat, exit code, geçen test sayısı).
+- **R8:** Güven istemi oturum açılışında sorulur.
+- **R9:** Enter→istek ve TTFT ölçümü olay günlüğüne yazılır.
 
-JSONL sözleşmesi ([cli-and-jsonl](../contracts/cli-and-jsonl.md)) R1, R2 ve R5 ile **genişleyebilir**. Mevcut frame'ler değişmez ve yeni alanlar opsiyoneldir. R0, JSONL'de run kavramının anlamını değiştirebilir (her tur bir run mı?). Bu, ADR'de ayrıca karara bağlanır.
+JSONL mevcut frame'lerle uyumlu kalır. Yeni alanlar opsiyoneldir.
 
 ## 15. Kabul ölçütleri
 
-Ölçütler `@xterm/headless` sanal terminal snapshot'ları ([çapraz platform listesi §E](../research/tui/cross-platform-checklist.md)), plain renderer byte testleri ve scripted model adapter (`cli/scripted-script.ts`) ile deterministik olarak doğrulanır.
+Ürün sahibi deneyerek kabul eder. Destek olarak birkaç sanal terminal snapshot'ı (`@xterm/headless`, 80×24) alınır.
 
-| # | Ölçüt | Ölçüm |
-| --- | --- | --- |
-| A1 | Başlık ≤ 2 satır. Uyarı yoksa 1 satır. | Snapshot, 80×24 |
-| A2 | Selam mesajı (tool yok) başlıktan sonra transcript'e **≤ 4 satır** ekler (boşluklar dahil: kullanıcı satırı, boşluk, cevap, boşluk). | Satır sayımı |
-| A3 | Tek dosya okuyan soru-cevap **≤ 6 satır** ekler. Plan, pano veya görev satırı yoktur. | Snapshot |
-| A4 | Doğrudan tek düzenleme + test turu ([§8.4](#84-doğrudan-küçük-düzenleme-test-ve-diff) eşdeğeri) cevap dahil **≤ 18 satır**. Diff önizlemesi ≤ 8 satır. | Snapshot |
-| A5 | Önemsiz `syn run` (tek düzenleme) başlık dahil **≤ 8 satır**. | Satır sayımı |
-| A6 | Orkestrasyon sonuç bloğu (sabitlenmiş pano + rapor), görev sayısı n ≤ 6 iken **≤ n + 8 satır**. | Snapshot |
-| A7 | L0'da ULID yok: `/(ses\|run\|task\|att\|appr\|tc\|req\|plan\|turn\|step)_[0-9A-HJKMNP-TV-Z]{6,}/` eşleşmesi 0. İstisna yok. | Regex, tüm L0 snapshot'ları |
-| A8 | L0'da state adı ve oku yok: `/\b[a-z_]+ -> [a-z_]+\b/` ve `awaiting_approval\|retry_pending\|shared-read-only\|scoped-dir\|allowed-for-scope\|allowed-once` eşleşmesi 0. | Regex |
-| A9 | L0'da ham JSON yok: `/[{\[]"\w+":/` eşleşmesi 0 (model metni hariç). | Regex |
-| A10 | Autonomous modda self-approval L0'da 0 satır üretir. | Snapshot |
-| A11 | Güvenlik sapmaları L0'da **her zaman** görünür: sandbox `partial`/`unavailable`, `isolation.fallback`, `route.fallback.used`, `budget/exceeded`, `tool/interrupted`, `stop_reason=length`. Her biri en az 1 satır. | Fixture başına assert |
-| A12 | Her hata bloğu `Workspace` ve `Next` satırı içerir. `Next` en az bir çalıştırılabilir komut veya eylem içerir. | Her çıkış kodu için fixture |
-| A13 | Worker stream metni transcript'te görünmez. Ana cevap tek `●` bloğudur. | R1 sonrası snapshot |
-| A14 | Enter → kullanıcı satırı ve spinner ≤ 50 ms. Enter → provider isteği p95 ≤ 300 ms (doğrudan mod, sahte provider). | Sanal saat + zamanlama testi |
-| A15 | Doğrudan modda ilk provider isteğinden önce ek model çağrısı (planlama turu) yapılmaz. | Scripted adapter çağrı sayımı |
-| A16 | Stream 15 s sessiz kalırsa aktivite satırı `Waiting for <provider>` gösterir. | Sanal saat |
-| A17 | 9 görevli planda canlı pano 80×24'te ≤ 7 satırdır (katlama). | Snapshot |
-| A18 | `Ctrl+O` L0 ↔ L1 geçişi geçmiş tool satırlarına da uygulanır. Çift basış aynı ekranı verir. | Snapshot karşılaştırma |
-| A19 | `ctx%` ≥ 70'te uyarı, ≥ 90'da hata rengi alır. %90'da bir kez K3 satırı basılır. | Snapshot |
-| A20 | `NO_COLOR=1` → stdout'ta SGR yok. Her durum satırı glyph veya önek kelimesi taşır. | Byte taraması (D6) |
-| A21 | `SYN_GLYPHS=ascii` → U+007F üstü karakter yalnız model ve kullanıcı metninde bulunur. | Byte taraması |
-| A22 | Klasik conhost algısında (`win32`, `WT_SESSION` yok) `safe` set seçilir ve `⎿ ⏺ ⠋` basılmaz. | Birim test + manuel P0 |
-| A23 | Plain mod [§12](#12-plain-mod-eşdeğeri) senaryosunda aynı bilgi alanlarını içerir. Renk kapalıyken `\x1b[` sayısı 0. | Plain snapshot |
-| A24 | `--mode jsonl` çıktısı mevcut fixture'larla byte-eşit kalır (R1/R2/R5 opsiyonel alanları hariç). | Mevcut JSONL testleri |
-| A25 | Frame süresi p95 < 16 ms: 10k satır transcript, 3 çalışan worker, 200 token/s. | ADR-04 deney ölçümü |
+1. **Snapshot'lar:** [§8.2](#82-selam-ve-hızlı-soru-cevap) (selam ve hızlı soru), [§8.4](#84-doğrudan-küçük-düzenleme-test-ve-diff) (doğrudan düzenleme ve test) ve [§8.6](#86-konuşmaya-gömülü-orkestrasyon) c (orkestrasyon sonucu) mockup'larına biçimce eşleşir.
+2. **Kimlik ve iç jargon yok:** Varsayılan görünümde ULID, `a -> b` durum geçişi ve ham JSON yok. Snapshot'larda regex ile kontrol edilir.
+3. **Hemen tepki:** Enter'dan sonra kullanıcı satırı ve spinner hemen görünür. Selam mesajında plan, pano veya görev satırı oluşmaz.
+4. **Güvenlik sapmaları görünür:** Kısmi sandbox, worktree fallback'i, route fallback'i ve bütçe aşımının her biri en az bir satır üretir.
+5. **`NO_COLOR=1` ve `SYN_GLYPHS=ascii`:** Renk ve Unicode glyph olmadan da durum okunur. `--mode jsonl` çıktısı değişmez.
 
 ## 16. Açık sorular
 
-Ürün sahibine:
-
-1. **UI dili:** Terminal metinleri İngilizce mi kalacak, Türkçe mi olacak, yoksa `ui.locale` ile seçilebilir mi olacak? Mockup'lar İngilizce çizildi.
-2. **Orkestrasyon eşiği:** Ana ajan worker'ları ne zaman önersin? Öneri: ≥ 5 dosya, ≥ 2 bağımsız alan veya `high` risk. `autonomous` modda ajan önerip hemen başlatsın mı, yoksa her zaman tek tuşluk onay mı istesin?
-3. **Doğrudan düzenlemelerin review'u:** Doğrudan moddaki yazmalar hiç review'dan geçmesin mi (Claude Code gibi), yoksa oturum sonunda veya N dosyayı aşınca otomatik `/review` önerilsin mi?
-4. **Worker sütunları:** Rol ve model sütunları L0'da kalsın mı? Öneri: kalsın, çünkü çok modelli orkestrasyon Synorch'un farkıdır.
-5. **Maliyet gösterimi:** Abonelik (OAuth) kullanıcılarında `$` yerine kota yüzdesi mi gösterilsin?
-6. **Plan modu tuşu:** `Shift+Tab` plan moduna ayrılsın mı? Claude Code aynı tuşla izin modlarını da döndürüyor. Synorch'ta policy genişletme tuşa bağlanmıyor.
-7. **Run kavramı:** R0 sonrası her kullanıcı turu bir "run" mı, yoksa run yalnız orkestrasyonlar için mi açılır? Bu seçim `syn runs`, `syn show` ve JSONL'yi etkiler.
-8. **Tema:** 16 renk ANSI yeterli mi, yoksa pi benzeri bir tema dosyası ilk sürümde isteniyor mu?
+1. UI dili İngilizce mi, Türkçe mi, yoksa seçilebilir mi olacak? (Mockup'lar İngilizce.)
+2. Orkestrasyon eşiği ne olsun (öneri: ≥ 5 dosya, ≥ 2 alan veya `high` risk)? Autonomous modda ajan worker'ları sormadan başlatsın mı?
+3. Doğrudan düzenlemeler review'suz kalsın mı, yoksa belirli bir büyüklükte `/review` önerilsin mi?
+4. Pano satırlarında rol ve model sütunları varsayılan görünümde kalsın mı?
+5. Abonelik kullanıcılarında `$` yerine kota yüzdesi mi gösterilsin?
+6. `Shift+Tab` yalnız plan moduna mı ayrılsın?
+7. R0 sonrası her tur bir "run" mı sayılacak? Bu, `syn runs`, `syn show` ve JSONL'yi etkiler.
+8. 16 renk ANSI yeterli mi, yoksa ilk sürümde bir tema dosyası isteniyor mu?

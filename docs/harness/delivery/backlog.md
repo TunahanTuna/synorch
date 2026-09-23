@@ -18,7 +18,7 @@
 | Canlı sağlamlaştırma | Harness-hesaplı kanıt, Windows/git sadakati, verimlilik, plan-time doğrulama, rol bütçeleri | `920d37f`…`b1cea84` |
 | Pivot (D0) | Ürün tanımı, ADR-21 (Accepted), UX tasarımı | `a592854`…`b9dab08` |
 | K0 | Sohbet öncelikli `syn agent` (anında cevap, doğrudan düzenleme, `/undo`, `/allow`) — ürün sahibi onayladı | `2c51679` |
-| K1 (sürüyor) | U1 giriş (palet, @dosya, görsel, mouse, model seçici) ✅ `7c0c7c2` · U3 görünümler (pano, graf, usage, kartlar) ✅ `1cab7ec` · U2 oturum özellikleri ⏳ | |
+| K1 (sürüyor) | U1 giriş (palet, @dosya, görsel, mouse, model seçici) ✅ `7c0c7c2` · U3 görünümler (pano, graf, usage, kartlar) ✅ `1cab7ec` · U2 oturum özellikleri ✅ `73f834f` → deneme bekliyor | |
 
 ## Sıradaki dalgalar (öncelik sırasıyla)
 
@@ -27,6 +27,7 @@
 - Entegrasyon → ürün sahibi denemesi.
 
 ### K1.5 — Ürün sahibinin 2026-09-24 istekleri (K1 testinden hemen sonra) ⭐
+0. K1 artıkları: görselleri modele gerçekten gönder (adapter image parts), footer kotasına worker kullanımını kat, `/review` → ADR-09 dispatchReview, `/commit` seçici staging, orkestrasyon 1 saat tool timeout.
 1. **Çoklu sağlayıcı model görünürlüğü:** OpenAI ve Anthropic'e birlikte giriş yapıldıysa `/model` ve model seçici **her iki sağlayıcının modellerini** gösterir (ChatGPT aboneliği modelleri + Claude modelleri; Claude aboneliği Claude Code köprüsüyle, API key ile doğrudan).
 2. **Çapraz sağlayıcılı orkestrasyon:** tier/rol başına farklı sağlayıcı seçilebilir. Örnek hedef yapılandırma:
    - orchestrator → `openai/gpt-6-sol`

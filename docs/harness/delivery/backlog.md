@@ -28,6 +28,13 @@
 
 ### K1.5 — Ürün sahibinin 2026-09-24 istekleri (K1 testinden hemen sonra) ⭐
 0. **K1.6 (sürüyor, 2026-09-24):** Claude Code tarzı izin modları (ask/auto/full/plan, Shift+Tab, `/permissions`, reddetmek yerine sor); reviewer'lar workspace'in tamamını okur; görevler arası ölçütler entegrasyon review'una; ret yerine revize turu; çift basılan pano düzeltmesi.
+0. **K1.7 — Worker'ların içine girme (ürün sahibi isteği, 2026-09-24) ⭐ ayrıştırıcı:**
+   - Pano ve graf görünümünde worker seçimi: `↑/↓` (veya `j/k`), grafta `←/→` ile seviyeler arası; seçili worker vurgulanır.
+   - `Enter` → seçili worker'ın **kendi terminal görünümü**: o worker'ın oturumunun canlı akışı (düşünme özeti, araç satırları, diff'ler), aynı sessiz-varsayılan kurallarıyla; `Esc` veya `Ctrl+O`/`b` ile ana oturuma dön. `Tab` ile worker'lar arasında geçiş.
+   - Worker görünümünün başında **orchestrator'ın o worker'a verdiği görev**: hedef, sahip olunan dosyalar, kabul ölçütleri, doğrulama komutları (task packet'ın okunur özeti) + sonradan gelen yönlendirmeler.
+   - Ana sohbette orchestrator'ın worker'lara verdiği komutlar/delegasyonlar görünür (katlanabilir "→ worker'a gönderildi" satırları).
+   - Worker ile iletişim: worker görünümündeyken yazılan mesaj **o worker'a** steer olarak gider (güvenli adım sınırında), orchestrator'a da bildirilir ve audit'e yazılır; worker'ı duraklat/iptal et (`p`/`x`) seçenekleri.
+   - Teknik not: her attempt zaten ayrı oturum (session log) — görünüm bu log'un projeksiyonu; attempt başına steer kuyruğu (driver.steer) ve coordinator'a bildirim gerekir.
 0. K1 artıkları: görselleri modele gerçekten gönder (adapter image parts), footer kotasına worker kullanımını kat, `/review` → ADR-09 dispatchReview, `/commit` seçici staging, orkestrasyon 1 saat tool timeout.
 1. **Çoklu sağlayıcı model görünürlüğü:** OpenAI ve Anthropic'e birlikte giriş yapıldıysa `/model` ve model seçici **her iki sağlayıcının modellerini** gösterir (ChatGPT aboneliği modelleri + Claude modelleri; Claude aboneliği Claude Code köprüsüyle, API key ile doğrudan).
 2. **Çapraz sağlayıcılı orkestrasyon:** tier/rol başına farklı sağlayıcı seçilebilir. Örnek hedef yapılandırma:

@@ -73,6 +73,9 @@ test("every contract command and flag parses into a typed invocation", () => {
     session: { policy: "autonomous", profiles: [] },
     resume: undefined,
     fork: undefined,
+    continue: false,
+    legacy: false,
+    debug: false,
   });
   const agent = parseHarnessArgs(["agent", "--fork", `${SES}@12`, "--policy", "ask", "--profile", "complex_worker=openai/gpt-5.5", "--profile", "fast_worker=anthropic/haiku", "-t", "repo", "--plain", "--color", "never"]);
   assert.ok(agent.kind === "agent");

@@ -79,6 +79,9 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | `trust/granted` | `workspace_root` (kanonik kök), `repo_identity` (`git:`/`dir:` + 64 hex), `source` (`prompt`\|`command`) | Hayır | cli (`syn trust decisions` oturumu) |
 | `trust/revoked` | `workspace_root`, `repo_identity` | Hayır | cli (`syn trust decisions` oturumu) |
 | `trust/used` | `workspace_root`, `repo_identity`, `source` (`store`\|`flag`\|`session`), `sandbox_enforcement` | Hayır | orchestration (run günlüğü) |
+| `checkpoint/recorded` | `turn_id?`, `tool_call_id`, `files[]` (`path`, `before`: blob ref \| null, `after`: digest \| null) | Hayır | cli (konuşma günlüğü, ADR-21 D6) |
+| `checkpoint/restored` | `checkpoint_seq`, `restored[]`, `skipped[]` (`path`, `reason`) | Hayır | cli (konuşma günlüğü, `/undo`) |
+| `command/allowed` | `workspace_root` (kanonik kök), `prefix` | Hayır | cli (konuşma günlüğü, `/allow`) |
 
 Eşleşme invariant'ları: her `tool/call_proposed` bir `tool/result_recorded` veya `tool/interrupted` ile; her `approval/requested` bir `approval/decided` ile; her `step/started` bir `step/ended` ile kapanır. Kapanmamış olanlar recovery'de [identity-and-state.md](./identity-and-state.md#3-crash-recovery-eşlemesi) tablosuyla kapatılır. Kayıtlı assistant mesajındaki her `tool_call` parçası runtime `tool_call_id` taşır.
 
@@ -641,4 +644,49 @@ holder: { pid: 48122, host: dev-laptop, token: 3f9a1c2e7b4d8f60a1b2 }
 acquired_at: "2026-09-22T10:00:00Z"
 heartbeat_at: "2026-09-22T10:00:20Z"
 expires_at: "2026-09-22T10:00:50Z"
+```
+
+## Konuşma günlüğü (ADR-21, K0)
+
+`syn agent` konuşması kendi oturumudur (manifest `title: "chat: <ilk mesaj>"`). Her kullanıcı mesajı bir **turdur** (`turn/started {trigger: user}` … `turn/ended`); konuşma turları hiçbir run'a ait değildir: zarfta `run_id` yoktur, korelasyon `turn_id` iledir. Ana ajanın olayları `actor: {kind: agent, role: session}` taşır (`ACTOR_KINDS += agent`, `AGENT_ROLES += session`). Konuşmada `plan/*`, `task/*`, `attempt/*`, `run/*` olayı yazılmaz; `/plan <hedef>` coordinator'ı ayrı run oturumunda çalıştırır ve konuşmaya yalnız özet olarak döner (K1'de gömülü pano).
+
+- `checkpoint/recorded` (v1): başarılı her `apply_patch`/`write_file` çağrısından sonra, ön görüntü blob'u (`before`, dosya yoksa `null`) ve düzenlemenin bıraktığı `workspaceDigest` (`after`, silindiyse `null`). Git stash kullanılmaz.
+- `checkpoint/restored` (v1): `/undo` son geri alınmamış checkpoint'i yalnız dosya hâlâ `after` digest'indeyse `before`'a döndürür; aksi halde `skipped` ile atlar. Exec yan etkileri kapsam dışıdır ve kullanıcıya söylenir.
+- `command/allowed` (v1): kullanıcı `/allow <önek>` ile konuşma ajanının exec allowlist'ini bu çalışma alanı için genişletti; kalıcı kayıt kullanıcı kapsamında `<synorch home>/command-grants.json`'dadır ([policy ve onay §8](./policy-and-approval.md#8-konuşma-ajanı-session-adr-21)).
+- JSONL `turn` frame'i ve `syn run` konuşma eşlemesi K1c'dedir; K0'da `syn run` çıktısı değişmez.
+
+```yaml example=session-event
+- schema_version: 1
+  event_id: evt_01K5V0A8Z4X9V2M6N7P0R1S2A1
+  session_id: ses_01K5V0A8Z4X9V2M6N7P0R1S2A0
+  seq: 21
+  event_version: 1
+  timestamp: "2026-09-23T10:00:05.000Z"
+  actor: { kind: agent, role: session }
+  type: checkpoint/recorded
+  data:
+    turn_id: turn_01K5V0A8Z4X9V2M6N7P0R1S2A2
+    tool_call_id: call_01K5V0A8Z4X9V2M6N7P0R1S2A3
+    files:
+      - path: src-add.mjs
+        before: { digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111", size_bytes: 44, media_type: application/octet-stream }
+        after: "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+- schema_version: 1
+  event_id: evt_01K5V0A8Z4X9V2M6N7P0R1S2A4
+  session_id: ses_01K5V0A8Z4X9V2M6N7P0R1S2A0
+  seq: 30
+  event_version: 1
+  timestamp: "2026-09-23T10:01:00.000Z"
+  actor: { kind: user }
+  type: checkpoint/restored
+  data: { checkpoint_seq: 21, restored: [src-add.mjs], skipped: [] }
+- schema_version: 1
+  event_id: evt_01K5V0A8Z4X9V2M6N7P0R1S2A5
+  session_id: ses_01K5V0A8Z4X9V2M6N7P0R1S2A0
+  seq: 31
+  event_version: 1
+  timestamp: "2026-09-23T10:01:10.000Z"
+  actor: { kind: user }
+  type: command/allowed
+  data: { workspace_root: /home/dev/syn-smoke, prefix: node check.mjs }
 ```

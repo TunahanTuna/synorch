@@ -178,7 +178,8 @@ export interface ToolExecutionContext {
   readonly ref?: number;
   /** Read/write ledger of the attempt (ADR-18 D3); absent in runtimes that do not track it. */
   readonly files?: AttemptFileLedger;
-  readonly runId: RunId;
+  /** Undefined for a conversation turn (`session` role). */
+  readonly runId: RunId | undefined;
   readonly taskId: TaskId | undefined;
   readonly attemptId: AttemptId | undefined;
   readonly role: AgentRole;
@@ -221,7 +222,8 @@ export interface ToolCallOutcome {
 }
 
 export interface ToolInvocationScope {
-  readonly runId: RunId;
+  /** Undefined for a conversation turn (`session` role). */
+  readonly runId: RunId | undefined;
   readonly taskId: TaskId | undefined;
   readonly attemptId: AttemptId | undefined;
   readonly role: AgentRole;

@@ -88,12 +88,12 @@ export function delegationCallbacks(slot: DelegationSlot): {
       if (context.role !== "orchestrator" || port?.proposePlan === undefined || port.runId !== context.runId) {
         return toolResult({ ok: true, text: PLAN_RECORDED });
       }
-      return toolResult(port.proposePlan(input, { runId: context.runId, role: context.role, toolCallId: context.toolCallId }));
+      return toolResult(port.proposePlan(input, { runId: port.runId, role: context.role, toolCallId: context.toolCallId }));
     },
     async taskSpawn(input, context) {
       const port = portFor(slot, context);
       if ("ok" in port) return toolResult(port);
-      return toolResult(port.spawn(input.packet, { runId: context.runId, role: context.role, toolCallId: context.toolCallId }));
+      return toolResult(port.spawn(input.packet, { runId: port.runId, role: context.role, toolCallId: context.toolCallId }));
     },
     async taskStatus(input, context) {
       const port = portFor(slot, context);
@@ -104,7 +104,7 @@ export function delegationCallbacks(slot: DelegationSlot): {
       const port = portFor(slot, context);
       if ("ok" in port) return toolResult(port);
       if (port.triage === undefined) return toolResult({ ok: false, code: "execution_failed", message: "no worker report is being triaged in this run" });
-      return toolResult(port.triage(input, { runId: context.runId, role: context.role, toolCallId: context.toolCallId }));
+      return toolResult(port.triage(input, { runId: port.runId, role: context.role, toolCallId: context.toolCallId }));
     },
   };
 }

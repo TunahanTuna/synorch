@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   evidenceRefSchema,
-  modelTierSchema,
+  taskModelTierSchema,
   nonEmptyTextSchema,
   READ_ONLY_ROLES,
   riskClassSchema,
@@ -92,7 +92,7 @@ export const planTaskSchema = z.strictObject({
   owned_paths: z.array(pathPatternSchema),
   read_paths: z.array(pathPatternSchema),
   risk: riskClassSchema,
-  model_tier: modelTierSchema,
+  model_tier: taskModelTierSchema,
   acceptance_criteria: z.array(acceptanceCriterionSchema).min(1),
   verification: z.array(z.string().min(1)),
 });
@@ -270,7 +270,7 @@ export const taskContextPacketSchema = z
     plan_version: z.int().min(1),
     plan_digest: digestSchema,
     role: workerRoleSchema,
-    model_tier: modelTierSchema,
+    model_tier: taskModelTierSchema,
     risk: riskClassSchema,
     write_mode: z.enum(["read-only", "owned-paths", "rca-only"]),
     isolation: z.enum(["worktree", "scoped-dir", "shared-read-only"]),

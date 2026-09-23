@@ -36,6 +36,17 @@ import type {
 } from "../contracts/index.ts";
 import { WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
 import { withApprovalDeadline, type ApprovalChoice } from "./approvals.ts";
+import {
+  activityText,
+  ConversationPresenter,
+  footerText,
+  GLYPH_SETS,
+  headerLines,
+  type ConversationItem,
+  type DiffLine,
+  type GlyphSet,
+  type ViewOp,
+} from "./conversation-view.ts";
 import { deviceCodeText } from "./auth-interaction.ts";
 import { describeEvent, levelPrefix, type EventLine } from "./describe.ts";
 import { INTERRUPT_NOTICES, InterruptController, type InterruptAction, type InterruptKey } from "./interrupt.ts";
@@ -87,6 +98,14 @@ export interface PiTuiRendererOptions {
   readonly schedule?: (flush: () => void) => void;
   /** Upper bound for draining late key events before the terminal is released. */
   readonly drainInputMs?: number;
+  /**
+   * `conversation` (ADR-21, TUI experience §8): the quiet main conversation view of `syn agent`
+   * (user/assistant messages, tool one-liners, activity line, footer). Default: the event view.
+   */
+  readonly view?: "events" | "conversation";
+  readonly glyphs?: GlyphSet;
+  /** L2: raw event lines under the conversation (`--debug`, `SYN_DEBUG=1`). */
+  readonly debug?: boolean;
 }
 
 /** Wraps a pi-tui terminal so that no single write exceeds the ConPTY-safe size. */
@@ -252,6 +271,134 @@ class SecretInput implements Component, Focusable {
   }
 }
 
+/** Bold `>` user line with a blank line above (TUI §8.2). */
+class UserMessageView implements Component {
+  private readonly text: string;
+  private readonly style: Styler;
+
+  public constructor(text: string, style: Styler) {
+    this.text = text;
+    this.style = style;
+  }
+
+  public invalidate(): void {}
+
+  public render(width: number): string[] {
+    const [first = "", ...rest] = this.text.split("\n");
+    return ["", fit(`${this.style.bold(">")} ${this.style.bold(first)}`, width), ...rest.map((line) => fit(`  ${this.style.bold(line)}`, width))];
+  }
+}
+
+/** `● ` + streamed Markdown, continuation lines indented by two columns. */
+class AssistantMessageView implements Component {
+  private readonly markdown: Markdown;
+  private readonly bullet: string;
+
+  public constructor(markdown: Markdown, bullet: string) {
+    this.markdown = markdown;
+    this.bullet = bullet;
+  }
+
+  public setText(text: string): void {
+    this.markdown.setText(text);
+  }
+
+  public invalidate(): void {
+    this.markdown.invalidate();
+  }
+
+  public render(width: number): string[] {
+    const lines = this.markdown.render(Math.max(1, width - 2));
+    while (lines.length > 0 && lines[0]?.trim() === "") lines.shift();
+    while (lines.length > 0 && lines.at(-1)?.trim() === "") lines.pop();
+    return ["", ...lines.map((line, index) => fit(`${index === 0 ? this.bullet : " "} ${line}`, width))];
+  }
+}
+
+/** `● Verb target` + `  ⎿ summary` + an edit diff of at most 8 lines (Ctrl+O shows the detail). */
+class ToolLineView implements Component {
+  private item: Extract<ConversationItem, { kind: "tool" }>;
+  private readonly style: Styler;
+  private readonly glyphs: GlyphSet;
+  private readonly expanded: () => boolean;
+
+  public constructor(item: Extract<ConversationItem, { kind: "tool" }>, style: Styler, glyphs: GlyphSet, expanded: () => boolean) {
+    this.item = item;
+    this.style = style;
+    this.glyphs = glyphs;
+    this.expanded = expanded;
+  }
+
+  public update(item: Extract<ConversationItem, { kind: "tool" }>): void {
+    this.item = item;
+  }
+
+  public invalidate(): void {}
+
+  public render(width: number): string[] {
+    const item = this.item;
+    const g = this.glyphs;
+    const bullet =
+      item.status === "ok" ? this.style.green(g.bullet) : item.status === "running" ? this.style.cyan(g.bullet) : item.status === "cancelled" ? this.style.yellow(g.bullet) : this.style.red(item.status === "denied" ? g.fail : g.bullet);
+    const lines = ["", fit(`${bullet} ${this.style.bold(item.title)}`, width)];
+    if (item.summary !== undefined) {
+      const summary = item.status === "denied" || item.status === "failed" ? this.style.red(item.summary) : this.style.dim(item.summary);
+      lines.push(fit(`  ${this.style.dim(g.result)} ${summary}`, width));
+    }
+    const body = this.expanded() && item.detail.length > 0 ? item.detail : item.preview;
+    for (const line of body) lines.push(fit(`     ${this.diffLine(line)}`, width));
+    return lines;
+  }
+
+  private diffLine(line: DiffLine): string {
+    if (line.op === "+") return this.style.green(`+ ${line.text}`);
+    if (line.op === "-") return this.style.red(`${this.glyphs.minus} ${line.text}`);
+    if (line.op === "…") return this.style.dim(`${this.glyphs.ellipsis} ${line.text}`);
+    return this.style.dim(line.text);
+  }
+}
+
+/** The single activity line (TUI §10.1); height 0 while idle. */
+class ActivityLineView implements Component {
+  private readonly presenter: ConversationPresenter;
+  private readonly style: Styler;
+  private readonly now: () => number;
+
+  public constructor(presenter: ConversationPresenter, style: Styler, now: () => number) {
+    this.presenter = presenter;
+    this.style = style;
+    this.now = now;
+  }
+
+  public invalidate(): void {}
+
+  public render(width: number): string[] {
+    const activity = this.presenter.activity();
+    if (activity === undefined) return [];
+    const g = this.presenter.glyphs;
+    const now = this.now();
+    const frame = g.spinner[Math.floor(now / g.spinnerMs) % g.spinner.length] ?? g.bullet;
+    return ["", fit(this.style.cyan(activityText(activity, now, frame, g)), width)];
+  }
+}
+
+/** One dim line under the editor: folder · branch · model · ctx% · quota% (TUI §10.2). */
+class FooterView implements Component {
+  private readonly text: () => string;
+  private readonly style: Styler;
+
+  public constructor(text: () => string, style: Styler) {
+    this.text = text;
+    this.style = style;
+  }
+
+  public invalidate(): void {}
+
+  public render(width: number): string[] {
+    return [fit(this.style.dim(`  ${this.text()}`), width)];
+  }
+}
+
 type Interruption = { readonly kind: "interrupt" | "exit" };
 type InputResult = Awaited<ReturnType<UserInputSource["next"]>>;
 
@@ -290,6 +437,11 @@ export class PiTuiRenderer implements TerminalRenderer {
   private requestActive = false;
   private started = false;
   private stopped = false;
+  private readonly presenter: ConversationPresenter | undefined;
+  private readonly itemViews = new Map<string, Component>();
+  private expanded = false;
+  private spinner: ReturnType<typeof setInterval> | undefined;
+  private footerLabel: { folder: string; branch: string | undefined; mode: string } = { folder: "", branch: undefined, mode: "" };
 
   public constructor(options: PiTuiRendererOptions) {
     this.options = options;
@@ -324,6 +476,10 @@ export class PiTuiRenderer implements TerminalRenderer {
       strikethrough: (text) => text,
       underline: (text) => text,
     };
+    this.presenter =
+      options.view === "conversation"
+        ? new ConversationPresenter({ glyphs: options.glyphs ?? GLYPH_SETS.rich, echoesUser: true, debug: options.debug === true, now: () => this.now() })
+        : undefined;
     this.editor = new Editor(this.tui, { borderColor: (text) => style.dim(text), selectList: this.selectTheme });
     this.editor.onSubmit = (text) => this.submit(text);
     this.queue = new RenderQueue((event) => this.consume(event), {
@@ -373,15 +529,19 @@ export class PiTuiRenderer implements TerminalRenderer {
         onCrash: lifecycle.onCrash,
       });
     }
-    const lines = [`${this.style.bold("Synorch")} ${this.style.dim(header.workspaceRoot)}${header.gitBranch === undefined ? "" : ` ${this.style.cyan(header.gitBranch)}`}`];
-    lines.push(this.style.dim(`policy ${header.policyMode} · sandbox ${header.sandboxEnforcement}`));
-    for (const route of header.routes) lines.push(this.style.dim(`${route.tier}: ${route.model} (${route.source})`));
-    for (const notice of header.notices) lines.push(this.style.yellow(`notice: ${sanitizeInline(notice)}`));
-    this.header.setText(lines.join("\n"));
-    this.tui.addChild(this.header);
-    this.tui.addChild(this.transcript);
-    this.tui.addChild(this.status);
-    this.tui.addChild(this.editor);
+    if (this.presenter !== undefined) {
+      this.startConversation(header, this.presenter);
+    } else {
+      const lines = [`${this.style.bold("Synorch")} ${this.style.dim(header.workspaceRoot)}${header.gitBranch === undefined ? "" : ` ${this.style.cyan(header.gitBranch)}`}`];
+      lines.push(this.style.dim(`policy ${header.policyMode} · sandbox ${header.sandboxEnforcement}`));
+      for (const route of header.routes) lines.push(this.style.dim(`${route.tier}: ${route.model} (${route.source})`));
+      for (const notice of header.notices) lines.push(this.style.yellow(`notice: ${sanitizeInline(notice)}`));
+      this.header.setText(lines.join("\n"));
+      this.tui.addChild(this.header);
+      this.tui.addChild(this.transcript);
+      this.tui.addChild(this.status);
+      this.tui.addChild(this.editor);
+    }
     this.tui.setFocus(this.editor);
     this.removeInputListener = this.tui.addInputListener((data) => this.onKey(data));
     this.tui.start();
@@ -392,11 +552,87 @@ export class PiTuiRenderer implements TerminalRenderer {
     this.queue.push(event);
   }
 
+  /** Conversation view: draws the earlier messages of a resumed conversation. */
+  public replay(events: readonly SessionEvent[]): void {
+    if (this.presenter === undefined) return;
+    for (const op of this.presenter.replay(events)) this.applyOp(op);
+    this.tui.requestRender();
+  }
+
+  private startConversation(header: SessionHeaderView, presenter: ConversationPresenter): void {
+    const folder = header.workspaceRoot.split(/[\\/]/).filter((part) => part !== "").at(-1) ?? header.workspaceRoot;
+    presenter.configure({ model: header.model, contextWindowTokens: header.contextWindowTokens });
+    this.footerLabel = { folder, branch: header.gitBranch, mode: header.policyMode === "ask" ? "ask mode" : "" };
+    const { title, warning } = headerLines({
+      version: header.version ?? "",
+      folder,
+      branch: header.gitBranch,
+      model: header.model,
+      mode: header.policyMode,
+      sandboxEnforcement: header.sandboxEnforcement,
+      warnings: header.notices,
+      glyphs: presenter.glyphs,
+    });
+    this.header.setText([this.style.cyan(title), ...(warning === undefined ? [] : [this.style.yellow(warning)])].join("\n"));
+    this.tui.addChild(this.header);
+    this.tui.addChild(this.transcript);
+    this.tui.addChild(new ActivityLineView(presenter, this.style, () => this.now()));
+    this.tui.addChild(new Text("", 0, 0));
+    this.tui.addChild(this.editor);
+    this.tui.addChild(new FooterView(() => footerText(presenter.footer(), { ...this.footerLabel, glyphs: presenter.glyphs, mode: this.footerLabel.mode || undefined }), this.style));
+  }
+
+  private applyOp(op: ViewOp): void {
+    const item = op.item;
+    const existing = this.itemViews.get(item.id);
+    if (existing !== undefined) {
+      if (existing instanceof AssistantMessageView && item.kind === "assistant") existing.setText(item.text);
+      else if (existing instanceof ToolLineView && item.kind === "tool") existing.update(item);
+      return;
+    }
+    const view = this.viewFor(item);
+    this.itemViews.set(item.id, view);
+    this.transcript.addChild(view);
+  }
+
+  private viewFor(item: ConversationItem): Component {
+    const glyphs = this.presenter?.glyphs ?? GLYPH_SETS.rich;
+    switch (item.kind) {
+      case "user":
+        return new UserMessageView(item.text, this.style);
+      case "assistant": {
+        const view = new AssistantMessageView(new Markdown("", 0, 0, this.markdownTheme), glyphs.bullet);
+        view.setText(item.text);
+        return view;
+      }
+      case "tool":
+        return new ToolLineView(item, this.style, glyphs, () => this.expanded);
+      case "note": {
+        const text =
+          item.level === "error" ? this.style.red(item.text) : item.level === "warning" ? this.style.yellow(item.text) : this.style.dim(item.text);
+        return new Text(text, 0, 0);
+      }
+    }
+  }
+
+  private updateSpinner(): void {
+    const active = this.presenter?.activity() !== undefined;
+    if (active && this.spinner === undefined && this.started && !this.stopped) {
+      const interval = this.presenter?.glyphs.spinnerMs ?? 80;
+      this.spinner = setInterval(() => this.tui.requestRender(), interval);
+      this.spinner.unref?.();
+    } else if (!active && this.spinner !== undefined) {
+      clearInterval(this.spinner);
+      this.spinner = undefined;
+    }
+  }
+
   /** Applies Ctrl+C / Esc semantics; key input and tests both go through here. */
   public interrupt(key: InterruptKey): InterruptAction {
     const action = this.interrupts.press(key, this.now());
     if (action === "cancel-request") {
-      this.appendLine({ level: "warning", text: INTERRUPT_NOTICES.cancelled });
+      // The conversation view says "Interrupted" once the turn has actually stopped.
+      if (this.presenter === undefined) this.appendLine({ level: "warning", text: INTERRUPT_NOTICES.cancelled });
       this.options.onInterrupt?.();
       this.deliver({ kind: "interrupt" });
     } else if (action === "offer-exit") {
@@ -419,6 +655,8 @@ export class PiTuiRenderer implements TerminalRenderer {
     if (this.stopped || !this.started) return;
     this.flush();
     this.stopped = true;
+    if (this.spinner !== undefined) clearInterval(this.spinner);
+    this.spinner = undefined;
     this.dialog?.cancel();
     this.removeInputListener?.();
     await this.terminal.drainInput(this.options.drainInputMs ?? 300, 50);
@@ -445,6 +683,11 @@ export class PiTuiRenderer implements TerminalRenderer {
     if (matchesKey(data, "escape") && this.dialog === undefined && !this.editor.isShowingAutocomplete()) {
       return this.interrupt("escape") === "cancel-request" ? { consume: true } : undefined;
     }
+    if (matchesKey(data, "ctrl+o") && this.dialog === undefined && this.presenter !== undefined) {
+      this.expanded = !this.expanded;
+      this.tui.requestRender(true);
+      return { consume: true };
+    }
     if (matchesKey(data, "ctrl+d") && this.dialog === undefined && this.editor.getText().length === 0) {
       this.deliver({ kind: "exit" });
       return { consume: true };
@@ -461,7 +704,9 @@ export class PiTuiRenderer implements TerminalRenderer {
       this.deliver({ kind: "exit" });
       return;
     }
-    this.transcript.addChild(new Text(`${this.style.cyan(">")} ${sanitizeTerminalText(trimmed)}`, 0, 0));
+    this.transcript.addChild(
+      this.presenter !== undefined ? new UserMessageView(sanitizeTerminalText(trimmed), this.style) : new Text(`${this.style.cyan(">")} ${sanitizeTerminalText(trimmed)}`, 0, 0),
+    );
     this.tui.requestRender();
     this.deliver({ kind: trimmed.startsWith("/") ? "command" : "message", text: trimmed });
   }
@@ -495,6 +740,14 @@ export class PiTuiRenderer implements TerminalRenderer {
   }
 
   private consume(event: RenderEvent): void {
+    if (this.presenter !== undefined) {
+      if (event.kind === "session-event" && event.event.type === "turn/started") this.setActivity("turn", true);
+      if (event.kind === "session-event" && event.event.type === "turn/ended") this.setActivity("turn", false);
+      for (const op of this.presenter.apply(event)) this.applyOp(op);
+      this.updateSpinner();
+      this.tui.requestRender();
+      return;
+    }
     switch (event.kind) {
       case "session-event":
         this.onSessionEvent(event.event);
@@ -602,6 +855,11 @@ export class PiTuiRenderer implements TerminalRenderer {
   }
 
   private appendLine(line: EventLine): void {
+    if (this.presenter !== undefined) {
+      this.applyOp(this.presenter.note(line.level === "success" ? "info" : line.level, line.text));
+      if (this.started && !this.stopped) this.tui.requestRender();
+      return;
+    }
     const text = `${levelPrefix(line.level)}${line.text}`;
     const painted =
       line.level === "success"
@@ -632,6 +890,16 @@ export class PiTuiRenderer implements TerminalRenderer {
   }
 
   private requestApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
+    this.presenter?.setWaiting(true);
+    const decided = this.promptApproval(request, signal);
+    void decided.finally(() => {
+      this.presenter?.setWaiting(false);
+      if (this.started && !this.stopped) this.tui.requestRender();
+    }).catch(() => undefined);
+    return decided;
+  }
+
+  private promptApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
     return withApprovalDeadline(request, this.options.policyMode, signal, this.clock, (promptSignal) =>
       new Promise<ApprovalChoice>((resolve, reject) => {
         const trust = request.subject_kind === "workspace-trust";
@@ -646,7 +914,7 @@ export class PiTuiRenderer implements TerminalRenderer {
         }
         const list = new SelectList(items, items.length, this.selectTheme);
         const box = new Box(1, 0);
-        box.addChild(new Text(this.style.yellow(trust ? "Trust this workspace?" : `Approval needed (${request.subject_kind})`), 0, 0));
+        box.addChild(new Text(this.style.yellow(trust ? (this.presenter !== undefined ? "Trust this folder?" : "Trust this workspace?") : `Approval needed (${request.subject_kind})`), 0, 0));
         box.addChild(new Text(sanitizeInline(request.summary, 2000), 0, 0));
         if (request.effect !== undefined) box.addChild(new Text(this.style.dim(`effect ${request.effect} · scope ${request.scope}`), 0, 0));
         box.addChild(list);

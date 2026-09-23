@@ -86,6 +86,46 @@ export async function trustCommand(io: TrustCommandIO, target: string | undefine
 }
 
 /**
+ * The conversation agent's trust question (ADR-21 D3, UX-GATE-01): asked once, at the first command
+ * that runs repository code, never at session open. Resolves true when the workspace is now trusted
+ * (for this session or saved); "Not now" (or no human) leaves it untrusted and the command refused.
+ */
+export async function promptTrustForCommand(runtime: Runtime, renderer: SessionRenderer, command: string, signal: AbortSignal): Promise<boolean> {
+  const state = runtime.trust.state();
+  if (state.trusted || runtime.sandbox.enforcement === "full") return true;
+  if (renderer.kind === "jsonl" || renderer.approvals.availability !== "interactive") return false;
+  const note = (level: "info" | "warning", message: string): void => renderer.render({ kind: "notice", level, message });
+  let decision;
+  try {
+    decision = await renderer.approvals.request(
+      {
+        approval_id: createId("approval"),
+        subject_kind: "workspace-trust",
+        subject_digest: digestOf({ root: state.root, identity: state.identity }),
+        summary: `${runtime.workspaceRoot} · "${command.slice(0, 200)}" runs this repository's code. ${WORKSPACE_TRUST_NOTICE}`,
+        scope: "once",
+        requested_at: new Date().toISOString(),
+      },
+      signal,
+    );
+  } catch {
+    return false;
+  }
+  if (decision.decided_by !== "user" || (decision.outcome !== "allowed-once" && decision.outcome !== "allowed-for-scope")) {
+    note("warning", "Not trusted: that command was not run. Reading and editing continue; /trust asks again.");
+    return false;
+  }
+  if (decision.outcome === "allowed-once") {
+    runtime.trust.grantSession();
+    note("info", "Trusted this folder for this session (not saved).");
+    return true;
+  }
+  const granted = await runtime.trust.grant("prompt");
+  note(granted.trusted ? "info" : "warning", granted.trusted ? "Trusted this folder (saved; revoke with syn trust --revoke)." : `Trust was not recorded: ${granted.reason ?? "unknown reason"}`);
+  return granted.trusted;
+}
+
+/**
  * The one-time interactive prompt: when exec is not fully sandboxed, the workspace is untrusted and
  * a human is attached, ask once through the renderer's approval UI. The renderers show the
  * dedicated `WORKSPACE_TRUST_CHOICES` for this subject, "Not now" pre-selected:

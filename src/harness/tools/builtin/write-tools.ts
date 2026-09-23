@@ -39,7 +39,7 @@ export function createWriteFileTool(): Tool<WriteFileInput> {
     timeout_ms: 30_000,
     cancellable: true,
     concurrency: "sequential",
-    visible_to: ["implementer", "debugger"],
+    visible_to: ["implementer", "debugger", "session"],
   });
   const memo = new NormalizedMemo<string>();
   return defineTool(metadata, writeFileInput, {
@@ -102,7 +102,7 @@ export function createApplyPatchTool(): Tool<ApplyPatchInput> {
     timeout_ms: 30_000,
     cancellable: true,
     concurrency: "sequential",
-    visible_to: ["implementer", "debugger", "orchestrator"],
+    visible_to: ["implementer", "debugger", "orchestrator", "session"],
   });
   const memo = new NormalizedMemo<readonly PlannedChange[]>();
   return defineTool(metadata, applyPatchInput, {

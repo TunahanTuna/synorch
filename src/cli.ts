@@ -62,6 +62,12 @@ async function main(): Promise<void> {
     process.exitCode = await harness.runHarnessCommand(argv);
     return;
   }
+  // Bare `syn` in an interactive terminal opens the conversation (like `claude`); pipes and CI keep the help text.
+  if (argv.length === 0 && process.stdin.isTTY === true && process.stdout.isTTY === true) {
+    const harness = await import("./harness/cli/index.ts");
+    process.exitCode = await harness.runHarnessCommand(["agent"]);
+    return;
+  }
 
   const { values, positionals } = parseArgs({
     args: argv,

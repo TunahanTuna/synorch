@@ -7,6 +7,16 @@ import type { PiTuiRenderer, PiTuiRendererOptions } from "./pi-tui-renderer.ts";
 export type { TerminalRenderer } from "../contracts/index.ts";
 export { brokerDecision, HeadlessApprovalBroker, userDecision, withApprovalDeadline, type ApprovalChoice } from "./approvals.ts";
 export { deviceCodeText, HeadlessAuthInteraction, LineAuthInteraction } from "./auth-interaction.ts";
+export {
+  allowPrefixFor,
+  ConversationPresenter,
+  GLYPH_SETS,
+  patchPaths,
+  selectGlyphs,
+  type ConversationItem,
+  type GlyphSet,
+  type ViewOp,
+} from "./conversation-view.ts";
 export { describeEvent, formatHarnessError, type EventLine, type LineLevel } from "./describe.ts";
 export { EXIT_CONFIRMATION_WINDOW_MS, INTERRUPT_NOTICES, InterruptController, type InterruptAction, type InterruptKey } from "./interrupt.ts";
 export { JsonlRenderer, type FrameSink, type GuardableStdout, type JsonlRendererOptions, type ResultData } from "./jsonl-renderer.ts";

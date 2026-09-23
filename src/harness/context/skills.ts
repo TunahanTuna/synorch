@@ -60,7 +60,8 @@ export function triggeredSkills(entries: readonly SkillEntry[], text: string): r
 
 /** One conversation's skill scope: the same key for the ContextBuilder and the `load_skill` callback. */
 export interface SkillScope {
-  readonly runId: RunId;
+  /** Undefined for the conversation agent (`session`), whose turns belong to no run. */
+  readonly runId: RunId | undefined;
   readonly taskId: TaskId | undefined;
   readonly attemptId: AttemptId | undefined;
   readonly role: AgentRole;

@@ -121,7 +121,7 @@ test("steering typed during a run is applied at a safe boundary through a re-ver
     );
 
     const io = capture({ cwd: sandbox.workspace, stdin: input, stdinIsTTY: true });
-    const session = runHarnessCommand(["agent", "--plain"], io.io, overridesFor(sandbox, { adapters: [orchestrator, worker] }));
+    const session = runHarnessCommand(["agent", "--legacy", "--plain"], io.io, overridesFor(sandbox, { adapters: [orchestrator, worker] }));
     input.send("Edit a then b\n");
     await waitFor(io.stdout, /Run run_\S+ (succeeded|failed) \(exit \d+\)/, 60_000);
     input.send("/exit\n");

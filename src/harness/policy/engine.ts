@@ -8,6 +8,7 @@ import {
   execConfinementFor,
   HARD_RAILS,
   HarnessError,
+  SESSION_WRITE_SCOPE,
   hasReservedSegment,
   isAncestorOfAnyPattern as isAncestorOfAny,
   isReservedWritePattern,
@@ -46,7 +47,16 @@ export const ROLE_EFFECT_CEILINGS: { readonly [R in AgentRole]: EffectMatrix } =
   reviewer: { read: "allow", "workspace-write": "deny", exec: "allow", "external-write": "deny", control: "allow" },
   implementer: { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "allow", control: "allow" },
   debugger: { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "allow", control: "allow" },
+  // ADR-21 D3: the conversation agent edits the main tree and runs commands; mode, scope, sandbox, trust and rails still narrow it.
+  session: { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "allow", control: "allow" },
 };
+
+/**
+ * Paths the conversation agent may never write even though it owns the workspace (ADR-21 D3):
+ * the canonical role manifests are policy sources. `.git/**` and `.synorch/**` are reserved for
+ * every role, and the Synorch home (trust, grants, credentials) is refused by its own rail.
+ */
+export const SESSION_FORBIDDEN_WRITES = [".ai/agents/**"] as const;
 
 const ORCHESTRATOR_WRITE_SCOPE = `${CONTROL_PLANE_WRITE_PREFIX}**`;
 const NETWORK_ORDER = ["deny", "allowlist", "allow"] as const;
@@ -100,7 +110,7 @@ function computePolicy(inputs: PolicyInputs, workspaceTrusted: boolean): Effecti
     ...(user.forbidden ?? []),
     ...(workspace.forbidden ?? []),
   ]);
-  const writeScope = role === "orchestrator" ? [ORCHESTRATOR_WRITE_SCOPE] : readOnly ? [] : ownedPatterns(inputs.taskScope?.owned ?? []);
+  const writeScope = role === "orchestrator" ? [ORCHESTRATOR_WRITE_SCOPE] : role === "session" ? [SESSION_WRITE_SCOPE] : readOnly ? [] : ownedPatterns(inputs.taskScope?.owned ?? []);
   const readPatterns = lenientPatterns(inputs.taskScope?.read ?? []);
   const readScope = readPatterns.length > 0 ? readPatterns : ["**"];
   const requireFullSandbox = user.require_full_sandbox === true || workspace.require_full_sandbox === true;
@@ -153,6 +163,7 @@ function computePolicy(inputs: PolicyInputs, workspaceTrusted: boolean): Effecti
     verification_commands: unique((inputs.taskScope?.verification_commands ?? []).map((command) => command.trim()).filter((command) => command.length > 0)),
     workspace_trusted: workspaceTrusted,
     ...((inputs.taskScope?.dependency_links ?? []).length === 0 ? {} : { dependency_links: unique([...(inputs.taskScope?.dependency_links ?? [])]) }),
+    ...(role === "session" ? { command_grants: unique((inputs.commandGrants ?? []).map((entry) => entry.trim().split(/\s+/).join(" ")).filter((entry) => entry.length > 0)).slice(0, 256) } : {}),
     layers,
   });
 }
@@ -232,6 +243,9 @@ function evaluatePaths(action: NormalizedAction, policy: EffectivePolicy, option
         deny("platform", "git-hooks-or-config", `${entry.path} is a git hook or git config; writing it would run or reconfigure code`, "reserved-path-write");
       } else if (hasReservedSegment(entry.path)) deny("platform", "reserved-path", `${entry.path} is a reserved path`, "reserved-path-write");
       else if (policySources.includes(foldPathCase(entry.path))) deny("platform", "policy-source", `${entry.path} is a policy source`, "policy-self-modification");
+      else if (policy.role === "session" && matchesAny(entry.path, SESSION_FORBIDDEN_WRITES, { caseInsensitive: true })) {
+        deny("platform", "policy-source", `${entry.path} is a canonical role manifest (a policy source)`, "policy-self-modification");
+      }
       else if (options.synorchHome !== undefined && isUnderSynorchHome(canonical, policy.workspace_root, options.synorchHome)) {
         deny("platform", "synorch-home-write", `${entry.path} resolves inside the Synorch home`, "reserved-path-write");
       } else if (matchesAny(entry.path, policy.forbidden, { caseInsensitive: true })) deny("task", "forbidden-path", `${entry.path} is forbidden for this task`, "write-outside-scope");
@@ -277,6 +291,7 @@ function evaluateCommand(action: NormalizedAction, policy: EffectivePolicy, deny
     verificationCommands: policy.verification_commands ?? [],
     workspaceTrusted: policy.workspace_trusted === true,
     exactGrants: policy.external_write_allowlist.filter((entry) => !entry.trim().endsWith("*")),
+    commandGrants: policy.command_grants ?? [],
   });
   const effect = classification.effect === "external-write" && action.effect === "exec" ? "external-write" : action.effect;
   return { effect, confinement };

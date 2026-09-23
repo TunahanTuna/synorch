@@ -422,9 +422,11 @@ class TurnLog {
     this.#actor =
       input.role === "orchestrator"
         ? { kind: "orchestrator", role: input.role }
-        : { kind: "worker", role: input.role, ...(input.attemptId === undefined ? {} : { attempt_id: input.attemptId }) };
+        : input.role === "session"
+          ? { kind: "agent", role: input.role }
+          : { kind: "worker", role: input.role, ...(input.attemptId === undefined ? {} : { attempt_id: input.attemptId }) };
     this.#correlation = {
-      run_id: input.runId,
+      ...(input.runId === undefined ? {} : { run_id: input.runId }),
       ...(input.taskId === undefined ? {} : { task_id: input.taskId }),
       ...(input.attemptId === undefined ? {} : { attempt_id: input.attemptId }),
     };

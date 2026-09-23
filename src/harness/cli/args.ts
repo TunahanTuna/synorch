@@ -56,7 +56,19 @@ export interface SessionFlags {
 
 export type ParsedCommand =
   | { readonly kind: "help"; readonly command: string }
-  | { readonly kind: "agent"; readonly common: CommonFlags; readonly session: SessionFlags; readonly resume: SessionId | undefined; readonly fork: { readonly sessionId: SessionId; readonly upToSeq: number | undefined } | undefined }
+  | {
+      readonly kind: "agent";
+      readonly common: CommonFlags;
+      readonly session: SessionFlags;
+      readonly resume: SessionId | undefined;
+      readonly fork: { readonly sessionId: SessionId; readonly upToSeq: number | undefined } | undefined;
+      /** `--continue`: reopen the most recent conversation of this workspace. */
+      readonly continue: boolean;
+      /** `--legacy`: the pre-ADR-21 orchestrated session (every message is a coordinator run). */
+      readonly legacy: boolean;
+      /** `--debug` (or `SYN_DEBUG=1`): raw event lines under the conversation (L2). */
+      readonly debug: boolean;
+    }
   | { readonly kind: "run"; readonly common: CommonFlags; readonly session: SessionFlags; readonly goal: string; readonly goalFromStdin: boolean; readonly jsonl: boolean; readonly streamDeltas: boolean; readonly trustWorkspace: boolean }
   | { readonly kind: "trust"; readonly common: CommonFlags; readonly revoke: boolean }
   | { readonly kind: "runs"; readonly common: CommonFlags; readonly json: boolean }
@@ -148,10 +160,20 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
   const [command, ...args] = argv;
   switch (command) {
     case "agent": {
-      const { values, positionals } = parse(command, args, { ...COMMON_OPTIONS, ...SESSION_OPTIONS, resume: { type: "string" }, fork: { type: "string" } });
+      const { values, positionals } = parse(command, args, {
+        ...COMMON_OPTIONS,
+        ...SESSION_OPTIONS,
+        resume: { type: "string" },
+        fork: { type: "string" },
+        continue: { type: "boolean", short: "c", default: false },
+        legacy: { type: "boolean", default: false },
+        debug: { type: "boolean", default: false },
+      });
       if (values.help) return { kind: "help", command };
       noPositionals(command, positionals);
       if (values.resume !== undefined && values.fork !== undefined) throw new UsageError("--resume and --fork cannot be combined.", command);
+      if (values.continue && (values.resume !== undefined || values.fork !== undefined)) throw new UsageError("--continue cannot be combined with --resume or --fork.", command);
+      if (values.continue && values.legacy) throw new UsageError("--continue is not available with --legacy (use --resume <session>).", command);
       let fork: { readonly sessionId: SessionId; readonly upToSeq: number | undefined } | undefined;
       if (values.fork !== undefined) {
         const [id = "", seq, ...rest] = values.fork.split("@");
@@ -166,6 +188,9 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
         session: session(command, values),
         resume: values.resume === undefined ? undefined : sessionId(command, "--resume", values.resume),
         fork,
+        continue: values.continue,
+        legacy: values.legacy,
+        debug: values.debug,
       };
     }
     case "run": {

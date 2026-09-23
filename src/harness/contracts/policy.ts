@@ -19,6 +19,9 @@ import { SANDBOX_ENFORCEMENT, toolEffectSchema, TOOL_EFFECTS, type SandboxEnforc
 
 export const POLICY_MODES = ["autonomous", "ask"] as const;
 export const policyModeSchema = z.enum(POLICY_MODES);
+
+/** The conversation agent's write scope: the whole workspace; reserved paths and policy sources are still refused. */
+export const SESSION_WRITE_SCOPE = "**";
 export type PolicyMode = (typeof POLICY_MODES)[number];
 export const DEFAULT_POLICY_MODE: PolicyMode = "autonomous";
 
@@ -68,7 +71,8 @@ export const effectivePolicySchema = z
     policy_version: z.int().min(1),
     mode: policyModeSchema,
     role: agentRoleSchema,
-    run_id: runIdSchema,
+    /** Required for every role except `session`: conversation turns belong to no run (ADR-21 D1). */
+    run_id: runIdSchema.optional(),
     task_id: taskIdSchema.optional(),
     workspace_root: z.string().min(1),
     write_scope: z.array(pathPatternSchema),
@@ -98,11 +102,23 @@ export const effectivePolicySchema = z
      * dependencies are denied (`dependency-mutation-in-linked-worktree`). Absent means none.
      */
     dependency_links: z.array(pathPatternSchema).max(64).optional(),
+    /**
+     * Command prefixes the user allowed with `/allow` (ADR-21, orchestrator decision 1), word by
+     * word; `session` only. They extend the exec allowlist and still need workspace trust without a
+     * full sandbox; hard rails and destructive-command rules are never relaxed by them.
+     */
+    command_grants: z.array(z.string().min(1).max(500)).max(256).optional(),
     layers: z
       .array(z.strictObject({ layer: z.enum(POLICY_LAYERS), source: z.string().min(1), digest: digestSchema }))
       .min(1),
   })
   .superRefine((policy, context) => {
+    if (policy.run_id === undefined && policy.role !== "session") {
+      context.addIssue({ code: "custom", path: ["run_id"], message: `${policy.role} policy belongs to a run` });
+    }
+    if (policy.command_grants !== undefined && policy.role !== "session") {
+      context.addIssue({ code: "custom", path: ["command_grants"], message: "command grants apply to the conversation agent only" });
+    }
     const readOnly = (READ_ONLY_ROLES as readonly AgentRole[]).includes(policy.role);
     if (readOnly && (policy.write_scope.length > 0 || policy.effects["workspace-write"] !== "deny")) {
       context.addIssue({ code: "custom", path: ["write_scope"], message: `${policy.role} is read-only` });
@@ -119,7 +135,9 @@ export const effectivePolicySchema = z
       }
     }
     for (const [index, pattern] of policy.write_scope.entries()) {
-      if (isWholeWorkspacePattern(pattern) || isReservedWritePattern(pattern)) {
+      // The conversation agent owns the workspace minus reserved paths (ADR-21 D3); reserved paths stay unwritable for everyone.
+      const whole = isWholeWorkspacePattern(pattern) && !(policy.role === "session" && pattern === SESSION_WRITE_SCOPE);
+      if (whole || isReservedWritePattern(pattern)) {
         context.addIssue({ code: "custom", path: ["write_scope", index], message: "whole-workspace and reserved paths are never writable" });
       }
     }
@@ -230,7 +248,8 @@ export const HUMAN_ONLY_APPROVAL_SUBJECTS = ["provider-change", "budget", "works
 
 export const approvalRequestSchema = z.strictObject({
   approval_id: approvalIdSchema,
-  run_id: runIdSchema,
+  /** Absent for a conversation turn outside any run (ADR-21). */
+  run_id: runIdSchema.optional(),
   task_id: taskIdSchema.optional(),
   subject_kind: z.enum(APPROVAL_SUBJECTS),
   subject_digest: digestSchema,
@@ -251,16 +270,16 @@ export const approvalDecisionSchema = z
     subject_kind: z.enum(APPROVAL_SUBJECTS),
     subject_digest: digestSchema,
     outcome: z.enum(APPROVAL_OUTCOMES),
-    decided_by: z.enum(["user", "orchestrator", "config", "broker"]),
+    decided_by: z.enum(["user", "orchestrator", "session", "config", "broker"]),
     mode: policyModeSchema,
     decided_at: timestampSchema,
     reason: z.string().max(1000).optional(),
   })
   .superRefine((decision, context) => {
     const allows = (ALLOWING_OUTCOMES as readonly string[]).includes(decision.outcome);
-    if (decision.decided_by === "orchestrator") {
+    if (decision.decided_by === "orchestrator" || decision.decided_by === "session") {
       if (decision.mode !== "autonomous") {
-        context.addIssue({ code: "custom", path: ["decided_by"], message: "the orchestrator approves only in autonomous mode" });
+        context.addIssue({ code: "custom", path: ["decided_by"], message: `the ${decision.decided_by} agent approves only in autonomous mode` });
       }
       if (allows && (HUMAN_ONLY_APPROVAL_SUBJECTS as readonly string[]).includes(decision.subject_kind)) {
         context.addIssue({ code: "custom", path: ["subject_kind"], message: `${decision.subject_kind} requires a human decision` });
@@ -284,9 +303,12 @@ export interface ApprovalBroker {
 export interface PolicyInputs {
   readonly mode: PolicyMode;
   readonly role: AgentRole;
-  readonly runId: z.infer<typeof runIdSchema>;
+  /** Undefined only for the `session` role. */
+  readonly runId: z.infer<typeof runIdSchema> | undefined;
   readonly taskId: z.infer<typeof taskIdSchema> | undefined;
   readonly workspaceRoot: string;
+  /** `/allow` prefixes from the user scope; used for the `session` role only. */
+  readonly commandGrants?: readonly string[];
   readonly taskScope:
     | {
         readonly owned: readonly string[];

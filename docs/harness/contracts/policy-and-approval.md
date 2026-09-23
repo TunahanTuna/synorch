@@ -380,3 +380,91 @@ requested_at: "2026-09-22T10:01:00Z"
   mode: ask
   decided_at: "2026-09-22T10:01:00Z"
 ```
+
+## 8. Konuşma ajanı (`session`, ADR-21)
+
+`syn agent`'ın ana ajanı `session` rolüdür (worker değil, salt okuma değil). Orchestrator değişmez: ürün dosyası yazmaz, exec'i yoktur (HREQ-002).
+
+- **Tavan:** `ROLE_EFFECT_CEILINGS.session = {read, workspace-write, exec, external-write, control: allow}`; ardından mod, yapılandırma, sandbox, güven ve rail kesişimi aynen uygulanır (`external-write` kullanıcı allowlist'i olmadan `deny`, `ask` modunda yan etkili her eylem sorulur).
+- **`run_id`:** `EffectivePolicy.run_id` yalnız `session` için yok olabilir (şema refine'ı diğer rollerde zorunlu tutar); `TurnInput.runId`, `ContextBuildInput.runId`, `ToolExecutionContext.runId`, `ToolInvocationScope.runId`, `ApprovalRequest.run_id` opsiyoneldir.
+- **Yazma kapsamı:** `write_scope: ["**"]` (`SESSION_WRITE_SCOPE`) yalnız `session` için geçerlidir; bütün çalışma alanı deseni diğer rollerde yine reddedilir. Ayrılmış yollar (`.git/**`, `.synorch/**`), git hook/config, Synorch home ve kanonik rol manifestleri (`.ai/agents/**`, `policy-self-modification`) istisnasız reddedilir.
+- **Exec:** mevcut `exec_confinement` aynen (tam sandbox / allowlist + güven / ask). Git geçmişini veya index'i değiştiren komutlar (`commit`, `add`, `stash`, `reset`, `checkout`, `push` …) her rolde olduğu gibi reddedilir. Allowlist dışı komutlar için etkileşimli onay sorusu **yoktur** (otonom mod prompt uydurmaz); kullanıcı `/allow <önek>` yazar.
+- **`command_grants` (yalnız `session`):** `/allow` önekleri, kelime kelime argv öneki olarak eşleşir; `hardRefusal`/tanınmayan argv ve çalışma alanı dışı yol argümanları hiçbir zaman eşleşmez, yıkıcı komut kuralları önce reddeder. Eşleşen komut build/test komutu gibi değerlendirilir: tam sandbox yoksa çalışma alanı güveni ister (`workspace-untrusted`). Kaynak yalnız kullanıcı kapsamı: `<synorch home>/command-grants.json` (kanonik kök anahtarlı), her ekleme `command/allowed` ile denetlenir. `sh`/`bash`/`cmd`/`powershell`/`env`/`npx` gibi tek başına her şeyi açacak önekler ve `git` reddedilir.
+- **Güven zamanı (UX-GATE-01):** konuşma açılışında soru yoktur; depo kodu çalıştıran ilk exec'te (`workspace-untrusted` olacak komut) etkileşimli oturum güven sorusunu bir kez gösterir ("Not now / Trust for this session only / Trust this workspace"), cevaba göre aynı çağrı güncel politika ile değerlendirilir. "Not now" o komutu reddeder, okuma ve düzenleme sürer; `/trust` soruyu tekrar açar. Headless'ta davranış değişmez.
+- **Onay:** `approval/decided.decided_by` `session` değerini alabilir (yalnız `autonomous` modda ve insan-yalnız konular hariç; orkestrasyon başlatma kararı K2'de kullanılır).
+- **Review:** doğrudan düzenlemeler zorunlu bağımsız review'dan geçmez ve bu açıkça söylenir ("not independently reviewed"); orkestre edilen işte ADR-09 aynen geçerlidir.
+
+Güvenilmemiş çalışma alanında, policy-only sandbox ile ve bir `/allow` önekiyle `session` politikası: `node check.mjs` burada `workspace-untrusted` ile durur (ilk seferde güven sorusu), `.git/config` `reserved-path-write`, `git commit -m x` `exec-not-allowlisted` ile reddedilir.
+
+```yaml example=effective-policy
+- schema_version: 1
+  policy_version: 1
+  mode: autonomous
+  role: session
+  workspace_root: /home/dev/syn-smoke
+  write_scope: ["**"]
+  read_scope: ["**"]
+  forbidden: []
+  effects: { read: allow, workspace-write: allow, exec: allow, external-write: deny, control: allow }
+  external_write_allowlist: []
+  network: { mode: deny, hosts: [] }
+  sandbox: { backend: policy-only, enforcement: partial }
+  require_full_sandbox: false
+  exec_confinement: allowlist
+  verification_commands: []
+  workspace_trusted: false
+  command_grants: ["node check.mjs"]
+  layers:
+    - { layer: platform, source: builtin-rails, digest: "sha256:5555555555555555555555555555555555555555555555555555555555555555" }
+    - { layer: role, source: session, digest: "sha256:6666666666666666666666666666666666666666666666666666666666666666" }
+```
+
+Reddedilenler: bütün çalışma alanını başka bir rol yazamaz; `run_id`'siz politika yalnız `session`'a aittir; `command_grants` yalnız `session`'da bulunur.
+
+```yaml example=effective-policy invalid
+- schema_version: 1
+  policy_version: 1
+  mode: autonomous
+  role: implementer
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  workspace_root: /w
+  write_scope: ["**"]
+  read_scope: ["**"]
+  forbidden: []
+  effects: { read: allow, workspace-write: allow, exec: allow, external-write: deny, control: allow }
+  external_write_allowlist: []
+  network: { mode: deny, hosts: [] }
+  sandbox: { backend: policy-only, enforcement: partial }
+  require_full_sandbox: false
+  layers: [{ layer: role, source: implementer, digest: "sha256:7777777777777777777777777777777777777777777777777777777777777777" }]
+- schema_version: 1
+  policy_version: 1
+  mode: autonomous
+  role: orchestrator
+  workspace_root: /w
+  write_scope: [.ai/tasks/**]
+  read_scope: ["**"]
+  forbidden: []
+  effects: { read: allow, workspace-write: allow, exec: deny, external-write: deny, control: allow }
+  external_write_allowlist: []
+  network: { mode: deny, hosts: [] }
+  sandbox: { backend: policy-only, enforcement: partial }
+  require_full_sandbox: false
+  layers: [{ layer: role, source: orchestrator, digest: "sha256:8888888888888888888888888888888888888888888888888888888888888888" }]
+- schema_version: 1
+  policy_version: 1
+  mode: autonomous
+  role: reviewer
+  run_id: run_01K5T3Q8Z4X9V2M6N7P0R1S2T3
+  workspace_root: /w
+  write_scope: []
+  read_scope: ["**"]
+  forbidden: []
+  effects: { read: allow, workspace-write: deny, exec: allow, external-write: deny, control: allow }
+  external_write_allowlist: []
+  network: { mode: deny, hosts: [] }
+  sandbox: { backend: policy-only, enforcement: partial }
+  require_full_sandbox: false
+  command_grants: ["node check.mjs"]
+  layers: [{ layer: role, source: reviewer, digest: "sha256:9999999999999999999999999999999999999999999999999999999999999999" }]
+```

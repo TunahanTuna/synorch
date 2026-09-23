@@ -40,6 +40,12 @@ export interface ExecAllowlistInput {
   readonly exactGrants?: readonly string[];
   /** The user trusted this workspace (user-scope trust store or `--trust-workspace`). */
   readonly workspaceTrusted?: boolean;
+  /**
+   * `/allow` prefixes (conversation agent only, ADR-21): an argv whose leading words equal one of
+   * them is treated like a build/test command (it runs repository code, so it still needs trust
+   * without a full sandbox). Hard refusals, unrecognisable argv and outside paths are never granted.
+   */
+  readonly commandGrants?: readonly string[];
 }
 
 export interface ExecAllowlistDecision {
@@ -70,7 +76,14 @@ export function evaluateExecAllowlist(input: ExecAllowlistInput): ExecAllowlistD
     }
     if (isReadOnlyCommand(argv)) return { decision: "allow", code: "exec-allowlisted", layer, message: `${shown} is on the read-only command list` };
     const isGit = programName(argv[0] ?? "") === "git";
-    const kind = !isGit && matchesExactCommand(argv, input.verificationCommands) ? "an exact verification command" : !input.readOnly && isBuildCommand(argv) ? "on the build/test allowlist" : undefined;
+    const kind =
+      !isGit && matchesExactCommand(argv, input.verificationCommands)
+        ? "an exact verification command"
+        : !input.readOnly && isBuildCommand(argv)
+          ? "on the build/test allowlist"
+          : !input.readOnly && !isGit && matchesGrant(argv, input.commandGrants ?? [])
+            ? "allowed by /allow"
+            : undefined;
     if (kind !== undefined) {
       if (input.confinement === "full-sandbox") return { decision: "allow", code: "exec-allowlisted", layer, message: `${shown} is ${kind}` };
       if (input.workspaceTrusted === true) {
@@ -101,6 +114,15 @@ export function classifyVerificationCommand(argv: readonly string[]): Verificati
   if (isReadOnlyCommand(argv)) return "read-only";
   if (isBuildCommand(argv) && dependencyMutation(programName(argv[0] ?? ""), argv.slice(1)) === undefined) return "build-test";
   return "other";
+}
+
+/** Whether the argv starts with every word of a `/allow` prefix and names no path outside the workspace. */
+function matchesGrant(argv: readonly string[], grants: readonly string[]): boolean {
+  if (!argv.slice(1).every(staysInside)) return false;
+  return grants.some((grant) => {
+    const words = grant.trim().split(/\s+/).filter((word) => word.length > 0);
+    return words.length > 0 && words.length <= argv.length && words.every((word, index) => (index === 0 ? programName(argv[0] ?? "") === programName(word) : argv[index] === word));
+  });
 }
 
 /** Why an argv cannot be recognised at all, or undefined when it is plain enough to look up. */

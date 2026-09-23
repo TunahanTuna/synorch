@@ -6,7 +6,11 @@ import { attemptIdSchema } from "./ids.ts";
 /** Wire format version shared by events, frames and packets unless a contract says otherwise. */
 export const HARNESS_SCHEMA_VERSION = 1 as const;
 
-export const AGENT_ROLES = ["orchestrator", "explorer", "implementer", "debugger", "reviewer"] as const;
+/**
+ * `session` is the conversation-first main agent (ADR-21): the one the user talks to in `syn agent`.
+ * It is neither a worker nor read-only; the orchestrator keeps planning and never writes product files.
+ */
+export const AGENT_ROLES = ["orchestrator", "explorer", "implementer", "debugger", "reviewer", "session"] as const;
 export const WORKER_ROLES = ["explorer", "implementer", "debugger", "reviewer"] as const;
 /** Roles that never own product paths for writing. */
 export const READ_ONLY_ROLES = ["explorer", "reviewer"] as const;
@@ -16,8 +20,16 @@ export const workerRoleSchema = z.enum(WORKER_ROLES);
 export type AgentRole = (typeof AGENT_ROLES)[number];
 export type WorkerRole = (typeof WORKER_ROLES)[number];
 
-/** The canonical manifest tiers minus `any`: a runtime route always resolves to a concrete tier. */
-export const modelTierSchema = z.enum(AGENT_MODEL_TIERS).exclude(["any"]);
+/** The canonical manifest tiers minus `any`: the tier a plan task (packet) may name. */
+export const taskModelTierSchema = z.enum(AGENT_MODEL_TIERS).exclude(["any"]);
+export type TaskModelTier = z.infer<typeof taskModelTierSchema>;
+
+/**
+ * Route tiers: the task tiers plus `session`, the conversation agent's own tier (ADR-21). When no
+ * route maps `session`, the conversation uses the `orchestrator` route; a plan task never names it.
+ */
+export const MODEL_TIERS = [...taskModelTierSchema.options, "session"] as const;
+export const modelTierSchema = z.enum(MODEL_TIERS);
 export type ModelTier = z.infer<typeof modelTierSchema>;
 
 export const RISK_CLASSES = ["trivial", "standard", "high-risk"] as const;
@@ -29,7 +41,8 @@ export const calendarDateSchema = z.iso.date();
 
 export const nonEmptyTextSchema = z.string().trim().min(1);
 
-export const ACTOR_KINDS = ["user", "orchestrator", "worker", "system", "policy", "provider"] as const;
+/** `agent` is the conversation agent (role `session`, ADR-21). */
+export const ACTOR_KINDS = ["user", "orchestrator", "worker", "system", "policy", "provider", "agent"] as const;
 
 export const actorSchema = z.strictObject({
   kind: z.enum(ACTOR_KINDS),

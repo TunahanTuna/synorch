@@ -23,18 +23,30 @@ const KEYS = `Keys (interactive):
   nothing running it offers a safe exit and a second Ctrl+C exits. Esc cancels only.`;
 
 export const COMMAND_HELP: { readonly [command: string]: string } = {
-  agent: `syn agent — interactive session for this workspace
+  agent: `syn agent — talk with Synorch, a coding agent for this workspace
 
 Usage:
-  syn agent [--resume <session>] [--fork <session>[@<seq>]] [options]
+  syn agent [--continue | --resume <session> | --fork <session>[@<seq>]] [options]
+
+Each message is answered right away. Synorch reads, edits and runs commands in this workspace
+directly (every edit is checkpointed; /undo reverts the last one); /plan <goal> hands a large
+goal to parallel workers with independent review.
+
+Conversation:
+  -c, --continue      Reopen the most recent conversation of this workspace.
+  --resume <session>  Reopen a saved conversation.
+  --debug             Show the raw event lines under the conversation (also SYN_DEBUG=1).
+  --legacy            The previous orchestrated session (every message is a worker run).
 
 ${SESSION}
 
 ${COMMON}
 
-${KEYS}
+${KEYS} Ctrl+O shows tool details.
 
-In-session commands: /plan /tasks /context /permissions /model /diff /evidence /cancel /memory /help /exit
+In-session commands: /undo /allow <command> /trust /plan <goal> /diff /context /permissions
+/model /log /cancel /help /exit (with --legacy: /plan /tasks /context /permissions /model /diff
+/evidence /cancel /memory /help /exit)
 
 ${EXIT_CODES}
 `,

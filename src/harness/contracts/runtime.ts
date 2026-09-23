@@ -18,7 +18,8 @@ import type { ToolGateway, ToolRegistry } from "./tools.ts";
 
 export interface ContextBuildInput {
   readonly sessionId: SessionId;
-  readonly runId: RunId;
+  /** Undefined for a conversation turn (`session` role), which belongs to no run (ADR-21 D1). */
+  readonly runId: RunId | undefined;
   readonly taskId: TaskId | undefined;
   /** Separates two attempts of the same role that share a session; history keeps only this attempt's turns. */
   readonly attemptId: AttemptId | undefined;
@@ -78,7 +79,8 @@ export interface ContextBuilder {
 
 export interface TurnInput {
   readonly sessionId: SessionId;
-  readonly runId: RunId;
+  /** Undefined for a conversation turn (`session` role); correlation is by `turn_id` (ADR-21 D1). */
+  readonly runId: RunId | undefined;
   readonly taskId: TaskId | undefined;
   readonly attemptId: AttemptId | undefined;
   readonly role: AgentRole;

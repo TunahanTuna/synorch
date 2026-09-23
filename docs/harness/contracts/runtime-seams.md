@@ -16,6 +16,8 @@ Bu belge iş akışları arasındaki TypeScript arayüzlerini (şema değil, dav
 
 ## 2. AgentDriver (core)
 
+Konuşma ajanı (ADR-21): `role: session` turu `runId` taşımaz (`TurnInput.runId`/`ContextBuildInput.runId` opsiyonel); sürücü olaylarını `actor: {kind: agent, role: session}` ile ve `run_id` olmadan yazar. Composition root `Runtime.createSessionDriver(broker, events, wrap)` ile aynı sürücüyü kurar; `wrap` gateway'i yalnız süsler (ilk depo-kodu exec'inde güven sorusu, güncel politika, düzenleme başına checkpoint) — politika, rail ve denetim gateway'de kalır.
+
 - `AgentDriverDependencies.credentials: CredentialResolver` **zorunludur**: `(route, signal, options?: ResolveOptions) → ResolvedCredential`. Composition root route'un `(provider_id, auth_method, profile)` üçlüsünü ilgili `AuthProvider.resolve`'a bağlar; başka kimliğe düşmez.
 - `oauth-subscription` route'unda sağlayıcı ilk olaydan önce HTTP 401 dönerse driver **bir kez** `credentials(route, signal, { forceRefresh: true })` çağırır ve aynı isteği yeniden gönderir; ikinci ret kesindir. API key route'ları yeniden denenmez.
 - `EventStore.quarantinedTail?` (dayanıklı store `openForWrite` sırasında karantinaya aldıysa) recovery tarafından `session/resumed.torn_tail` olarak yazılır.

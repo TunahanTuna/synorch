@@ -45,7 +45,7 @@ function adapters(file: string, before: string, after: string) {
 
 async function agent(sandbox: Sandbox, args: readonly string[], input: string, scripted: ReturnType<typeof adapters> = adapters("unused.md", "", "")) {
   const io = capture({ cwd: sandbox.workspace, stdin: new ScriptedInput(input) });
-  const code = await runHarnessCommand(["agent", "--plain", ...args], io.io, overridesFor(sandbox, { adapters: scripted }));
+  const code = await runHarnessCommand(["agent", "--legacy", "--plain", ...args], io.io, overridesFor(sandbox, { adapters: scripted }));
   return { code, stdout: io.stdout(), stderr: io.stderr() };
 }
 

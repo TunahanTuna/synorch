@@ -43,7 +43,14 @@ import {
   type AuthProvidersOptions,
   type SynorchCredentialStore,
 } from "../auth/index.ts";
-import { createCompactor, createContextBuilder, createSourceReader, type ContextBuilder } from "../context/index.ts";
+import {
+  createCompactor,
+  createContextBuilder,
+  createSkillContextRegistry,
+  createSkillLoadCallback,
+  createSourceReader,
+  type ContextBuilder,
+} from "../context/index.ts";
 import { createAgentDriver, recoverSession } from "../core/index.ts";
 import { createMemoryStore, readGitBranch, resolveMemoryRoot } from "../memory/index.ts";
 import {
@@ -51,11 +58,14 @@ import {
   createCoordinator,
   createDelegationSlot,
   createModelPlanner,
+  createReportSlot,
   createWorkerFactory,
   delegationCallbacks,
   pruneOrphanedAttempts,
+  reportCallbacks,
   type BudgetGateSlot,
   type CoordinatorLimits,
+  type VerificationRunner,
 } from "../orchestration/index.ts";
 import { classifyCommand, createHeadlessApprovalBroker, createPolicyEngine, createWorkspaceTrustStore } from "../policy/index.ts";
 import {
@@ -68,7 +78,7 @@ import {
   type FetchLike,
 } from "../providers/index.ts";
 import { createBlobStore, createSessionStore } from "../store/index.ts";
-import { createSandboxRunner, createToolGateway, createToolRegistry, probeSandbox } from "../tools/index.ts";
+import { createRedactor, createSandboxRunner, createToolGateway, createToolRegistry, probeSandbox } from "../tools/index.ts";
 import type { RouteOverride } from "./args.ts";
 import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts";
 import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
@@ -95,7 +105,7 @@ export interface RuntimeOverrides {
   readonly authOptions?: Omit<AuthProvidersOptions, "state" | "profiles" | "deviceCode">;
   readonly credentialStore?: (home: string, env: Env) => SynorchCredentialStore;
   readonly sandbox?: SandboxReport;
-  readonly limits?: Partial<CoordinatorLimits>;
+  readonly limits?: Partial<Omit<CoordinatorLimits, "budgets">> & { readonly budgets?: Partial<CoordinatorLimits["budgets"]> };
   readonly platform?: NodeJS.Platform;
   /** Highest directory the workspace-config walk may inspect (tests anchor it at their sandbox root). */
   readonly configCeiling?: string;
@@ -449,26 +459,18 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const memory = createMemoryStore(memoryRoot, { workspaceRoot });
 
   const delegation = createDelegationSlot();
+  const reports = createReportSlot();
+  const skillContext = createSkillContextRegistry();
   let userPrompt: UserPrompt | undefined;
   const registry = createToolRegistry({
     classifyCommand: (argv, scope) => classifyCommand(argv, scope),
     control: {
       ...delegationCallbacks(delegation),
-      async loadSkill(input, context) {
-        // Only catalog skills the caller's role may use; this never widens a task's read scope to .ai/**.
-        const text = await canonical.skills.load(input.name, context.role);
-        if (text === undefined) {
-          const available = (await canonical.skills.list(context.role)).map((entry) => entry.name);
-          return {
-            status: "error",
-            text: "",
-            truncated: false,
-            redactions: 0,
-            error: { code: "invalid_arguments", message: `skill ${input.name} is not in the ${context.role} catalog; available: ${available.join(", ") || "none"}`.slice(0, 2000) },
-          };
-        }
-        return { status: "ok", text: text.slice(0, 60 * 1024), truncated: text.length > 60 * 1024, redactions: 0 };
-      },
+      ...reportCallbacks(reports),
+      // Only catalog skills the caller's role may use (never widening a read scope to .ai/**); a skill
+      // already in the caller's context is not served again (ADR-20). One registry is shared with the
+      // ContextBuilder, which records what each build injected.
+      loadSkill: createSkillLoadCallback({ skills: canonical.skills, registry: skillContext }),
       async askUser(input, context) {
         const prompt = userPrompt;
         if (context.role !== "orchestrator" || prompt === undefined) {
@@ -526,11 +528,57 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     sources: createSourceReader(workspaceRoot),
     instructions: canonical.instructions,
     skills: canonical.skills,
+    skillContext,
     memory: { store: memory, projectId, branch: gitBranch },
     budget: budgetGate,
     compactor: createCompactor({ blobs, writerFor: (sessionId) => writers.get(sessionId) }),
     platform,
   });
+
+  /**
+   * ADR-18 D1: the harness runs a packet's verification commands itself after the worker's turn,
+   * through the `exec` tool's own normalization, the policy engine (the packet's exact
+   * verification commands, workspace trust) and the sandbox runner; output is redacted like any
+   * tool output. A command the policy does not allow outright is not run (`not-run` + reason).
+   */
+  const verification: VerificationRunner = async (request) => {
+    const started = Date.now();
+    const exec = registry.get("exec");
+    const notRun = (reason: string) => ({ status: "not-run" as const, exitCode: null, output: "", durationMs: Date.now() - started, reason: reason.slice(0, 500) });
+    if (exec === undefined) return notRun("no exec tool is registered");
+    const parsed = exec.input.safeParse({ argv: [...request.argv] });
+    if (!parsed.success) return notRun("the command is not a valid exec argv");
+    const context = {
+      toolCallId: createId("toolCall"),
+      runId: request.runId,
+      taskId: request.taskId,
+      attemptId: request.attemptId,
+      role: request.role,
+      workspaceRoot: request.workspaceRoot,
+      policy: request.policy,
+      sandbox: runner,
+      blobs,
+      signal: request.signal,
+      onUpdate: () => undefined,
+    };
+    try {
+      const action = await exec.normalize(parsed.data, context);
+      const decision = policy.evaluate(action, request.policy);
+      if (decision.decision !== "allow") {
+        return notRun(`policy ${decision.decision}: ${decision.reasons.map((reason) => reason.message).join("; ")}`);
+      }
+      const result = await exec.execute(parsed.data, context);
+      const redact = createRedactor(() => [...redactionValues]);
+      const output = redact(`${result.text}${result.error === undefined ? "" : `
+${result.error.message}`}`).text;
+      const termination = result.exit_code !== undefined ? "exited" : result.error?.code === "timeout" ? "timeout" : result.error?.code === "cancelled" ? "cancelled" : "spawn-failed";
+      const exitCode = result.exit_code ?? null;
+      const passed = termination === "exited" && exitCode === 0;
+      return { status: passed ? ("passed" as const) : ("failed" as const), termination, exitCode, output, durationMs: Date.now() - started };
+    } catch (error) {
+      return notRun(`the harness could not run it: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
 
   const createDriver = (broker: ApprovalBroker) => (events: EventStore): AgentDriver =>
     createAgentDriver({
@@ -603,6 +651,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
           userConfig,
           workspaceConfig,
           platform,
+          verification,
+          reports,
         }),
         budgetGate,
         delegation,

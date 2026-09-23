@@ -1,4 +1,4 @@
-import type { AgentRole, RunId, ToolExecutionContext, ToolResult } from "../contracts/index.ts";
+import type { AgentRole, AttemptId, RunId, ToolExecutionContext, ToolResult } from "../contracts/index.ts";
 
 /**
  * Orchestrator control tools (`plan_propose`, `task_spawn`, `task_status`, `task_triage`) bound to
@@ -105,4 +105,46 @@ export function delegationCallbacks(slot: DelegationSlot): {
       return toolResult(port.triage(input, { runId: context.runId, role: context.role, toolCallId: context.toolCallId }));
     },
   };
+}
+
+/**
+ * Report tools (`task_report`, `review_report`) bound to the attempt that calls them (ADR-18 D1).
+ * The worker manager registers a check per running attempt; the tool callback resolves the report's
+ * evidence pointers inside the call and returns an actionable `invalid_arguments` (with the valid
+ * `[#n]` refs) while a correction round is left. A call from no registered attempt is recorded and
+ * acknowledged as before.
+ */
+export type ReportCheck = (input: Readonly<Record<string, unknown>>, context: ToolExecutionContext) => Promise<ToolResult>;
+
+export interface ReportSlot {
+  register(attemptId: AttemptId, check: ReportCheck): () => void;
+  current(attemptId: AttemptId | undefined): ReportCheck | undefined;
+}
+
+export function createReportSlot(): ReportSlot {
+  const checks = new Map<AttemptId, ReportCheck>();
+  return {
+    register(attemptId, check) {
+      checks.set(attemptId, check);
+      return () => {
+        if (checks.get(attemptId) === check) checks.delete(attemptId);
+      };
+    },
+    current: (attemptId) => (attemptId === undefined ? undefined : checks.get(attemptId)),
+  };
+}
+
+export const REPORT_RECORDED = "report recorded; end your turn now";
+
+/** The `ControlCallbacks` entries for `task_report` and `review_report`. */
+export function reportCallbacks(slot: ReportSlot): {
+  readonly taskReport: (input: Readonly<Record<string, unknown>>, context: ToolExecutionContext) => Promise<ToolResult>;
+  readonly reviewReport: (input: Readonly<Record<string, unknown>>, context: ToolExecutionContext) => Promise<ToolResult>;
+} {
+  const handle = async (input: Readonly<Record<string, unknown>>, context: ToolExecutionContext): Promise<ToolResult> => {
+    const check = slot.current(context.attemptId);
+    if (check === undefined) return toolResult({ ok: true, text: REPORT_RECORDED });
+    return check(input, context);
+  };
+  return { taskReport: handle, reviewReport: handle };
 }

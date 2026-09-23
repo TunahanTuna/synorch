@@ -1,33 +1,48 @@
-import { lstat, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   canonicalJson,
   completionPacketSchema,
   createId,
+  DEFAULT_ORCHESTRATION_BUDGETS,
   digestOf,
   findStaleSources,
+  formatEvidenceCorrection,
   HarnessError,
   packetDigest,
   ProviderFailure,
+  REPORT_CORRECTION_ROUNDS,
   REPORT_TOOL_NAMES,
   reviewPacketSchema,
-  sha256,
   taskContextPacketSchema,
   type AgentDriver,
   type AttemptHandle,
   type AttemptId,
+  type BlobRef,
   type BlobStore,
   type CompletionPacket,
   type Digest,
+  type DispatchOptions,
   type EffectivePolicy,
   type EventStore,
+  type EvidenceProblem,
+  type EvidenceRef,
+  type EvidenceResolution,
+  type HarnessEvidence,
+  type HarnessVerification,
+  type HarnessVerificationStatus,
   type ModelRoute,
   type ModelRouter,
+  type OrchestrationBudgets,
   type PolicyEngine,
   type PolicyMode,
+  type ProcessTermination,
   type ProjectId,
-  type DispatchOptions,
+  type RepairCounts,
+  type RepairKind,
   type ReviewOutcome,
+  type ReviewPacket,
+  type ReviewReportInput,
   type RunId,
   type SandboxReport,
   type SessionEvent,
@@ -35,8 +50,16 @@ import {
   type SessionStore,
   type TaskContextPacket,
   type TaskId,
+  type TaskReportInput,
+  type ToolResult,
+  type TurnInput,
   type TurnOutcome,
   type WorkerManager,
+  type WorkerRole,
+  type WorkspaceDigestReader,
+  INLINE_SOURCE_MAX_BYTES,
+  INLINE_SOURCES_MAX_TOTAL_BYTES,
+  workspaceDigest,
 } from "../contracts/index.ts";
 import { buildAttemptLog, readEvents, type AttemptLog } from "./attempt-log.ts";
 import type { BudgetTracker } from "./budget.ts";
@@ -49,9 +72,24 @@ import {
   type ClaimResult,
   type WorkerClaim,
 } from "./claims.ts";
-import { verifyCompletion, verifyReview, type CompletionVerification, type CompletionVerificationOptions, type EvidenceIndex } from "./evidence.ts";
+import { REPORT_RECORDED, type ReportSlot } from "./delegation.ts";
+import {
+  commandArgv,
+  commandsFromLog,
+  evidenceCandidates,
+  evidenceProblems,
+  resolveCompletionEvidence,
+  resolvePointer,
+  unresolvedPointer,
+  verifyCompletion,
+  verifyReview,
+  type CompletionVerification,
+  type CompletionVerificationOptions,
+  type EvidenceIndex,
+} from "./evidence.ts";
 import type { ChangeSet, OrchestratedWorkspace, OrchestrationIsolationProvider } from "./isolation.ts";
 import { matchesAny, normalizeWorkspacePath } from "./paths.ts";
+import { createWorkspaceDigestReader, resolveOnDiskPath } from "./workspace-digest.ts";
 import {
   COMPLETION_MEDIA_TYPE,
   createWorkspaceSourceReader,
@@ -66,8 +104,11 @@ import {
  * Worker attempts. Each attempt gets its own session (so its context contains its packet and its
  * own turns, never another attempt's transcript), its own isolated workspace and an effective
  * policy computed for its role and scope. The completion packet is assembled by the harness:
- * identity, the real diff, the pinned artifact and the tool call ids come from the log and the
- * workspace; only the narrative and the evidence pointers come from the worker's claim.
+ * identity, the real diff, the pinned artifact, the tool call ids, the commands that ran and the
+ * result of the packet's verification commands (run by the harness itself after the worker's turn,
+ * ADR-18) come from the log and the workspace; only the narrative and the evidence pointers come
+ * from the worker's claim. A report whose evidence is incomplete, or whose harness verification
+ * failed, is repaired in the same session with the same workspace (`attempt/repair_requested`).
  */
 
 export interface RunScope {
@@ -76,7 +117,40 @@ export interface RunScope {
   readonly workspaceRoot: string;
   readonly projectId: ProjectId;
   readonly recorder: RunRecorder;
+  /** Per-task budgets of the run (ADR-18 D2); `evidence_repairs` bounds the in-session repairs. */
+  readonly budgets?: OrchestrationBudgets;
 }
+
+/** One verification command the harness runs in an attempt workspace (ADR-18 D1). */
+export interface VerificationRequest {
+  readonly command: string;
+  readonly argv: readonly [string, ...string[]];
+  readonly workspaceRoot: string;
+  readonly policy: EffectivePolicy;
+  readonly runId: RunId;
+  readonly taskId: TaskId;
+  readonly attemptId: AttemptId;
+  readonly role: WorkerRole;
+  readonly signal: AbortSignal;
+}
+
+export interface VerificationResult {
+  readonly status: HarnessVerificationStatus;
+  /** How the process ended; absent when it was not started (`not-run`). */
+  readonly termination?: ProcessTermination | undefined;
+  readonly exitCode: number | null;
+  /** Redacted stdout+stderr. */
+  readonly output: string;
+  readonly durationMs: number;
+  /** Why the command was not run (policy, sandbox, trust). */
+  readonly reason?: string | undefined;
+}
+
+/**
+ * Runs one verification command through the same policy (the packet's `verification_commands`
+ * allowlist, workspace trust) and sandbox as the worker's `exec`; wired by the composition root.
+ */
+export type VerificationRunner = (request: VerificationRequest) => Promise<VerificationResult>;
 
 export interface WorkerManagerDependencies {
   readonly run: RunScope;
@@ -93,11 +167,16 @@ export interface WorkerManagerDependencies {
   readonly budget?: BudgetTracker;
   readonly now?: () => Date;
   readonly platform?: NodeJS.Platform;
+  /** Runs the packet's verification commands after the worker's turn; without it there is no harness verification. */
+  readonly verification?: VerificationRunner;
+  /** Where attempts register the in-call evidence check of their report tool. */
+  readonly reports?: ReportSlot;
 }
 
 export interface AttemptRecord {
   readonly attemptId: AttemptId;
   readonly taskId: TaskId;
+  /** The packet as dispatched (sources re-digested in the attempt workspace when it offers `digest`). */
   readonly packet: TaskContextPacket;
   readonly route: ModelRoute;
   readonly sessionId: SessionId;
@@ -114,6 +193,11 @@ export interface AttemptRecord {
    * Undefined when the sources held; a worker-claimed `needs_context` is triaged instead.
    */
   stale: readonly string[] | undefined;
+  /** What the harness computed for the attempt (verification runs, the pinned diff). */
+  harness: HarnessEvidence | undefined;
+  readonly repairs: { report_corrections: number; evidence_repairs: number; verification_repairs: number };
+  /** The notes of the task's last delta, rendered into this attempt's task message. */
+  readonly notes: readonly string[];
 }
 
 export type AttemptFailure = "provider_failed" | "tool_failed";
@@ -137,8 +221,20 @@ export function classifyAttemptFailure(outcome: TurnOutcome | undefined, error: 
   return undefined;
 }
 
+/** Dispatch options of the orchestration worker manager: the contract's, plus the notes of the task's last delta. */
+export interface WorkerDispatchOptions extends DispatchOptions {
+  /** What the previous attempt and the orchestrator hand this attempt; rendered into its task message. */
+  readonly notes?: readonly string[];
+  /**
+   * An earlier attempt of the same task whose worktree this attempt reuses (reset to its base, then
+   * seeded; ADR-19). The caller keeps ownership of both and disposes them when the task settles.
+   */
+  readonly reuseAttempt?: AttemptId;
+}
+
 /** The contract `WorkerManager` plus the coordinator's own verification and integration steps. */
 export interface OrchestrationWorkerManager extends WorkerManager {
+  dispatch(packet: TaskContextPacket, signal: AbortSignal, options?: WorkerDispatchOptions): Promise<AttemptHandle>;
   attempt(attemptId: AttemptId): AttemptRecord | undefined;
   verify(attemptId: AttemptId, options?: CompletionVerificationOptions): Promise<CompletionVerification>;
   integrate(attemptId: AttemptId, expectedArtifact: Digest, signal: AbortSignal): Promise<void>;
@@ -147,6 +243,8 @@ export interface OrchestrationWorkerManager extends WorkerManager {
 }
 
 const REVIEW_BRIEF_CONTENT_LIMIT = 48 * 1024;
+const OUTPUT_EXCERPT_LIMIT = 4096;
+const CORRECTABLE_STATUSES: ReadonlySet<string> = new Set(["completed", "partial"]);
 
 function harnessError(code: "stale_packet" | "internal" | "review_blocked", message: string, ids?: Record<string, string>): HarnessError {
   return new HarnessError({
@@ -165,19 +263,22 @@ function linkSignals(outer: AbortSignal): AbortController {
   return controller;
 }
 
-async function fileDigestIn(root: string, relative: string): Promise<Digest | undefined> {
-  const normalized = normalizeWorkspacePath(relative);
-  if (normalized === undefined || normalized === ".") return undefined;
-  const file = path.join(root, ...normalized.split("/"));
-  try {
-    if (!(await lstat(file)).isFile()) return undefined;
-    return sha256(await readFile(file));
-  } catch {
-    return undefined;
-  }
+
+function excerpt(text: string): string {
+  if (text.length <= OUTPUT_EXCERPT_LIMIT) return text;
+  const half = Math.floor((OUTPUT_EXCERPT_LIMIT - 32) / 2);
+  return `${text.slice(0, half)}\n[... ${text.length - 2 * half} characters ...]\n${text.slice(-half)}`;
 }
 
-export function renderWorkerMessage(packet: TaskContextPacket): string {
+function toolOk(text: string): ToolResult {
+  return { status: "ok", text: text.slice(0, 16 * 1024), truncated: false, redactions: 0 };
+}
+
+function toolRejected(text: string, message: string): ToolResult {
+  return { status: "error", text: text.slice(0, 16 * 1024), truncated: false, redactions: 0, error: { code: "invalid_arguments", message: message.slice(0, 2000) } };
+}
+
+export function renderWorkerMessage(packet: TaskContextPacket, notes: readonly string[] = []): string {
   const scope =
     packet.write_mode === "owned-paths"
       ? `You may change only: ${packet.scope.owned_paths.join(", ")}.`
@@ -188,9 +289,39 @@ export function renderWorkerMessage(packet: TaskContextPacket): string {
     `Task ${packet.task_id} (${packet.role}): ${packet.objective}`,
     "Your task packet is in the system context; use it first and read only inside its scope.",
     scope,
+    ...(notes.length === 0 ? [] : [`Notes for this attempt (from the previous attempt and the orchestrator):\n${notes.map((note) => `- ${note}`).join("\n")}`]),
     "If the packet is insufficient or a cited source changed, stop and report status needs_context.",
     WORKER_REPORT_INSTRUCTIONS,
   ].join("\n\n");
+}
+
+/** The harness records a reviewer may cite as independent evidence (ADR-18 amendment of ADR-09). */
+function harnessLines(harness: HarnessEvidence | undefined): string[] {
+  if (harness === undefined) return [];
+  return [
+    ...harness.verification.map((record) => `  ${record.evidence.ref} harness-verification "${record.command}" -> ${record.status}${record.exit_code === null ? "" : ` (exit ${record.exit_code})`}`),
+    ...(harness.diff === undefined ? [] : [`  ${harness.diff.evidence.ref} harness-diff (${harness.diff.changed_paths.join(", ")})`]),
+  ];
+}
+
+export function renderRepairMessage(kind: RepairKind, problems: readonly string[], log: AttemptLog, harness: HarnessEvidence | undefined): string {
+  const verification = (harness?.verification ?? []).filter((record) => record.status !== "passed");
+  const lead =
+    kind === "verification-repair"
+      ? "The harness ran the packet's verification commands in your workspace after your turn, and they did not pass. Your workspace and changes are kept."
+      : "The harness checked your report. Your workspace and changes are kept, but the report is incomplete.";
+  const valid = evidenceCandidates(log).map((candidate) => `  #${candidate.ref} ${candidate.toolName} ${candidate.summary}`);
+  return [
+    lead,
+    `Problems:\n${problems.slice(0, 20).map((problem) => `- ${problem}`).join("\n")}`,
+    verification.length > 0 ? `Harness verification:\n${verification.map((record) => `- ${record.command}: ${record.status}${record.exit_code === null ? "" : ` (exit ${record.exit_code})`}${record.reason === undefined ? "" : ` - ${record.reason}`}`).join("\n")}` : "",
+    valid.length > 0 ? `Valid evidence refs (cite as "#n"):\n${valid.join("\n")}` : "",
+    kind === "verification-repair"
+      ? `Fix the change inside your owned paths, run the failing command yourself to confirm, then call \`${REPORT_TOOL_NAMES.task}\` again with the complete report.`
+      : `Fix only what is listed (cite valid refs, or run a missing check), do not redo finished work, then call \`${REPORT_TOOL_NAMES.task}\` again with the complete report.`,
+  ]
+    .filter((part) => part !== "")
+    .join("\n\n");
 }
 
 export function renderReviewBrief(target: AttemptRecord, completion: CompletionPacket, changeSet: ChangeSet): string {
@@ -208,14 +339,18 @@ export function renderReviewBrief(target: AttemptRecord, completion: CompletionP
     budget -= shown.length;
     files.push(`${header}\n${shown}${shown.length < text.length ? "\n[truncated; read the file with your tools]" : ""}`);
   }
+  const harness = harnessLines(completion.harness_evidence);
   return [
     `Independent review of attempt ${target.attemptId} for task ${target.taskId}.`,
     `The artifact under review is pinned at ${changeSet.artifactDigest}. Your workspace is that artifact, read-only.`,
     "You receive the worker's completion packet and the changed files, not the worker's conversation. Verify every acceptance criterion yourself with your own tool calls.",
     `Worker completion packet:\n\`\`\`json\n${canonicalJson(completion)}\n\`\`\``,
+    harness.length > 0 ? `Harness records (computed by the harness, independent of the worker; cite with produced_by: harness):\n${harness.join("\n")}` : "",
     `Changed files (${changeSet.changes.length}):\n${files.join("\n\n") || "[no file changes]"}`,
     REVIEWER_REPORT_INSTRUCTIONS,
-  ].join("\n\n");
+  ]
+    .filter((part) => part !== "")
+    .join("\n\n");
 }
 
 interface Execution {
@@ -224,15 +359,75 @@ interface Execution {
   readonly log: AttemptLog;
 }
 
+function emptyLog(sessionId: SessionId): AttemptLog {
+  return { sessionId, toolCalls: new Map(), eventTypes: new Map(), compactionBlobs: new Set(), finalAssistantText: undefined, assistantTexts: [], reports: [], ordinals: new Map() };
+}
+
+/** The one workspace digest (ADR-19) of files in an attempt root: the isolation's reader, or raw bytes read here. */
+function readerFor(workspace: OrchestratedWorkspace, platform: NodeJS.Platform): WorkspaceDigestReader {
+  return workspace.digest ?? createWorkspaceDigestReader(workspace.root, { platform });
+}
+
+/**
+ * Small read_paths files inlined into the packet (ADR-20, F19), read in the attempt workspace so
+ * their digests are valid write preconditions there: each at most `INLINE_SOURCE_MAX_BYTES`, all
+ * together at most `INLINE_SOURCES_MAX_TOTAL_BYTES`, only valid UTF-8 text, never truncated.
+ */
+async function inlineSources(
+  packet: TaskContextPacket,
+  workspace: OrchestratedWorkspace,
+  sources: readonly { readonly path: string; readonly digest: Digest }[],
+  platform: NodeJS.Platform,
+): Promise<{ path: string; digest: Digest; content: string; truncated: boolean }[]> {
+  const inline: { path: string; digest: Digest; content: string; truncated: boolean }[] = [];
+  let total = 0;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (const source of sources) {
+    if (!packet.scope.read_paths.includes(source.path) || inline.length >= 32) continue;
+    const normalized = normalizeWorkspacePath(source.path);
+    if (normalized === undefined || normalized === ".") continue;
+    let bytes: Uint8Array;
+    try {
+      const onDisk = await resolveOnDiskPath(workspace.root, normalized, platform);
+      if (onDisk === undefined) continue;
+      bytes = await readFile(path.join(workspace.root, ...onDisk.split("/")));
+    } catch {
+      continue;
+    }
+    if (bytes.byteLength > INLINE_SOURCE_MAX_BYTES || total + bytes.byteLength > INLINE_SOURCES_MAX_TOTAL_BYTES || workspaceDigest(bytes) !== source.digest) continue;
+    let content: string;
+    try {
+      content = decoder.decode(bytes);
+    } catch {
+      continue;
+    }
+    total += bytes.byteLength;
+    inline.push({ path: source.path, digest: source.digest, content, truncated: false });
+  }
+  return inline;
+}
+
+/** Paths the attempt's tools reported as changed (for in-call file evidence, before the real diff exists). */
+function loggedChanges(log: AttemptLog): string[] {
+  return [...new Set([...log.toolCalls.values()].flatMap((call) => (call.state === "succeeded" ? call.changedPaths ?? [] : [])))];
+}
+
 export function createWorkerManager(deps: WorkerManagerDependencies): OrchestrationWorkerManager {
   const now = deps.now ?? (() => new Date());
   const platform = deps.platform ?? process.platform;
   const sources = deps.sources ?? createWorkspaceSourceReader(deps.run.workspaceRoot);
   const recorder = deps.run.recorder;
+  const budgets = deps.run.budgets ?? DEFAULT_ORCHESTRATION_BUDGETS;
   const records = new Map<AttemptId, AttemptRecord>();
   const handles = new Map<AttemptId, AttemptHandle>();
   const controllers = new Map<AttemptId, AbortController>();
   const pendingStores = new Map<AttemptId, EventStore>();
+  /** Packets as the coordinator issued them (main-tree digests): the in-flight freshness gate compares against these. */
+  const baselines = new Map<AttemptId, TaskContextPacket>();
+  const unregister = new Map<AttemptId, () => void>();
+  const countedCalls = new Map<AttemptId, number>();
+  /** In-session repairs spent per task (shared by evidence and verification repairs, ADR-18 D2). */
+  const repairsUsed = new Map<TaskId, number>();
 
   deps.budget?.onCancel((exceeded) => {
     for (const controller of controllers.values()) controller.abort(new Error(`budget ${exceeded.metric} exceeded`));
@@ -258,19 +453,59 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     if (stale.length > 0) throw new StaleInFlight(stale.map((source) => source.path));
   };
 
+  /**
+   * ADR-19: once the workspace exists, packet sources are digested in *that* root with the one
+   * workspace scheme, so a digest the worker reads from its packet is a valid write precondition.
+   */
+  const inWorkspace = async (packet: TaskContextPacket, workspace: OrchestratedWorkspace, signal: AbortSignal): Promise<TaskContextPacket> => {
+    const digest = readerFor(workspace, platform);
+    if (packet.context.digest_scheme === "workspace-raw-v1" || packet.context.sources.length === 0) return packet;
+    const remapped = new Map<string, Digest>();
+    const next: { path: string; digest: Digest }[] = [];
+    for (const source of packet.context.sources) {
+      const value = await digest(source.path, signal);
+      if (value === undefined) continue;
+      next.push({ path: source.path, digest: value });
+      remapped.set(`${source.path}\u0000${source.digest}`, value);
+    }
+    const facts = packet.known_facts.flatMap((fact) => {
+      const value = remapped.get(`${fact.source}\u0000${fact.source_digest}`);
+      return value === undefined ? [] : [{ ...fact, source_digest: value }];
+    });
+    const inline = await inlineSources(packet, workspace, next, platform);
+    return taskContextPacketSchema.parse({
+      ...packet,
+      known_facts: facts,
+      context: {
+        ...packet.context,
+        sources: next,
+        digest_scheme: "workspace-raw-v1",
+        ...(inline.length === 0 ? {} : { inline_sources: inline }),
+      },
+    });
+  };
+
   const prepare = async (
     packet: TaskContextPacket,
     signal: AbortSignal,
     options: DispatchOptions | undefined,
     readRoot: string | undefined,
   ): Promise<{ record: AttemptRecord; controller: AbortController }> => {
-    const valid = taskContextPacketSchema.parse(packet);
-    await gate(valid, false);
+    const issued = taskContextPacketSchema.parse(packet);
+    await gate(issued, false);
     const attemptId = createId("attempt");
-    const decision = options?.route ?? (await deps.router.resolve({ tier: valid.model_tier, role: valid.role }, signal));
-    await recorder.record("route/decided", { decision }, { taskId: valid.task_id, attemptId, actor: { kind: "system" } });
-    const workspace = await deps.isolation.create(valid, attemptId, signal, readRoot === undefined ? undefined : { readRoot });
+    const decision = options?.route ?? (await deps.router.resolve({ tier: issued.model_tier, role: issued.role }, signal));
+    await recorder.record("route/decided", { decision }, { taskId: issued.task_id, attemptId, actor: { kind: "system" } });
+    const overlay = [...new Set([...issued.scope.read_paths, ...issued.context.sources.map((source) => source.path)])].filter((candidate) => !matchesAny(candidate, issued.scope.owned_paths, platform));
+    const previous = (options as WorkerDispatchOptions | undefined)?.reuseAttempt;
+    const reuse = previous === undefined ? undefined : records.get(previous);
+    const workspace = await deps.isolation.create(issued, attemptId, signal, {
+      ...(readRoot === undefined ? {} : { readRoot }),
+      ...(overlay.length === 0 ? {} : { overlay }),
+      ...(reuse === undefined || reuse.taskId !== issued.task_id ? {} : { reuse: reuse.workspace }),
+    });
     if (options?.seedArtifact !== undefined) await deps.isolation.seed(workspace, options.seedArtifact, signal);
+    const valid = await inWorkspace(issued, workspace, signal);
     const policy = deps.policy.compute({
       mode: deps.run.mode,
       role: valid.role,
@@ -280,7 +515,8 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       taskScope: {
         owned: valid.write_mode === "owned-paths" ? valid.scope.owned_paths : [],
         read: valid.scope.read_paths,
-        forbidden: valid.scope.forbidden_paths,
+        // ADR-19: linked dependency directories are readable but never writable.
+        forbidden: [...valid.scope.forbidden_paths, ...(workspace.dependencyLinks ?? [])],
         verification_commands: valid.verification.commands,
       },
       userConfig: deps.userConfig,
@@ -314,6 +550,11 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
           mode: workspace.mode,
           path: workspace.root,
           ...(workspace.baseCommit === undefined ? {} : { base_commit: workspace.baseCommit }),
+          ...(workspace.reused === true ? { reused: true } : {}),
+          ...(workspace.fallback === undefined ? {} : { fallback: workspace.fallback }),
+          ...(workspace.overlaid === undefined || workspace.overlaid.length === 0 ? {} : { overlaid: [...workspace.overlaid] }),
+          ...(workspace.dependencyLinks === undefined || workspace.dependencyLinks.length === 0 ? {} : { dependency_links: [...workspace.dependencyLinks] }),
+          ...(workspace.submodules === undefined || workspace.submodules.length === 0 ? {} : { submodules: [...workspace.submodules] }),
         },
         session_id: events.sessionId,
       },
@@ -333,15 +574,25 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       outcome: undefined,
       failure: undefined,
       stale: undefined,
+      harness: undefined,
+      repairs: { report_corrections: 0, evidence_repairs: 0, verification_repairs: 0 },
+      notes: (options as WorkerDispatchOptions | undefined)?.notes ?? [],
     };
     records.set(attemptId, record);
+    baselines.set(attemptId, issued);
     const controller = linkSignals(signal);
     controllers.set(attemptId, controller);
     pendingStores.set(attemptId, events);
     return { record, controller };
   };
 
-  const execute = async (record: AttemptRecord, userMessage: string, controller: AbortController): Promise<Execution> => {
+  const currentLog = async (record: AttemptRecord): Promise<AttemptLog> => {
+    const events = pendingStores.get(record.attemptId);
+    if (events === undefined) return record.log ?? emptyLog(record.sessionId);
+    return buildAttemptLog(record.sessionId, await readEvents(events), deps.blobs);
+  };
+
+  const execute = async (record: AttemptRecord, userMessage: string, controller: AbortController, trigger: TurnInput["trigger"]): Promise<Execution> => {
     const events = pendingStores.get(record.attemptId);
     if (events === undefined) throw harnessError("internal", `attempt ${record.attemptId} has no session`);
     const timer = setTimeout(
@@ -352,22 +603,21 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     let outcome: TurnOutcome | undefined;
     let error: unknown;
     try {
-      outcome = await deps.createDriver(events).runTurn(
-        {
-          sessionId: record.sessionId,
-          runId: deps.run.runId,
-          taskId: record.taskId,
-          attemptId: record.attemptId,
-          role: record.packet.role,
-          route: record.route,
-          policy: record.policy,
-          packet: record.packet,
-          userMessage,
-          trigger: "dispatch",
-          maxSteps: record.packet.limits.max_steps,
-        },
-        controller.signal,
-      );
+      const input: TurnInput = {
+        sessionId: record.sessionId,
+        runId: deps.run.runId,
+        taskId: record.taskId,
+        attemptId: record.attemptId,
+        role: record.packet.role,
+        route: record.route,
+        policy: record.policy,
+        packet: record.packet,
+        userMessage,
+        trigger,
+        maxSteps: record.packet.limits.max_steps,
+        sources: readerFor(record.workspace, platform),
+      };
+      outcome = await deps.createDriver(events).runTurn(input, controller.signal);
     } catch (caught) {
       error = caught;
     } finally {
@@ -375,19 +625,28 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     }
     const recorded = await readEvents(events);
     const log = await buildAttemptLog(record.sessionId, recorded, deps.blobs);
-    await events.close().catch(() => undefined);
-    pendingStores.delete(record.attemptId);
-    controllers.delete(record.attemptId);
-    deps.budget?.recordToolCalls(log.toolCalls.size);
+    const counted = countedCalls.get(record.attemptId) ?? 0;
+    deps.budget?.recordToolCalls(Math.max(0, log.toolCalls.size - counted));
+    countedCalls.set(record.attemptId, log.toolCalls.size);
     record.log = log;
     record.outcome = outcome;
     record.failure = classifyAttemptFailure(outcome, error, recorded);
     return { outcome, error, log };
   };
 
+  const closeAttempt = async (record: AttemptRecord): Promise<void> => {
+    unregister.get(record.attemptId)?.();
+    unregister.delete(record.attemptId);
+    const events = pendingStores.get(record.attemptId);
+    pendingStores.delete(record.attemptId);
+    controllers.delete(record.attemptId);
+    await events?.close().catch(() => undefined);
+  };
+
   const finished = new Set<AttemptId>();
 
   const failUnfinished = async (record: AttemptRecord, error: unknown): Promise<void> => {
+    await closeAttempt(record);
     if (finished.has(record.attemptId)) return;
     finished.add(record.attemptId);
     await recorder
@@ -413,21 +672,105 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     );
   };
 
-  const indexFor = (record: AttemptRecord, artifact: ChangeSet | undefined, root: string): EvidenceIndex => ({
-    log: record.log ?? { sessionId: record.sessionId, toolCalls: new Map(), eventTypes: new Map(), compactionBlobs: new Set(), finalAssistantText: undefined, assistantTexts: [], reports: [] },
-    artifactDigest: artifact?.artifactDigest,
-    changedPaths: artifact?.changes.map((change) => change.path) ?? [],
-    fileDigest: (relative) => fileDigestIn(root, relative),
-  });
+  const indexFor = (record: AttemptRecord, artifact: ChangeSet | undefined, root: string, log?: AttemptLog): EvidenceIndex => {
+    const source = log ?? record.log ?? emptyLog(record.sessionId);
+    return {
+      log: source,
+      artifactDigest: artifact?.artifactDigest,
+      changedPaths: artifact?.changes.map((change) => change.path) ?? loggedChanges(source),
+      fileDigest: (relative) => (root === record.workspace.root ? readerFor(record.workspace, platform) : createWorkspaceDigestReader(root, { platform }))(relative),
+      harness: record.harness,
+    };
+  };
 
-  const assemble = (
+  /** ADR-18 D1: the harness runs the packet's verification commands itself and records each run. */
+  const runHarnessVerification = async (record: AttemptRecord, changeSet: ChangeSet, signal: AbortSignal): Promise<HarnessEvidence> => {
+    const diff =
+      changeSet.changes.length === 0
+        ? undefined
+        : {
+            evidence: { kind: "harness-diff" as const, ref: changeSet.artifactDigest, produced_by: "harness" as const },
+            changed_paths: changeSet.changes.map((change) => change.path),
+          };
+    const runner = deps.verification;
+    const verification: HarnessVerification[] = [];
+    if (runner !== undefined) {
+      for (const [position, command] of record.packet.verification.commands.slice(0, 100).entries()) {
+        const started = Date.now();
+        const argv = commandArgv(command);
+        let result: VerificationResult;
+        if (argv === undefined || argv.length === 0) {
+          result = { status: "not-run", exitCode: null, output: "", durationMs: 0, reason: "the command uses shell syntax and cannot be run as a plain argv" };
+        } else if (signal.aborted) {
+          result = { status: "not-run", exitCode: null, output: "", durationMs: 0, reason: "the attempt was cancelled" };
+        } else {
+          try {
+            result = await runner({
+              command,
+              argv: argv as [string, ...string[]],
+              workspaceRoot: record.workspace.root,
+              policy: record.policy,
+              runId: deps.run.runId,
+              taskId: record.taskId,
+              attemptId: record.attemptId,
+              role: record.packet.role,
+              signal,
+            });
+          } catch (error) {
+            result = { status: "not-run", exitCode: null, output: "", durationMs: Date.now() - started, reason: `the harness could not run it: ${error instanceof Error ? error.message : String(error)}` };
+          }
+        }
+        const normalized = normalizeVerification(result);
+        let outputBlob: BlobRef | undefined;
+        if (normalized.output.length > OUTPUT_EXCERPT_LIMIT) {
+          outputBlob = await deps.blobs.put(new Uint8Array(Buffer.from(normalized.output, "utf8")), "text/plain; charset=utf-8").catch(() => undefined);
+        }
+        const event = await recorder.record(
+          "attempt/verification_ran",
+          {
+            attempt_id: record.attemptId,
+            task_id: record.taskId,
+            ordinal: position + 1,
+            command: command.slice(0, 4000),
+            ...(argv === undefined || argv.length === 0 ? {} : { argv: argv.slice(0, 256) }),
+            status: normalized.status,
+            ...(normalized.termination === undefined ? {} : { termination: normalized.termination }),
+            exit_code: normalized.exitCode,
+            duration_ms: Math.max(0, Math.round(normalized.durationMs)),
+            output_excerpt: excerpt(normalized.output),
+            ...(outputBlob === undefined ? {} : { output_blob: outputBlob }),
+            ...(changeSet.changes.length === 0 ? {} : { artifact_digest: changeSet.artifactDigest }),
+            ...(normalized.reason === undefined ? {} : { reason: normalized.reason.slice(0, 500) }),
+          },
+          { taskId: record.taskId, attemptId: record.attemptId, actor: { kind: "system" } },
+        );
+        verification.push({
+          ordinal: position + 1,
+          command: command.slice(0, 4000),
+          status: normalized.status,
+          ...(normalized.termination === undefined ? {} : { termination: normalized.termination }),
+          exit_code: normalized.exitCode,
+          ...(normalized.reason === undefined ? {} : { reason: normalized.reason.slice(0, 500) }),
+          evidence: {
+            kind: "harness-verification",
+            ref: `${recorder.log.sessionId}#${event.seq}`,
+            produced_by: "harness",
+            ...(outputBlob === undefined ? {} : { digest: outputBlob.digest }),
+          },
+        });
+      }
+    }
+    return { verification, ...(diff === undefined ? {} : { diff }) };
+  };
+
+  const assemble = async (
     record: AttemptRecord,
     execution: Execution,
     changeSet: ChangeSet,
     claimResult: ClaimResult<WorkerClaim>,
     stale: readonly string[] | undefined,
     cancelledReason: string | undefined,
-  ): CompletionPacket => {
+  ): Promise<CompletionPacket> => {
     const claim = claimResult.ok ? claimResult.claim : undefined;
     const notes: string[] = [];
     let status: CompletionPacket["status"];
@@ -456,16 +799,33 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         notes.push("the step limit was reached");
       }
     }
-    const workerEvidence = (claim?.acceptance_evidence ?? [])
-      .map((entry) => ({ criterion_id: entry.criterion_id, evidence: entry.evidence.filter((evidence) => evidence.produced_by !== "reviewer") }))
+    const claimed = (claim?.acceptance_evidence ?? [])
+      .map((entry) => ({ criterion_id: entry.criterion_id, evidence: entry.evidence.filter((evidence) => evidence.produced_by !== "reviewer" && evidence.produced_by !== "harness") }))
       .filter((entry) => entry.evidence.length > 0);
-    if (claim !== undefined && workerEvidence.length < claim.acceptance_evidence.length) {
-      notes.push("evidence attributed to a reviewer was removed: a worker cannot cite reviewer evidence");
+    if (claim !== undefined && claimed.length < claim.acceptance_evidence.length) {
+      notes.push("evidence attributed to a reviewer or the harness was removed: a worker cites only its own evidence");
     }
-    if (status === "completed" && workerEvidence.length === 0) {
+    const index = indexFor(record, changeSet, record.workspace.root, execution.log);
+    const claimedCommands = (claim?.commands_run ?? []).filter((command) => command.evidence.produced_by === "worker");
+    const resolved = await resolveCompletionEvidence(record.packet, claimed, claimedCommands, index, platform);
+    if (status === "completed" && resolved.acceptanceEvidence.length === 0) {
       status = "partial";
       notes.push("completed was claimed without evidence");
     }
+    if (resolved.substituted.length > 0) {
+      notes.push(`the harness verification evidenced ${resolved.substituted.join(", ")} (the report's pointers did not resolve)`);
+    }
+    const logged = commandsFromLog(execution.log);
+    const seen = new Set(logged.map((command) => command.evidence.ref));
+    const fromClaim = claimedCommands.flatMap((command) => {
+      const resolution = resolved.resolution.find((entry) => entry.criterion_id === undefined && entry.ref === command.evidence.ref.slice(0, 2000) && entry.status === "resolved");
+      const id = resolution?.tool_call_id;
+      const call = id === undefined ? undefined : execution.log.toolCalls.get(id);
+      if (id === undefined || call === undefined || seen.has(id) || call.name !== "exec" || call.state !== "succeeded") return [];
+      seen.add(id);
+      return [{ command: command.command, exit_code: call.exitCode ?? 0, evidence: { kind: "tool-call" as const, ref: id, produced_by: "worker" as const } }];
+    });
+    const repairs: RepairCounts = { ...record.repairs };
     const base = {
       schema_version: 2 as const,
       task_id: record.taskId,
@@ -476,41 +836,118 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       changed_paths: changeSet.changes.map((change) => ({ path: change.path, before: change.before, after: change.after })),
       artifact_digest: changeSet.artifactDigest,
       tool_call_ids: [...execution.log.toolCalls.keys()],
-      acceptance_evidence: workerEvidence,
-      commands_run: (claim?.commands_run ?? []).filter((command) => command.evidence.produced_by !== "reviewer"),
+      acceptance_evidence: resolved.acceptanceEvidence,
+      commands_run: [...logged, ...fromClaim],
       decisions_made: claim?.decisions_made ?? [],
       skipped_checks: claim?.skipped_checks ?? [],
       unresolved_risks: [...(claim?.unresolved_risks ?? []), ...(notes.length > 0 && status !== "completed" ? notes : [])],
       recommended_context_updates: claim?.recommended_context_updates ?? [],
       ...(claim?.root_cause === undefined ? {} : { root_cause: claim.root_cause }),
+      ...(record.harness === undefined ? {} : { harness_evidence: record.harness }),
+      ...(resolved.resolution.length === 0 ? {} : { evidence_resolution: resolved.resolution }),
+      repairs,
     };
     const parsed = completionPacketSchema.safeParse(base);
     if (parsed.success) return parsed.data;
+    const changed = base.changed_paths.filter((change) => normalizeWorkspacePath(change.path) !== undefined);
     return completionPacketSchema.parse({
       ...base,
       status: status === "completed" ? "partial" : status,
       summary: `${base.summary} | completion rejected by schema: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`.slice(0, 4000),
-      changed_paths: base.changed_paths.filter((change) => normalizeWorkspacePath(change.path) !== undefined),
+      changed_paths: changed,
+      acceptance_evidence: claimed,
+      commands_run: logged,
+      harness_evidence: record.harness === undefined ? undefined : { verification: record.harness.verification },
+      evidence_resolution: undefined,
     });
   };
 
-  const complete = async (record: AttemptRecord, controller: AbortController): Promise<CompletionPacket> => {
-    const execution = await execute(record, renderWorkerMessage(record.packet), controller);
-    const changeSet = await record.workspace.changeSet(new AbortController().signal);
-    record.changeSet = changeSet;
-    let stale: readonly string[] | undefined;
-    if (execution.outcome?.outcome !== "cancelled") {
-      try {
-        await gate(record.packet, true);
-      } catch (error) {
-        if (error instanceof StaleInFlight) stale = error.paths;
-        else throw error;
+  /**
+   * The in-call check of `task_report` (ADR-18 D1): every pointer is resolved against the attempt
+   * log while the model can still act on the answer. Unresolved pointers get one actionable
+   * correction round; the second rejection is recorded and the report is accepted as it is.
+   */
+  const taskReportCheck = (record: AttemptRecord) => async (input: Readonly<Record<string, unknown>>): Promise<ToolResult> => {
+    const report = input as unknown as TaskReportInput;
+    if (!CORRECTABLE_STATUSES.has(report.status)) return toolOk(REPORT_RECORDED);
+    const log = await currentLog(record);
+    const index = indexFor(record, undefined, record.workspace.root, log);
+    const known = new Set(record.packet.acceptance_criteria.map((criterion) => criterion.id));
+    const resolutions: EvidenceResolution[] = [];
+    const problems: EvidenceProblem[] = [];
+    for (const entry of report.acceptance_evidence) {
+      if (!known.has(entry.criterion_id)) {
+        problems.push({ criterionId: entry.criterion_id, ref: entry.criterion_id, reason: `is not a criterion of this task (criteria: ${[...known].join(", ")})` });
+        continue;
+      }
+      for (const evidence of entry.evidence) {
+        resolutions.push(
+          evidence.produced_by === "worker"
+            ? await resolvePointer(evidence, index, entry.criterion_id)
+            : unresolvedPointer(evidence, entry.criterion_id, "a worker cites only its own evidence (produced_by: worker)"),
+        );
       }
     }
-    record.stale = stale;
-    const cancelledReason = controller.signal.aborted ? String((controller.signal.reason as Error | undefined)?.message ?? controller.signal.reason) : undefined;
-    const completion = assemble(record, execution, changeSet, readClaim(workerClaimSchema, execution.log, REPORT_TOOL_NAMES.task), stale, cancelledReason);
+    const listed = new Set(report.acceptance_evidence.map((entry) => entry.criterion_id));
+    if (report.status === "completed") {
+      for (const id of known) if (!listed.has(id)) problems.push({ criterionId: id, ref: "(none)", reason: "has no evidence listed" });
+    }
+    problems.push(...evidenceProblems(resolutions));
+    if (problems.length === 0) return toolOk(REPORT_RECORDED);
+    if (record.repairs.report_corrections < REPORT_CORRECTION_ROUNDS) {
+      record.repairs.report_corrections += 1;
+      const text = formatEvidenceCorrection(problems, evidenceCandidates(log), REPORT_CORRECTION_ROUNDS - record.repairs.report_corrections);
+      return toolRejected(text, `${problems.length} evidence problem(s) in the report; nothing was recorded. Correct the refs listed above and call ${REPORT_TOOL_NAMES.task} again.`);
+    }
+    return toolOk(`report recorded with ${problems.length} unresolved evidence pointer(s); the harness records them as they are. End your turn now.`);
+  };
+
+  const complete = async (record: AttemptRecord, controller: AbortController): Promise<CompletionPacket> => {
+    unregister.set(record.attemptId, deps.reports?.register(record.attemptId, taskReportCheck(record)) ?? (() => undefined));
+    let execution = await execute(record, renderWorkerMessage(record.packet, record.notes), controller, "dispatch");
+    let completion: CompletionPacket;
+    let cancelledReason: string | undefined;
+    let rounds = 0;
+    for (;;) {
+      const changeSet = await record.workspace.changeSet(new AbortController().signal);
+      record.changeSet = changeSet;
+      let stale: readonly string[] | undefined;
+      if (execution.outcome?.outcome !== "cancelled") {
+        try {
+          await gate(baselines.get(record.attemptId) ?? record.packet, true);
+        } catch (error) {
+          if (error instanceof StaleInFlight) stale = error.paths;
+          else throw error;
+        }
+      }
+      record.stale = stale;
+      cancelledReason = controller.signal.aborted ? String((controller.signal.reason as Error | undefined)?.message ?? controller.signal.reason) : undefined;
+      const claim = readClaim(workerClaimSchema, execution.log, REPORT_TOOL_NAMES.task);
+      const turnEnded = execution.error === undefined && (execution.outcome?.outcome === "completed" || execution.outcome?.outcome === "max_steps");
+      const claimedStatus = claim.ok ? claim.claim.status : undefined;
+      const verifies = turnEnded && stale === undefined && cancelledReason === undefined && claimedStatus !== "needs_context" && claimedStatus !== "blocked" && claimedStatus !== "failed";
+      record.harness = verifies ? await runHarnessVerification(record, changeSet, controller.signal) : undefined;
+      completion = await assemble(record, execution, changeSet, claim, stale, cancelledReason);
+      if (completion.status !== "completed" || stale !== undefined || cancelledReason !== undefined) break;
+      const check = await verifyCompletion(record.packet, completion, indexFor(record, changeSet, record.workspace.root, execution.log), platform);
+      if (check.decision !== "revise") break;
+      const used = repairsUsed.get(record.taskId) ?? 0;
+      if (used >= budgets.evidence_repairs) break;
+      const kind: RepairKind = (check.failedVerification ?? []).length > 0 ? "verification-repair" : "evidence-repair";
+      repairsUsed.set(record.taskId, used + 1);
+      rounds += 1;
+      if (kind === "verification-repair") record.repairs.verification_repairs += 1;
+      else record.repairs.evidence_repairs += 1;
+      const problems = check.problems.slice(0, 50).map((problem) => problem.slice(0, 2000));
+      await recorder.record(
+        "attempt/repair_requested",
+        { attempt_id: record.attemptId, task_id: record.taskId, kind, round: Math.min(rounds, budgets.evidence_repairs), budget: budgets.evidence_repairs, problems },
+        { taskId: record.taskId, attemptId: record.attemptId, actor: { kind: "system" } },
+      );
+      execution = await execute(record, renderRepairMessage(kind, problems, execution.log, record.harness), controller, "follow-up");
+    }
     record.completion = completion;
+    await closeAttempt(record);
     await finishAttempt(record, execution, cancelledReason !== undefined);
     const blob = await recorder.putJson(completion, COMPLETION_MEDIA_TYPE);
     await recorder.record(
@@ -538,6 +975,51 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       unresolved_risks: ["the attempt workspace may hold partial changes; it was not integrated"],
       recommended_context_updates: [],
     });
+
+  /** Reviewer pointers resolve against the reviewer's attempt, harness pointers against the target's records. */
+  const reviewIndexes = (target: AttemptRecord, reviewer: AttemptRecord, pinned: ChangeSet, completion: CompletionPacket, reviewerLog?: AttemptLog) => {
+    const worker = { ...indexFor(target, pinned, target.workspace.root), harness: target.harness ?? completion.harness_evidence };
+    const own = { ...indexFor(reviewer, pinned, target.workspace.root, reviewerLog), harness: worker.harness };
+    return { worker, reviewer: own };
+  };
+
+  const resolveReviewPointer = async (evidence: EvidenceRef, criterionId: string, indexes: { readonly worker: EvidenceIndex; readonly reviewer: EvidenceIndex }): Promise<EvidenceResolution> => {
+    if (evidence.produced_by === "reviewer") return resolvePointer(evidence, indexes.reviewer, criterionId);
+    if (evidence.produced_by === "harness" || evidence.produced_by === "worker") return resolvePointer(evidence, indexes.worker, criterionId);
+    return unresolvedPointer(evidence, criterionId, `${evidence.produced_by} evidence is not accepted in a review`);
+  };
+
+  /** The in-call check of `review_report`: reviewer pointers must resolve and every met verdict needs independent evidence. */
+  const reviewReportCheck = (record: AttemptRecord, target: AttemptRecord, pinned: ChangeSet, completion: CompletionPacket) => async (input: Readonly<Record<string, unknown>>): Promise<ToolResult> => {
+    const report = input as unknown as ReviewReportInput;
+    const log = await currentLog(record);
+    const indexes = reviewIndexes(target, record, pinned, completion, log);
+    const problems: EvidenceProblem[] = [];
+    for (const criterion of report.criteria) {
+      let independent = 0;
+      for (const evidence of criterion.evidence) {
+        const resolution = await resolveReviewPointer(evidence, criterion.criterion_id, indexes);
+        if (resolution.status === "resolved" && (evidence.produced_by === "reviewer" || evidence.produced_by === "harness")) independent += 1;
+        else if (resolution.status !== "resolved") problems.push({ criterionId: criterion.criterion_id, ref: evidence.ref.slice(0, 200), reason: resolution.reason ?? "does not resolve" });
+      }
+      if (criterion.verdict === "met" && independent === 0) {
+        problems.push({ criterionId: criterion.criterion_id, ref: "(met)", reason: "needs independent evidence: one of your own tool calls (\"#n\", produced_by: reviewer) or a harness record (produced_by: harness)" });
+      }
+    }
+    if (problems.length === 0) return toolOk(REPORT_RECORDED);
+    if (record.repairs.report_corrections < REPORT_CORRECTION_ROUNDS) {
+      record.repairs.report_corrections += 1;
+      const harness = harnessLines(indexes.worker.harness);
+      const text = [
+        formatEvidenceCorrection(problems, evidenceCandidates(log), REPORT_CORRECTION_ROUNDS - record.repairs.report_corrections),
+        harness.length > 0 ? `Harness records (kind harness-verification / harness-diff, produced_by: harness):\n${harness.join("\n")}` : "",
+      ]
+        .filter((part) => part !== "")
+        .join("\n");
+      return toolRejected(text, `${problems.length} evidence problem(s) in the review; nothing was recorded. Correct them as listed above and call ${REPORT_TOOL_NAMES.review} again.`);
+    }
+    return toolOk(`review recorded with ${problems.length} unresolved evidence problem(s); unresolved pointers are dropped and a met verdict without independent evidence counts as unverifiable. End your turn now.`);
+  };
 
   const manager: OrchestrationWorkerManager = {
     async dispatch(packet, signal, options) {
@@ -569,10 +1051,31 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       const completion = target.completion;
       const { record, controller } = await prepare(packet, signal, options, target.workspace.root);
       const run = async (): Promise<ReviewOutcome> => {
-        const execution = await execute(record, renderReviewBrief(target, completion, pinned), controller);
+        unregister.set(record.attemptId, deps.reports?.register(record.attemptId, reviewReportCheck(record, target, pinned, completion)) ?? (() => undefined));
+        const execution = await execute(record, renderReviewBrief(target, completion, pinned), controller, "dispatch");
+        await closeAttempt(record);
         await finishAttempt(record, execution, controller.signal.aborted);
         const claim = readClaim(reviewerClaimSchema, execution.log, REPORT_TOOL_NAMES.review);
         if (!claim.ok) return { attemptId: record.attemptId, review: undefined, verification: { decision: "invalid", problems: claim.problems } };
+        // ADR-18: unresolved pointers are dropped (and recorded); a met verdict left without independent evidence is unverifiable.
+        const indexes = reviewIndexes(target, record, pinned, completion, execution.log);
+        const resolution: EvidenceResolution[] = [];
+        const downgraded: string[] = [];
+        const criteria: ReviewPacket["criteria"] = [];
+        for (const criterion of claim.claim.criteria) {
+          const kept: EvidenceRef[] = [];
+          for (const evidence of criterion.evidence) {
+            const result = await resolveReviewPointer(evidence, criterion.criterion_id, indexes);
+            resolution.push(result);
+            if (result.status === "resolved") kept.push(evidence);
+          }
+          const independent = kept.some((evidence) => evidence.produced_by === "reviewer" || evidence.produced_by === "harness");
+          if (criterion.verdict === "met" && !independent) {
+            downgraded.push(criterion.criterion_id);
+            criteria.push({ ...criterion, verdict: "unverifiable", evidence: kept, note: `${criterion.note === undefined ? "" : `${criterion.note} | `}harness: no resolvable reviewer or harness evidence` });
+          } else criteria.push({ ...criterion, evidence: kept });
+        }
+        const decision = claim.claim.decision === "accept" && downgraded.length > 0 ? "revise" : claim.claim.decision;
         const candidate = {
           schema_version: 2 as const,
           task_id: target.taskId,
@@ -586,9 +1089,11 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
             same_provider: record.route.provider_id === target.route.provider_id,
             same_model: record.route.provider_id === target.route.provider_id && record.route.model_id === target.route.model_id,
           },
-          criteria: claim.claim.criteria,
+          criteria,
           findings: claim.claim.findings,
-          decision: claim.claim.decision,
+          decision,
+          ...(resolution.length === 0 ? {} : { evidence_resolution: resolution.slice(0, 200) }),
+          repairs: { report_corrections: record.repairs.report_corrections },
         };
         const parsed = reviewPacketSchema.safeParse(candidate);
         if (!parsed.success) {
@@ -610,11 +1115,8 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
           return { attemptId: record.attemptId, review, verification: { decision: "invalid", problems: ["the artifact changed during review"] } };
         }
         // Judged against the criteria the reviewer was given: the implementation's, minus waived ones, plus reviewer-task extras.
-        const verification = await verifyReview(review, record.packet, completion, {
-          worker: indexFor(target, pinned, target.workspace.root),
-          reviewer: indexFor(record, pinned, target.workspace.root),
-        });
-        return { attemptId: record.attemptId, review, verification };
+        const verification = await verifyReview(review, record.packet, completion, indexes);
+        return { attemptId: record.attemptId, review, verification: { decision: verification.decision, problems: verification.problems } };
       };
       const result = run().catch(async (error: unknown): Promise<ReviewOutcome> => {
         await failUnfinished(record, error);
@@ -668,6 +1170,15 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     },
   };
   return manager;
+}
+
+/** Enforces the contract's outcome rules on a runner result (passed means exited 0; not-run has a reason and no exit code). */
+function normalizeVerification(result: VerificationResult): VerificationResult {
+  if (result.termination === undefined || result.status === "not-run") {
+    return { status: "not-run", exitCode: null, output: result.output, durationMs: result.durationMs, reason: result.reason ?? "the harness did not start the command" };
+  }
+  const passed = result.termination === "exited" && result.exitCode === 0;
+  return { status: passed ? "passed" : "failed", termination: result.termination, exitCode: result.exitCode, output: result.output, durationMs: result.durationMs };
 }
 
 class StaleInFlight extends Error {

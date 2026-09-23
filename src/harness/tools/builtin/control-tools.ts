@@ -75,8 +75,11 @@ export interface ControlCallbacks {
   readonly loadSkill?: ControlCallback<LoadSkillInput>;
   readonly memoryPropose?: ControlCallback<MemoryProposeInput>;
   /**
-   * Report tools need no callback: the recorded, validated call in the attempt log is the report
-   * orchestration reads. A callback may still observe it (e.g. live UI).
+   * Report tools: the recorded, validated call in the attempt log is the report orchestration reads.
+   * Orchestration binds `taskReport`/`reviewReport` to resolve the evidence inside the call and
+   * reject it with an actionable `invalid_arguments` (ADR-18); without a callback the call is
+   * acknowledged. `task_report`, `review_report`, `plan_propose` and `task_triage` end the turn
+   * when they succeed (`ends_turn`, ADR-20).
    */
   readonly taskReport?: ControlCallback<TaskReportInput>;
   readonly reviewReport?: ControlCallback<ReviewReportInput>;
@@ -89,19 +92,21 @@ export function createControlTools(callbacks: ControlCallbacks): Tool[] {
   return [
     controlTool(
       REPORT_TOOL_NAMES.task,
-      "Finish the attempt: report status, summary and evidence per acceptance criterion (tool call ids from this attempt). Call it once, last.",
+      "Finish the attempt: status, summary and evidence per acceptance criterion. Cite a tool result by the [#n] shown before it (ref \"#n\"). The harness resolves every ref in the call and says which refs are valid if one does not resolve. Call it last.",
       ["explorer", "implementer", "debugger"],
       taskReportInputSchema,
       callbacks.taskReport,
       "acknowledge",
+      true,
     ),
     controlTool(
       REPORT_TOOL_NAMES.review,
-      "Finish the review: a verdict per acceptance criterion with your own evidence, findings and accept|revise|block. Call it once, last.",
+      "Finish the review: a verdict per acceptance criterion with independent evidence (your own tool results as \"#n\", produced_by reviewer, or harness records, produced_by harness), findings and accept|revise|block. Call it last.",
       ["reviewer"],
       reviewReportInputSchema,
       callbacks.reviewReport,
       "acknowledge",
+      true,
     ),
     controlTool(
       REPORT_TOOL_NAMES.plan,
@@ -110,6 +115,7 @@ export function createControlTools(callbacks: ControlCallbacks): Tool[] {
       planProposalSchema,
       callbacks.planPropose,
       "acknowledge",
+      true,
     ),
     controlTool(
       "ask_user",
@@ -133,6 +139,8 @@ export function createControlTools(callbacks: ControlCallbacks): Tool[] {
       ["orchestrator"],
       taskTriageInput,
       callbacks.taskTriage,
+      "execution_failed",
+      true,
     ),
     controlTool(
       "load_skill",
@@ -152,6 +160,7 @@ function controlTool<Input>(
   input: z.ZodType<Input>,
   callback: ControlCallback<Input> | undefined,
   missing: "approval_unavailable" | "execution_failed" | "acknowledge" = "execution_failed",
+  endsTurn = false,
 ): Tool<Input> {
   const metadata = builtinMetadata({
     name,
@@ -164,6 +173,7 @@ function controlTool<Input>(
     cancellable: true,
     concurrency: "sequential",
     visible_to: [...roles],
+    ...(endsTurn ? { ends_turn: true } : {}),
   });
   return defineTool(metadata, input, {
     async normalize(value, context) {

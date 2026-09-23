@@ -15,14 +15,16 @@ export {
   type BudgetTracker,
   type UsageObservation,
 } from "./budget.ts";
-export { latestReport, type AttemptLog, type RecordedReportCall } from "./attempt-log.ts";
+export { buildAttemptLog, latestReport, type AttemptLog, type RecordedReportCall, type RecordedToolCall } from "./attempt-log.ts";
 export { commandMentioned, roleCapabilityIssues } from "./capabilities.ts";
 export { extractJsonBlock, parseClaim, readClaim, reviewerClaimSchema, workerClaimSchema } from "./claims.ts";
 export { createControlPlaneWriter, type ControlPlaneWriter } from "./control-plane.ts";
 export {
   createCoordinator,
+  criterionEvidence,
   DEFAULT_COORDINATOR_LIMITS,
   failedRunExitCode,
+  resolveBudgets,
   retryNotes,
   type CoordinatorDependencies,
   type CoordinatorLimits,
@@ -30,7 +32,12 @@ export {
 } from "./coordinator.ts";
 export {
   createDelegationSlot,
+  createReportSlot,
   delegationCallbacks,
+  REPORT_RECORDED,
+  reportCallbacks,
+  type ReportCheck,
+  type ReportSlot,
   type DelegationCaller,
   type DelegationPort,
   type DelegationResult,
@@ -38,11 +45,19 @@ export {
   type TriageDecision,
 } from "./delegation.ts";
 export {
+  commandArgv,
+  commandsFromLog,
+  evidenceCandidates,
+  firstPathToken,
+  harnessCanSubstitute,
   mayComplete,
+  resolveCompletionEvidence,
   resolveEvidence,
+  resolvePointer,
   reviewRequired,
   verifyCompletion,
   verifyReview,
+  type CompletionEvidence,
   type CompletionVerification,
   type EvidenceIndex,
   type ReviewVerification,
@@ -71,6 +86,8 @@ export {
   compileReviewerPacket,
   compileTaskPacket,
   createDeltaPacket,
+  MIN_TASK_STEPS,
+  perTaskStepLimit,
   refreshPacketSources,
   validatePlan,
   type PlanValidation,
@@ -98,10 +115,17 @@ export {
 export {
   classifyAttemptFailure,
   createWorkerManager,
+  renderRepairMessage,
   renderReviewBrief,
   type AttemptFailure,
   renderWorkerMessage,
+  type AttemptRecord,
+  type VerificationRequest,
+  type VerificationResult,
+  type VerificationRunner,
+  type WorkerDispatchOptions,
   type OrchestrationWorkerManager,
   type RunScope,
   type WorkerManagerDependencies,
 } from "./worker-manager.ts";
+export { contentIdentities, contentIdentity, createWorkspaceDigestReader, resolveOnDiskPath, type ContentIdentityOptions, type WorkspaceDigestOptions } from "./workspace-digest.ts";

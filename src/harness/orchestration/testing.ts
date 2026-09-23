@@ -30,7 +30,10 @@ import {
   type EffectivePolicy,
   type EventReadItem,
   type EventStore,
+  type ModelAdapter,
+  type ModelRequest,
   type ModelRoute,
+  type ModelStreamEvent,
   type ModelRouter,
   type NormalizedAction,
   type PolicyDecision,
@@ -51,12 +54,12 @@ import {
 } from "../contracts/index.ts";
 import { createBudgetGateSlot, type BudgetGateSlot } from "./budget.ts";
 import type { DelegationSlot } from "./delegation.ts";
-import { createCoordinator, type CoordinatorLimits } from "./coordinator.ts";
+import { createCoordinator, type CoordinatorDependencies } from "./coordinator.ts";
 import { createWorkerFactory } from "./factories.ts";
 import { runGit } from "./git.ts";
 import { matchesAny } from "./paths.ts";
 import type { Planner, PlannerInput } from "./planner.ts";
-import type { OrchestrationWorkerManager } from "./worker-manager.ts";
+import type { OrchestrationWorkerManager, VerificationRunner } from "./worker-manager.ts";
 
 /**
  * In-memory doubles for the seams I4 consumes (I1 store/driver, I2 router, I3 policy/broker).
@@ -676,11 +679,13 @@ export interface TestRuntimeOptions {
   readonly policy?: PolicyEngine & { readonly computed: EffectivePolicy[] };
   /** Builds a real ContextBuilder over the runtime's stores for the scripted driver to call. */
   readonly context?: (stores: { readonly sessions: MemorySessionStore; readonly blobs: BlobStore; readonly budgetGate: BudgetGateSlot }) => ContextBuilder;
-  readonly limits?: Partial<CoordinatorLimits>;
+  readonly limits?: CoordinatorDependencies["limits"];
   readonly preferWorktree?: boolean;
   readonly ledger?: boolean;
   readonly headless?: boolean;
   readonly delegation?: DelegationSlot;
+  /** Runs packet verification commands after each worker turn (ADR-18 harness verification). */
+  readonly verification?: VerificationRunner;
 }
 
 export interface TestRuntime {
@@ -716,6 +721,7 @@ export function createTestRuntime(options: TestRuntimeOptions): TestRuntime {
     createDriver: driver,
     sandbox: TEST_SANDBOX,
     home: options.workspace.home,
+    ...(options.verification === undefined ? {} : { verification: options.verification }),
   });
   const coordinator = createCoordinator({
     sessions,
@@ -760,4 +766,190 @@ export function createTestRuntime(options: TestRuntimeOptions): TestRuntime {
       ),
     runEvents: (outcome) => sessions.store(outcome.sessionId)?.events ?? [],
   };
+}
+
+/**
+ * A scripted `ModelAdapter` that behaves like the real models of the first live runs (Denetim A):
+ * it never cites harness ids, writes evidence as prose (`functions.exec node check.mjs: exit code 0`,
+ * `src-add.mjs:1-3 — …`), copies digests from wherever it saw them, uses the V4A patch format and
+ * keeps talking after a terminal tool. Scripts are chosen per turn by the turn's user message and
+ * indexed by the step within the turn, so a runtime that ends a turn earlier (ADR-20) or asks for a
+ * correction round (ADR-18) never shifts the replay. Test support only (contracts-only imports).
+ */
+
+export interface SloppyCall {
+  readonly name: string;
+  readonly arguments: Record<string, unknown>;
+}
+
+export type SloppyResponse = { readonly calls: readonly SloppyCall[]; readonly text?: string } | { readonly text: string };
+
+export interface SloppyToolResult {
+  readonly providerCallId: string;
+  readonly name: string | undefined;
+  readonly text: string;
+  readonly isError: boolean;
+}
+
+export interface SloppyView {
+  readonly request: ModelRequest;
+  /** The text of the turn's user message (the last user message of the request). */
+  readonly userText: string;
+  /** 0 for the first request of the turn, then one more per assistant message since the user message. */
+  readonly step: number;
+  readonly system: string;
+  /** Tool results since the turn's user message, oldest first. */
+  readonly results: readonly SloppyToolResult[];
+  /** The last tool result of the turn, if any. */
+  readonly last: SloppyToolResult | undefined;
+}
+
+export type SloppyStep = SloppyResponse | ((view: SloppyView) => SloppyResponse);
+
+export interface SloppyTurn {
+  /** The turn this script plays: matched against the turn's user message. */
+  readonly when: RegExp | ((userText: string) => boolean);
+  /** Responses by step within the turn, or a function that picks one (undefined: the script is exhausted). */
+  readonly steps: readonly SloppyStep[] | ((view: SloppyView) => SloppyResponse | undefined);
+  /** What the model says once the script is exhausted (e.g. chatter after a terminal tool). */
+  readonly after?: string;
+}
+
+export interface SloppyModelAdapter extends ModelAdapter {
+  readonly requests: readonly ModelRequest[];
+  /** The views the adapter answered, in order (for assertions on what the model saw). */
+  readonly views: readonly SloppyView[];
+}
+
+function textOfParts(message: ModelRequest["messages"][number]): string {
+  return message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+}
+
+export function sloppyView(request: ModelRequest): SloppyView {
+  const lastUser = request.messages
+    .map((message, index) => ({ message, index }))
+    .filter((entry) => entry.message.role === "user" && textOfParts(entry.message) !== "")
+    .at(-1);
+  const since = lastUser === undefined ? request.messages : request.messages.slice(lastUser.index + 1);
+  const names = new Map<string, string>();
+  for (const message of request.messages) {
+    for (const part of message.content) if (part.type === "tool_call") names.set(part.provider_call_id, part.name);
+  }
+  const results = since.flatMap((message) =>
+    message.content.flatMap((part) =>
+      part.type === "tool_result" ? [{ providerCallId: part.provider_call_id, name: names.get(part.provider_call_id), text: part.text, isError: part.is_error }] : [],
+    ),
+  );
+  return {
+    request,
+    userText: lastUser === undefined ? "" : textOfParts(lastUser.message),
+    step: since.filter((message) => message.role === "assistant").length,
+    system: request.system.map((block) => block.text).join("\n"),
+    results,
+    last: results.at(-1),
+  };
+}
+
+export function createSloppyModelAdapter(turns: readonly SloppyTurn[], options: { readonly adapterId: string; readonly providerId?: string }): SloppyModelAdapter {
+  const providerId = (options.providerId ?? "scripted") as ModelRoute["provider_id"];
+  const requests: ModelRequest[] = [];
+  const views: SloppyView[] = [];
+  const prefix = options.adapterId.replace(/[^A-Za-z0-9]/g, "");
+  let counter = 0;
+  const respond = (request: ModelRequest): SloppyResponse => {
+    const view = sloppyView(request);
+    views.push(view);
+    const turn = turns.find((candidate) => (typeof candidate.when === "function" ? candidate.when(view.userText) : candidate.when.test(view.userText)));
+    if (turn === undefined) return { text: "I have nothing to add." };
+    const step = typeof turn.steps === "function" ? turn.steps(view) : turn.steps[view.step];
+    if (step === undefined) return { text: turn.after ?? "Done." };
+    return typeof step === "function" ? step(view) : step;
+  };
+  async function* stream(request: ModelRequest, signal: AbortSignal): AsyncGenerator<ModelStreamEvent> {
+    requests.push(request);
+    if (signal.aborted) {
+      yield { type: "error", error: { code: "cancelled", message: "request aborted by user", retryable: false } };
+      return;
+    }
+    yield { type: "start", request_id: request.request_id, route: request.route };
+    let response: SloppyResponse;
+    try {
+      response = respond(request);
+    } catch (error: unknown) {
+      yield { type: "error", error: { code: "provider_internal", message: error instanceof Error ? error.message : String(error), retryable: false } };
+      return;
+    }
+    const calls =
+      "calls" in response
+        ? response.calls.map((call) => {
+            counter += 1;
+            return { ...call, id: `call_${prefix}${counter.toString(36).padStart(6, "0")}` };
+          })
+        : [];
+    const text = response.text === undefined || response.text === "" ? undefined : response.text;
+    const offset = text === undefined ? 0 : 1;
+    if (text !== undefined) yield { type: "text_delta", index: 0, text };
+    for (const [index, call] of calls.entries()) yield { type: "tool_call_start", index: index + offset, provider_call_id: call.id, name: call.name };
+    for (const [index, call] of calls.entries()) {
+      yield { type: "tool_call_end", index: index + offset, provider_call_id: call.id, name: call.name, arguments: call.arguments as never };
+    }
+    yield {
+      type: "done",
+      stop_reason: calls.length > 0 ? "tool_use" : "stop",
+      message: {
+        role: "assistant",
+        content: [
+          ...(text === undefined ? [] : [{ type: "text" as const, text }]),
+          ...calls.map((call) => ({ type: "tool_call" as const, provider_call_id: call.id, name: call.name, arguments: call.arguments as never })),
+        ],
+      },
+      usage: { input_tokens: Math.ceil(JSON.stringify(request).length / 5), output_tokens: 20, source: "provider-reported" },
+    };
+  }
+  return {
+    kind: "model",
+    adapterId: options.adapterId,
+    providerId,
+    authMethod: "api-key",
+    requests,
+    views,
+    async discoverCapabilities() {
+      return {
+        schema_version: 1,
+        provider_id: providerId,
+        adapter_id: options.adapterId,
+        adapter_kind: "model",
+        auth_method: "api-key",
+        auth_status: "connected",
+        billing: "unknown",
+        quota_visibility: "none",
+        loop_owner: "synorch",
+        tool_channel: "native",
+        policy_status: "permitted",
+        models: [],
+        probed_at: new Date(0).toISOString(),
+        source: "static-config",
+      };
+    },
+    prepare(request) {
+      return { ok: true, wireDigest: digestOf(request), warnings: [] };
+    },
+    stream(request, _credential, signal) {
+      return stream(request, signal);
+    },
+    async health() {
+      return { state: "ok", checked_at: new Date(0).toISOString(), detail: "sloppy scripted model" };
+    },
+  };
+}
+
+/** `sha256:<hex>` digests in a text, in order of appearance. */
+export function digestsIn(text: string): Digest[] {
+  return [...text.matchAll(/sha256:[0-9a-f]{64}/g)].map((match) => match[0] as Digest);
+}
+
+/** The `[#n]` short ref a tool result starts with, when the runtime rendered one (ADR-18). */
+export function shortRefOf(result: SloppyToolResult | undefined): number | undefined {
+  const match = result === undefined ? null : /^\[#(\d+)\]/.exec(result.text);
+  return match === null ? undefined : Number(match[1]);
 }

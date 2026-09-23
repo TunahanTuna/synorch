@@ -187,9 +187,11 @@ test("without a triage-capable planner, a partial report is retried once with th
     assert.equal(outcome.exitCode, 5);
     const turns = runtime.driver.turns.filter((turn) => partialExplorer(turn.input.packet));
     assert.equal(turns.length, 2, "one retry, then the task fails");
-    const decisions = turns[1]?.input.packet?.decisions ?? [];
-    assert.ok(decisions.some((line) => /Revision note: Previous attempt .* reported partial: half done/.test(line)), decisions.join("\n"));
-    assert.ok(decisions.some((line) => line === "Revision note: Previous attempt skipped AC-9: impossible here"));
+    // F19: the delta's notes reach the next attempt in its task message, not as copies in packet decisions.
+    const message = turns[1]?.input.userMessage ?? "";
+    assert.match(message, /Notes for this attempt[^]*- Previous attempt .* reported partial: half done/);
+    assert.ok(message.includes("- Previous attempt skipped AC-9: impossible here"), message);
+    assert.ok(!(turns[1]?.input.packet?.decisions ?? []).some((line) => line.includes("Previous attempt")));
     assert.deepEqual(replayTransitions(runtime.runEvents(outcome)), []);
   } finally {
     await workspace.cleanup();

@@ -78,7 +78,6 @@ test("steering typed during a run is applied at a safe boundary through a re-ver
             { key: "edit-b", risk: "trivial", owned: ["docs/b.md"], read: ["docs/b.md"], dependsOn: ["edit-a"] },
           ]),
         ),
-        text("planned"),
         calls((request) => {
           consultSaw.push(JSON.stringify(request.messages));
           return [{ name: "task_status", arguments: {} }];
@@ -109,13 +108,11 @@ test("steering typed during a run is applied at a safe boundary through a re-ver
           return [{ name: "write_file", arguments: { path: "docs/a.md", content: "a edited\n", expected_digest: sha256("a\n") } }];
         }),
         taskReport((ids) => [{ criterion: "AC-1", ref: ids.at(-1) ?? "" }]),
-        text("a done"),
         calls((request) => {
           workerRequests.push(request.system.map((block) => block.text).join("\n"));
           return [{ name: "write_file", arguments: { path: "docs/b.md", content: "b edited\n", expected_digest: sha256("b\n") } }];
         }),
         taskReport((ids) => [{ criterion: "AC-1", ref: ids.at(-1) ?? "" }]),
-        text("b done"),
         call("write_file", () => ({ path: "docs/CHANGELOG.md", content: "- tabs, not spaces\n" })),
         taskReport((ids) => [{ criterion: "AC-1", ref: ids.at(-1) ?? "" }]),
         text("changelog done"),

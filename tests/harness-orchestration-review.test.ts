@@ -180,16 +180,20 @@ test("AC-2 a reviewer that only cites worker evidence cannot accept; the task fa
     assert.equal(outcome.status, "failed");
     const events = runtime.runEvents(outcome);
     assert.deepEqual(replayTransitions(events), []);
-    assert.equal(ofType(events, "review/recorded").length, 0, "a schema-invalid review is never recorded");
+    const reviews = ofType(events, "review/recorded");
+    assert.ok(reviews.length > 0, "ADR-18: the review is recorded, never silently dropped");
+    assert.ok(reviews.every((review) => review.data.decision === "revise"), "a met verdict on worker evidence alone is downgraded: accept becomes revise");
+    const review = reviewPacketSchema.parse(JSON.parse(Buffer.from(await runtime.blobs.get(reviews[0]!.data.blob.digest)).toString("utf8")));
+    assert.ok(review.criteria.every((criterion) => criterion.verdict === "unverifiable"));
     assert.ok(!taskStates(events).includes("completed"));
-    assert.equal(taskStates(events).at(-1), "failed");
+    assert.equal(taskStates(events).at(-1), "cancelled", "the review_revisions budget and the triage retry run out");
     await assert.rejects(readFile(path.join(workspace.root, "src", "feature.ts"), "utf8"));
   } finally {
     await workspace.cleanup();
   }
 });
 
-test("AC-2 a reviewer passing off the implementer's tool call as its own evidence is an invalid review", async () => {
+test("AC-2 / ADR-18 a reviewer passing off the implementer's tool call as its own evidence never accepts: the pointer is dropped and the verdict is unverifiable", async () => {
   const workspace = await createTempWorkspace({ "src/index.ts": "export {};\n" }, { git: true });
   try {
     const planner = createScriptedPlanner((input) => testPlan(input, [{ key: "feature", owned_paths: ["src/feature.ts"], risk: "standard" }]));
@@ -220,7 +224,11 @@ test("AC-2 a reviewer passing off the implementer's tool call as its own evidenc
     assert.equal(outcome.status, "failed");
     const events = runtime.runEvents(outcome);
     assert.deepEqual(replayTransitions(events), []);
-    assert.equal(ofType(events, "review/recorded").length, 1);
+    const reviews = ofType(events, "review/recorded");
+    assert.ok(reviews.length > 0 && reviews.every((review) => review.data.decision === "revise"));
+    const review = reviewPacketSchema.parse(JSON.parse(Buffer.from(await runtime.blobs.get(reviews[0]!.data.blob.digest)).toString("utf8")));
+    assert.ok(review.criteria.every((criterion) => criterion.verdict === "unverifiable" && criterion.evidence.length === 0), "the borrowed pointer is dropped");
+    assert.ok(review.evidence_resolution?.some((resolution) => resolution.status === "unresolved" && resolution.produced_by === "reviewer" && /not a tool call of this attempt/.test(resolution.reason ?? "")));
     assert.ok(!taskStates(events).includes("completed"));
     await assert.rejects(readFile(path.join(workspace.root, "src", "feature.ts"), "utf8"));
   } finally {
@@ -272,7 +280,7 @@ test("AC-2 revise sends a delta packet to a new attempt that continues from the 
     assert.equal(deltas.length, 1);
     const implementerTurns = runtime.driver.turns.filter((turn) => turn.input.role === "implementer");
     assert.notEqual(implementerTurns[0]?.input.attemptId, implementerTurns[1]?.input.attemptId);
-    assert.ok(implementerTurns[1]?.input.packet?.decisions.some((decision) => decision.includes("review:F-1")));
+    assert.match(implementerTurns[1]?.input.userMessage ?? "", /Address evidence review:review:F-1/);
     assert.equal(await readFile(path.join(workspace.root, "src", "feature.ts"), "utf8"), "line1\nline2\n");
   } finally {
     await workspace.cleanup();
@@ -444,20 +452,21 @@ test("AC-3 evidence must resolve: unknown calls, failed test runs and review poi
   assert.equal(await resolveEvidence({ kind: "artifact", ref: sha256("artifact"), produced_by: "worker" }, index), undefined);
 });
 
-test("AC-3 an attempt that omits evidence is sent back with the missing criterion and succeeds on retry", async () => {
+test("AC-3 / ADR-18 D2 an attempt that omits evidence is repaired in the same session, keeping its workspace", async () => {
   const workspace = await createTempWorkspace({ "docs/a.md": "a\n" }, { git: false });
   try {
     const planner = createScriptedPlanner((input) => testPlan(input, [{ key: "doc", owned_paths: ["docs/**"], risk: "trivial", criteria: ["first", "second"] }]));
-    let attempts = 0;
+    let turns = 0;
     const runtime = createTestRuntime({
       workspace,
       planner,
       script: async (context) => {
-        attempts += 1;
-        await context.write("docs/a.md", `a${attempts}\n`);
+        turns += 1;
+        if (turns === 1) await context.write("docs/a.md", "a1\n");
+        else assert.equal(await readFile(path.join(context.root, "docs", "a.md"), "utf8"), "a1\n", "the repair turn sees the attempt's own change");
         const call = await context.toolCall("exec", { exitCode: 0 });
         const claim = workerClaim(context, call);
-        if (attempts === 1) (claim.acceptance_evidence as unknown[]).splice(1, 1);
+        if (turns === 1) (claim.acceptance_evidence as unknown[]).splice(1, 1);
         await context.reply(claim);
       },
     });
@@ -465,10 +474,53 @@ test("AC-3 an attempt that omits evidence is sent back with the missing criterio
     assert.equal(outcome.status, "succeeded", outcome.summary);
     const events = runtime.runEvents(outcome);
     assert.deepEqual(replayTransitions(events), []);
-    const failure = ofType(events, "task/state_changed").find((event) => event.data.to === "failed");
-    assert.match(failure?.data.reason ?? "", /AC-2/);
-    const second = runtime.driver.turns[1]?.input.packet;
-    assert.ok(second?.decisions.some((decision) => decision.includes("AC-2")));
+    assert.deepEqual(taskStates(events), ["ready", "running", "verifying", "completed"], "no new attempt, no failed state");
+    assert.equal(ofType(events, "attempt/started").length, 1);
+    const repairs = ofType(events, "attempt/repair_requested");
+    assert.equal(repairs.length, 1);
+    assert.equal(repairs[0]?.data.kind, "evidence-repair");
+    assert.equal(repairs[0]?.data.round, 1);
+    assert.equal(repairs[0]?.data.budget, 2);
+    assert.ok(repairs[0]?.data.problems.some((problem) => problem.includes("AC-2")));
+    const [first, second] = runtime.driver.turns;
+    assert.equal(second?.input.attemptId, first?.input.attemptId, "same attempt");
+    assert.equal(second?.input.sessionId, first?.input.sessionId, "same session");
+    assert.equal(second?.input.trigger, "follow-up");
+    assert.match(second?.input.userMessage ?? "", /AC-2 has no resolvable evidence/);
+    const completion = completionPacketSchema.parse(
+      JSON.parse(Buffer.from(await runtime.blobs.get(ofType(events, "attempt/completion_recorded")[0]!.data.blob.digest)).toString("utf8")),
+    );
+    assert.deepEqual(completion.repairs, { report_corrections: 0, evidence_repairs: 1, verification_repairs: 0 });
+    assert.equal(await readFile(path.join(workspace.root, "docs", "a.md"), "utf8"), "a1\n");
+  } finally {
+    await workspace.cleanup();
+  }
+});
+
+test("ADR-18 D2 budgets are separate: spent evidence repairs go to triage, and a triage retry is a fresh attempt", async () => {
+  const workspace = await createTempWorkspace({ "docs/a.md": "a\n" }, { git: false });
+  try {
+    const planner = createScriptedPlanner((input) => testPlan(input, [{ key: "doc", owned_paths: ["docs/**"], risk: "trivial", criteria: ["first", "second"] }]));
+    const runtime = createTestRuntime({
+      workspace,
+      planner,
+      limits: { budgets: { evidence_repairs: 1, triage_retries: 1 } },
+      script: async (context) => {
+        await context.write("docs/a.md", "changed\n");
+        const call = await context.toolCall("exec", { exitCode: 0 });
+        const claim = workerClaim(context, call);
+        (claim.acceptance_evidence as unknown[]).splice(1, 1);
+        await context.reply(claim);
+      },
+    });
+    const outcome = await runtime.run();
+    assert.equal(outcome.status, "failed");
+    const events = runtime.runEvents(outcome);
+    assert.deepEqual(replayTransitions(events), []);
+    assert.equal(ofType(events, "attempt/repair_requested").length, 1, "evidence_repairs is a per-task budget");
+    assert.equal(ofType(events, "attempt/started").length, 2, "one triage retry");
+    assert.deepEqual(taskStates(events), ["ready", "running", "verifying", "failed", "retry_pending", "ready", "running", "verifying", "failed"]);
+    assert.match(ofType(events, "task/state_changed").at(-1)?.data.reason ?? "", /AC-2/);
   } finally {
     await workspace.cleanup();
   }
@@ -564,8 +616,9 @@ test("ADR-10 an rca-only debugger gets no write scope and must report a root cau
     assert.equal(runtime.driver.turns[0]?.input.packet?.write_mode, "rca-only");
     const events = runtime.runEvents(outcome);
     assert.deepEqual(replayTransitions(events), []);
-    const failure = ofType(events, "task/state_changed").find((event) => event.data.to === "failed");
-    assert.match(failure?.data.reason ?? "", /root_cause/);
+    const repair = ofType(events, "attempt/repair_requested")[0];
+    assert.ok(repair?.data.problems.some((problem) => /root_cause/.test(problem)), "a missing root cause is repaired in the same session");
+    assert.equal(ofType(events, "attempt/started").length, 1);
   } finally {
     await workspace.cleanup();
   }

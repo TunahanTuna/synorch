@@ -68,12 +68,13 @@ export function readClaim<T>(schema: z.ZodType<T>, log: AttemptLog, tool: Report
 
 export const WORKER_REPORT_INSTRUCTIONS = [
   `When you are done, call the \`${REPORT_TOOL_NAMES.task}\` tool exactly once as your last action with your status, summary and`,
-  "acceptance_evidence per criterion (evidence kinds: tool-call|test-run|file|artifact|event; ref = a tool call id from this attempt, produced_by: worker).",
-  "Changed files and the diff are computed by the harness; do not list them. If the tool is unavailable, reply with the same object in one ```json block.",
+  'acceptance_evidence per criterion (evidence kinds: tool-call|test-run|file; ref = the [#n] shown before a tool result of this attempt, written "#n"; produced_by: worker).',
+  "The harness runs the packet's verification commands itself after your turn and computes the diff; do not list changed files. If a ref does not resolve, the tool tells you which refs are valid.",
+  "If the tool is unavailable, reply with the same object in one ```json block.",
 ].join("\n");
 
 export const REVIEWER_REPORT_INSTRUCTIONS = [
   `Finish by calling the \`${REPORT_TOOL_NAMES.review}\` tool exactly once with a verdict (met|not_met|unverifiable) per criterion,`,
   "findings (F-<n>, blocker|major|minor|info) and decision accept|revise|block. If the tool is unavailable, reply with the same object in one ```json block.",
-  "A met verdict needs evidence you produced yourself in this review (your own tool call ids, produced_by: reviewer). Worker evidence alone is not enough.",
+  'A met verdict needs independent evidence: a tool call you made in this review (ref "#n", produced_by: reviewer) or a harness record from the completion packet\'s harness_evidence (kind harness-verification or harness-diff, its ref, produced_by: harness). Worker evidence alone is not enough.',
 ].join("\n");

@@ -12,6 +12,9 @@ import {
   ProviderFailure,
   RouteBlockedFailure,
   validateTransition,
+  DEFAULT_ORCHESTRATION_BUDGETS,
+  orchestrationBudgetsSchema,
+  type OrchestrationBudgets,
   type ApprovalBroker,
   type AttemptId,
   type BlobStore,
@@ -54,6 +57,7 @@ import {
   compileReviewerPacket,
   compileTaskPacket,
   createDeltaPacket,
+  deltaNotes,
   refreshPacketSources,
   validatePlan,
   type PacketSource,
@@ -85,8 +89,16 @@ export interface CoordinatorLimits {
   readonly maxPlanAttempts: number;
   /** Rejected plan candidates the orchestrator may revise (in-turn `plan_propose` rejections included); one more rejection fails the run. */
   readonly maxPlanRevisions: number;
+  /** Legacy alias of `budgets.triage_retries` (fresh attempts per task); an explicit `budgets` value wins. */
   readonly maxRetries: number;
+  /** Legacy alias of `budgets.review_revisions`; an explicit `budgets` value wins. */
   readonly maxRevisions: number;
+  /**
+   * Separate per-task budgets (ADR-18 D2): fresh attempts after triage, in-session evidence and
+   * verification repairs, implementer revisions after a review. An exhausted budget consults the
+   * orchestrator (`task_triage`); it never fails a task on its own.
+   */
+  readonly budgets: OrchestrationBudgets;
   readonly maxReviewAttempts: number;
   readonly maxRepackages: number;
   /** Follow-up tasks the orchestrator may add through `task_spawn` per run. */
@@ -97,8 +109,9 @@ export const DEFAULT_COORDINATOR_LIMITS: CoordinatorLimits = {
   concurrency: DEFAULT_CONCURRENCY,
   maxPlanAttempts: 2,
   maxPlanRevisions: 2,
-  maxRetries: 1,
-  maxRevisions: 2,
+  maxRetries: DEFAULT_ORCHESTRATION_BUDGETS.triage_retries,
+  maxRevisions: DEFAULT_ORCHESTRATION_BUDGETS.review_revisions,
+  budgets: DEFAULT_ORCHESTRATION_BUDGETS,
   maxReviewAttempts: 2,
   maxRepackages: 2,
   maxSpawnedTasks: 4,
@@ -118,7 +131,7 @@ export interface CoordinatorDependencies {
   readonly delegation?: DelegationSlot;
   /** Write `plan.json` and `report.md` under `.ai/tasks/<run-id>/` through the control-plane writer. */
   readonly ledger?: boolean;
-  readonly limits?: Partial<CoordinatorLimits>;
+  readonly limits?: Partial<Omit<CoordinatorLimits, "budgets">> & { readonly budgets?: Partial<OrchestrationBudgets> };
   readonly preferWorktree?: boolean;
   readonly sources?: (workspaceRoot: string) => SourceDigestReader;
   readonly userConfig?: unknown;
@@ -152,6 +165,10 @@ interface TaskEntry {
   failure: HarnessErrorCode | undefined;
   /** Notes handed to dependent tasks (e.g. criteria the orchestrator waived in triage). */
   notes: string[];
+  /** The last delta's notes, handed to the next attempt in its task message (never copied into packet decisions, F19). */
+  nextNotes: readonly string[];
+  /** A settled attempt whose worktree the next attempt of this task reuses (ADR-19); disposed with the task. */
+  reuseFrom: AttemptId | undefined;
 }
 
 type TriageOutcome =
@@ -175,16 +192,34 @@ const NOTE_LIMIT = 1000;
  * summary, skipped checks, unresolved items, unevidenced criteria and the orchestrator's guidance.
  */
 export function retryNotes(completion: CompletionPacket, criteria: readonly { readonly id: string }[], guidance: string | undefined, extra: readonly string[] = []): string[] {
-  const evidenced = new Set(completion.acceptance_evidence.map((entry) => entry.criterion_id));
   const notes = [
     `Previous attempt ${completion.attempt_id} reported ${completion.status}: ${completion.summary}`,
     ...(guidance === undefined ? [] : [`Orchestrator guidance: ${guidance}`]),
-    ...criteria.filter((criterion) => !evidenced.has(criterion.id)).map((criterion) => `Previous attempt did not evidence ${criterion.id}`),
+    ...criteria.flatMap((criterion) => {
+      const state = criterionEvidence(completion, criterion.id);
+      return state.status === "resolved" ? [] : [`Previous attempt did not evidence ${criterion.id}${state.reason === undefined ? "" : ` (${state.reason})`}`];
+    }),
     ...completion.skipped_checks.map((check) => `Previous attempt skipped ${check.check}: ${check.reason}`),
     ...completion.unresolved_risks.map((risk) => `Previous attempt left unresolved: ${risk}`),
     ...extra,
   ];
   return notes.map((note) => note.slice(0, NOTE_LIMIT)).slice(0, 20);
+}
+
+/**
+ * Whether a criterion is evidenced after resolution (ADR-18, F10): `resolved` when at least one of
+ * its pointers resolved (or the harness substituted), `unresolved` with the first reason when
+ * pointers were listed but none resolved, `missing` when none was listed.
+ */
+export function criterionEvidence(completion: CompletionPacket, id: string): { readonly status: "resolved" | "unresolved" | "missing"; readonly reason?: string } {
+  const entries = (completion.evidence_resolution ?? []).filter((entry) => entry.criterion_id === id);
+  if (entries.some((entry) => entry.status === "resolved")) return { status: "resolved" };
+  const failure = entries.find((entry) => entry.status === "unresolved");
+  if (failure !== undefined) return { status: "unresolved", reason: (failure.reason ?? "the pointer does not resolve").slice(0, 300) };
+  const listed = completion.acceptance_evidence.some((entry) => entry.criterion_id === id && entry.evidence.length > 0);
+  // A completion assembled before ADR-18 carries no resolution record; its listed pointers count as evidenced.
+  if (listed) return completion.evidence_resolution === undefined ? { status: "resolved" } : { status: "unresolved", reason: "the pointers were not verified" };
+  return { status: "missing" };
 }
 
 type TaskResult = "completed" | "failed";
@@ -253,10 +288,20 @@ function errorCodeOf(error: unknown): HarnessErrorCode {
   return "internal";
 }
 
+/** Resolves the per-task budgets: explicit `budgets` entries, then the legacy `maxRetries`/`maxRevisions`, then the defaults. */
+export function resolveBudgets(limits: CoordinatorDependencies["limits"]): OrchestrationBudgets {
+  return orchestrationBudgetsSchema.parse({
+    triage_retries: limits?.budgets?.triage_retries ?? limits?.maxRetries,
+    evidence_repairs: limits?.budgets?.evidence_repairs,
+    review_revisions: limits?.budgets?.review_revisions ?? limits?.maxRevisions,
+  });
+}
+
 export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
   const now = deps.now ?? (() => new Date());
   const platform = deps.platform ?? process.platform;
-  const limits: CoordinatorLimits = { ...DEFAULT_COORDINATOR_LIMITS, ...deps.limits };
+  const budgets = resolveBudgets(deps.limits);
+  const limits: CoordinatorLimits = { ...DEFAULT_COORDINATOR_LIMITS, ...deps.limits, maxRetries: budgets.triage_retries, maxRevisions: budgets.review_revisions, budgets };
   const listeners = new Set<(event: RenderEvent) => void>();
   const steering: string[] = [];
   let activeRecorder: RunRecorder | undefined;
@@ -497,7 +542,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
       ticker.unref?.();
 
       const workers = deps.createWorkers(
-        { runId, mode: request.policyMode, workspaceRoot: request.workspaceRoot, projectId, recorder },
+        { runId, mode: request.policyMode, workspaceRoot: request.workspaceRoot, projectId, recorder, budgets: limits.budgets },
         budget,
       );
       let approvedPlan: Plan = plan;
@@ -515,6 +560,8 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         summary: "",
         failure: undefined,
         notes: [],
+        nextNotes: [],
+        reuseFrom: undefined,
       });
       const createTask = async (entry: TaskEntry): Promise<void> => {
         await recorder.record(
@@ -587,7 +634,21 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         const delta = createDeltaPacket({ base, createdAt: now().toISOString(), notes: notes.slice(0, 20), evidence, newCriteria: [] });
         const blob = await recorder.putJson(delta, PACKET_MEDIA_TYPE);
         await recorder.record("task/packet_issued", { task_id: entry.taskId, kind: "delta", packet_digest: packetDigest(delta), blob }, { taskId: entry.taskId });
+        entry.nextNotes = deltaNotes(delta);
         return applyDelta(base, delta);
+      };
+
+      /**
+       * An attempt the task moves on from (retry, re-package, revision). A worktree is kept so the next
+       * attempt reuses it (reset to its base, ADR-19; the task's final cleanup disposes it); any other
+       * workspace is disposed at once, as before.
+       */
+      const retire = async (entry: TaskEntry, attemptId: AttemptId): Promise<void> => {
+        if (workers.attempt(attemptId)?.workspace.mode === "worktree") {
+          entry.reuseFrom = attemptId;
+          return;
+        }
+        await workers.dispose(attemptId);
       };
 
       /** Reviewer plan tasks that configure the mandatory review of `key` (tier, extra criteria, extra verification). */
@@ -605,12 +666,18 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
        * `task_triage`. Without a triage-capable planner, or without a decision, the harness retries
        * once with the report in the delta packet.
        */
-      const triageReport = async (entry: TaskEntry, packet: TaskContextPacket, completion: CompletionPacket, attemptId: AttemptId, retriesLeft: number): Promise<TriageOutcome> => {
+      const triageReport = async (
+        entry: TaskEntry,
+        packet: TaskContextPacket,
+        completion: CompletionPacket,
+        attemptId: AttemptId,
+        retriesLeft: number,
+        problems: readonly string[] = [],
+      ): Promise<TriageOutcome> => {
         const fallback: TriageOutcome = { kind: "retry", guidance: undefined };
         if (deps.planner.triage === undefined || deps.delegation === undefined) return fallback;
         const record = workers.attempt(attemptId);
         const acceptable = packet.write_mode !== "owned-paths" && (record?.changeSet?.changes.length ?? 0) === 0;
-        const reported = new Set(completion.acceptance_evidence.map((item) => item.criterion_id));
         const pending: PendingTriage = { key: entry.key, taskId: entry.taskId, acceptable, criteria: packet.acceptance_criteria.map((criterion) => criterion.id), retriesLeft, decision: undefined };
         await orchestratorTurn(async () => {
           triaging = pending;
@@ -626,13 +693,18 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
                 status: completion.status,
                 criteria: packet.acceptance_criteria.map((criterion) => {
                   const command = canRunCommands(packet.role) ? undefined : commandMentioned(criterion.statement, packet.verification.commands);
+                  const state = criterionEvidence(completion, criterion.id);
                   return {
                     id: criterion.id,
                     statement: criterion.statement,
-                    evidenced: reported.has(criterion.id),
+                    evidenced: state.status === "resolved",
+                    evidence: state.status,
+                    reason: state.reason,
                     capabilityNote: command === undefined ? undefined : `it needs "${command}" to run, which a ${packet.role} cannot do`,
                   };
                 }),
+                problems,
+                harnessChecks: (completion.harness_evidence?.verification ?? []).map((check) => `${check.command}: ${check.status}${check.exit_code === null ? "" : ` (exit ${check.exit_code})`}`),
                 summary: completion.summary,
                 skippedChecks: completion.skipped_checks.map((check) => `${check.check}: ${check.reason}`),
                 unresolvedRisks: completion.unresolved_risks,
@@ -702,6 +774,8 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             handle = await workers.dispatch(packet, signal, {
               ...(entry.route === undefined ? {} : { route: entry.route }),
               ...(seed === undefined ? {} : { seedArtifact: seed }),
+              ...(entry.nextNotes.length === 0 ? {} : { notes: entry.nextNotes }),
+              ...(entry.reuseFrom === undefined ? {} : { reuseAttempt: entry.reuseFrom }),
             });
           } catch (error) {
             if (errorCodeOf(error) === "stale_packet" && repackages < limits.maxRepackages) {
@@ -718,6 +792,8 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             return "failed";
           }
           entry.attempts.push(handle.attemptId);
+          entry.nextNotes = [];
+          entry.reuseFrom = undefined;
           await move(entry, "running", `attempt ${handle.attemptId} dispatched`);
           const completion = await handle.completion;
           entry.completion = completion;
@@ -726,10 +802,10 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           seed = undefined;
 
           const retry = async (reason: string, notes: readonly string[]): Promise<boolean> => {
-            if (retries >= limits.maxRetries) return false;
+            if (retries >= limits.budgets.triage_retries) return false;
             retries += 1;
             await workers.revert(handle.attemptId, signal);
-            await workers.dispose(handle.attemptId);
+            await retire(entry, handle.attemptId);
             await move(entry, "retry_pending", reason);
             packet = await issueDelta(entry, packet, notes, []);
             await move(entry, "ready", `retry ${retries} with a new attempt`);
@@ -745,7 +821,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             }
             repackages += 1;
             await workers.revert(handle.attemptId, signal);
-            await workers.dispose(handle.attemptId);
+            await retire(entry, handle.attemptId);
             packet = refreshPacketSources(packet, await currentDigests(packet.context.sources.map((source) => source.path), sources), now().toISOString());
             await move(entry, "ready", "re-packaged with fresh sources");
             continue;
@@ -758,16 +834,16 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           if (completion.status === "partial" || completion.status === "needs_context") {
             const claimedContext = completion.status === "needs_context";
             if (claimedContext) await move(entry, "needs_context", completion.summary);
-            const decision = await triageReport(entry, packet, completion, handle.attemptId, limits.maxRetries - retries);
+            const decision = await triageReport(entry, packet, completion, handle.attemptId, limits.budgets.triage_retries - retries);
             const notes = retryNotes(completion, packet.acceptance_criteria, decision.guidance);
             if (decision.kind === "accept") {
               waived = decision.waived;
               if (claimedContext) await move(entry, "running", "triage: the orchestrator accepted the findings");
-            } else if (decision.kind === "retry" && retries < limits.maxRetries) {
+            } else if (decision.kind === "retry" && retries < limits.budgets.triage_retries) {
               if (claimedContext) {
                 retries += 1;
                 await workers.revert(handle.attemptId, signal);
-                await workers.dispose(handle.attemptId);
+                await retire(entry, handle.attemptId);
                 packet = await issueDelta(entry, packet, notes, []);
                 await move(entry, "ready", `retry ${retries} with a new attempt and the previous report`);
                 continue;
@@ -788,7 +864,26 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           }
 
           await move(entry, "verifying", waived === undefined ? "completion received" : `triage accepted the findings${waived.length > 0 ? `; waived ${waived.join(", ")}` : ""}`);
-          const verification = await workers.verify(handle.attemptId, waived === undefined ? undefined : { waivedCriteria: waived });
+          let verification = await workers.verify(handle.attemptId, waived === undefined ? undefined : { waivedCriteria: waived });
+          if (verification.decision === "revise" && waived === undefined) {
+            // ADR-18 D2: the in-session repairs are spent (the worker manager repaired within its budget); the work
+            // is never dropped silently: the orchestrator decides with the resolved evidence and what is still wrong.
+            const decision = await triageReport(entry, packet, completion, handle.attemptId, limits.budgets.triage_retries - retries, verification.problems);
+            if (decision.kind === "accept") {
+              waived = decision.waived;
+              verification = await workers.verify(handle.attemptId, { waivedCriteria: waived });
+            } else if (decision.kind === "retry" && retries < limits.budgets.triage_retries) {
+              entry.failure = "verification_failed";
+              await move(entry, "failed", `verification revise: ${verification.problems.slice(0, 5).join("; ")}`);
+              if (await retry("triage: retrying after failed verification", retryNotes(completion, packet.acceptance_criteria, decision.guidance, verification.problems))) continue;
+              return "failed";
+            } else {
+              entry.failure = "verification_failed";
+              const why = decision.kind === "fail" ? `triage: the orchestrator failed the task${decision.guidance === undefined ? "" : ` (${decision.guidance})`}` : "no retries left";
+              await move(entry, "failed", `verification revise: ${verification.problems.slice(0, 5).join("; ")} | ${why}`);
+              return "failed";
+            }
+          }
           if (waived !== undefined && waived.length > 0 && verification.decision === "pass") {
             const waivedSet = new Set(waived);
             entry.notes = packet.acceptance_criteria
@@ -864,15 +959,20 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           }
           if (outcome === "revise") {
             await move(entry, "changes_requested", problems.slice(0, 5).join("; ") || "review requested changes");
-            if (revisions >= limits.maxRevisions) {
-              entry.failure = "verification_failed";
-              await move(entry, "cancelled", "revision limit reached");
-              return "failed";
+            if (revisions >= limits.budgets.review_revisions) {
+              // An exhausted review_revisions budget consults the orchestrator; only a triage retry buys one more revision.
+              const decision = await triageReport(entry, packet, completion, handle.attemptId, limits.budgets.triage_retries - retries, [`the review asked for changes again after ${revisions} revision(s)`, ...problems]);
+              if (decision.kind !== "retry" || retries >= limits.budgets.triage_retries) {
+                entry.failure = "verification_failed";
+                await move(entry, "cancelled", decision.kind === "fail" ? "revision limit reached; triage: the orchestrator failed the task" : "revision limit reached");
+                return "failed";
+              }
+              retries += 1;
             }
             revisions += 1;
             seed = artifact.artifactBytes;
             await workers.revert(handle.attemptId, signal);
-            await workers.dispose(handle.attemptId);
+            await retire(entry, handle.attemptId);
             packet = await issueDelta(entry, packet, problems.length > 0 ? problems : ["address the review findings"], findingsEvidence);
             await move(entry, "ready", `revision ${revisions} requested by review`);
             continue;

@@ -317,7 +317,7 @@ test("live run 1: an explorer's partial report goes to orchestrator triage inste
             { key: "fix-add", role: "implementer", dependsOn: ["explore-add"], owned: ["src-add.mjs"], tier: "complex_worker", verification: [VERIFY], criteria: ["node check.mjs prints ok"] },
           ]),
         ),
-        text("planned"),
+        // ADR-20: an accepted plan_propose ends the turn; the next request is the triage turn.
         calls((request) => {
           const lastUser = request.messages.filter((message) => message.role === "user").at(-1);
           triagePrompts.push(JSON.stringify(lastUser?.content ?? []));
@@ -363,7 +363,8 @@ test("live run 1: an explorer's partial report goes to orchestrator triage inste
     assert.equal(await readFile(path.join(sandbox.workspace, "src-add.mjs"), "utf8"), FIXED);
 
     assert.match(triagePrompts[0] ?? "", /Worker report needs your decision/);
-    assert.match(triagePrompts[0] ?? "", /AC-2 \[NOT evidenced\]/);
+    assert.match(triagePrompts[0] ?? "", /AC-1 \[resolved\]/, "F10: the triage prompt shows the evidence after resolution");
+    assert.match(triagePrompts[0] ?? "", /AC-2 \[missing\]/);
     assert.match(triagePrompts[0] ?? "", /explorer has no command execution tool/);
 
     const hello = frames[0];

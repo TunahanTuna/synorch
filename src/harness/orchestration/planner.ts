@@ -59,8 +59,22 @@ export interface TriageInput {
   readonly task: { readonly key: string; readonly taskId: string; readonly role: string; readonly risk: string; readonly writeMode: string };
   readonly attempt: number;
   readonly status: string;
-  /** Criteria of the task, each marked with whether the report evidenced it. */
-  readonly criteria: readonly { readonly id: string; readonly statement: string; readonly evidenced: boolean; readonly capabilityNote: string | undefined }[];
+  /**
+   * Criteria of the task with their evidence *after resolution* (ADR-18, F10): `resolved`,
+   * `unresolved` (with the reason) or `missing`; `evidenced` is `evidence === "resolved"`.
+   */
+  readonly criteria: readonly {
+    readonly id: string;
+    readonly statement: string;
+    readonly evidenced: boolean;
+    readonly evidence?: "resolved" | "unresolved" | "missing";
+    readonly reason?: string | undefined;
+    readonly capabilityNote: string | undefined;
+  }[];
+  /** Verification problems that remained after the in-session repairs (a completed report that did not verify). */
+  readonly problems?: readonly string[];
+  /** The harness-run verification commands and their outcome. */
+  readonly harnessChecks?: readonly string[];
   readonly summary: string;
   readonly skippedChecks: readonly string[];
   readonly unresolvedRisks: readonly string[];
@@ -91,15 +105,24 @@ export interface Planner {
   triage?(input: TriageInput, signal: AbortSignal): Promise<void>;
 }
 
+function evidenceLabel(criterion: TriageInput["criteria"][number]): string {
+  const status = criterion.evidence ?? (criterion.evidenced ? "resolved" : "missing");
+  return status === "unresolved" ? `unresolved: ${criterion.reason ?? "the pointers do not resolve"}` : status;
+}
+
 export function renderTriagePrompt(input: TriageInput): string {
   const criteria = input.criteria.map(
-    (criterion) => `- ${criterion.id} [${criterion.evidenced ? "evidenced" : "NOT evidenced"}]: ${criterion.statement}${criterion.capabilityNote === undefined ? "" : ` (harness note: ${criterion.capabilityNote})`}`,
+    (criterion) => `- ${criterion.id} [${evidenceLabel(criterion)}]: ${criterion.statement}${criterion.capabilityNote === undefined ? "" : ` (harness note: ${criterion.capabilityNote})`}`,
   );
+  const problems = input.problems ?? [];
+  const checks = input.harnessChecks ?? [];
   return [
     `Worker report needs your decision (plan v${input.planVersion}, goal: ${input.goal}).`,
-    `Task ${input.task.key} ${input.task.taskId} (${input.task.role}, ${input.task.risk}, ${input.task.writeMode}), attempt ${input.attempt}, reported ${input.status}.`,
+    `Task ${input.task.key} ${input.task.taskId} (${input.task.role}, ${input.task.risk}, ${input.task.writeMode}), attempt ${input.attempt}, reported ${input.status}${problems.length > 0 ? " but did not pass verification after its in-session repairs" : ""}.`,
     `Summary: ${input.summary}`,
-    `Acceptance criteria:\n${criteria.join("\n")}`,
+    `Acceptance criteria (evidence as the harness resolved it):\n${criteria.join("\n")}`,
+    checks.length > 0 ? `Harness-run verification:\n${checks.map((line) => `- ${line}`).join("\n")}` : "",
+    problems.length > 0 ? `Verification problems:\n${problems.slice(0, 10).map((line) => `- ${line}`).join("\n")}` : "",
     input.skippedChecks.length > 0 ? `Skipped checks:\n${input.skippedChecks.map((line) => `- ${line}`).join("\n")}` : "",
     input.unresolvedRisks.length > 0 ? `Unresolved:\n${input.unresolvedRisks.map((line) => `- ${line}`).join("\n")}` : "",
     `Tasks:\n${input.tasks.map((line) => `- ${line}`).join("\n")}`,
@@ -127,12 +150,8 @@ export function renderConsultPrompt(input: ConsultInput): string {
 }
 
 export const PLAN_FORMAT = [
-  `Call the \`${REPORT_TOOL_NAMES.plan}\` tool with the plan (if the tool is unavailable, reply with exactly one \`\`\`json block holding it):`,
-  '{"goal": "...", "risk": "trivial|standard|high-risk", "scope": ["src/**"],',
-  ' "tasks": [{"key": "kebab-key", "role": "explorer|implementer|debugger|reviewer", "objective": "...", "depends_on": [],',
-  '   "owned_paths": [], "read_paths": [], "risk": "trivial|standard|high-risk", "model_tier": "complex_worker|fast_worker|orchestrator",',
-  '   "acceptance_criteria": [{"id": "AC-1", "statement": "..."}], "verification": ["pnpm test"]}],',
-  ' "expected_external_effects": [], "verification": [], "budget": {"max_wall_time_seconds": 1800, "max_steps": 100}, "assumptions": []}',
+  // ADR-20 / F19: the plan's shape is the plan_propose tool schema; repeating a JSON template here re-bills it on every request.
+  `Call the \`${REPORT_TOOL_NAMES.plan}\` tool once with the whole plan; its schema lists every field (if the tool is unavailable, reply with exactly one \`\`\`json block holding the same object).`,
   "Rules: explorers and reviewers own no paths; two tasks without a dependency between them never own overlapping paths;",
   "nobody owns the whole workspace, .git or .synorch. An explorer runs no commands: its verification is empty and its criteria are about what to find by reading;",
   "put commands on the implementer that owns the change. A reviewer task depends on the standard/high-risk task(s) it reviews. You never implement anything yourself.",

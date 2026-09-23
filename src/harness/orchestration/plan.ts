@@ -98,10 +98,23 @@ function uniqueSources(sources: readonly PacketSource[]): PacketSource[] {
   return [...seen.values()].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
 }
 
+/** Lower bound of a task's step limit: a real model spends several steps on reads, the change, the check and the report (F13). */
+export const MIN_TASK_STEPS = 25;
+
+/**
+ * A task's share of the plan's step budget (F13): divided among the tasks that dispatch an attempt
+ * (reviewer plan tasks never do; they configure the review of their dependencies), never below
+ * `MIN_TASK_STEPS`. The run's own budget tracker still bounds the run as a whole.
+ */
+export function perTaskStepLimit(plan: Pick<Plan, "budget" | "tasks">): number {
+  const dispatching = Math.max(1, plan.tasks.filter((task) => task.role !== "reviewer").length);
+  return Math.max(MIN_TASK_STEPS, Math.min(500, Math.floor(plan.budget.max_steps / dispatching)));
+}
+
 /** Compiles the full v2 packet for one plan task; the schema re-validates every authority rule. */
 export function compileTaskPacket(input: CompilePacketInput): TaskContextPacket {
   const { plan, task } = input;
-  const perTaskSteps = Math.max(1, Math.min(500, Math.floor(plan.budget.max_steps / plan.tasks.length) || 1));
+  const perTaskSteps = perTaskStepLimit(plan);
   const stopConditions = [
     "A change outside owned_paths is required",
     "A cited source changed since the packet was created",
@@ -201,8 +214,21 @@ export class DeltaMismatchError extends Error {
 }
 
 /**
+ * What a delta tells the next attempt beyond criteria and facts: its notes and the evidence to
+ * address. They reach the worker in its task message (`renderWorkerMessage`), not as packet
+ * decisions, so a retried packet does not grow with a copy of the delta (F19).
+ */
+export function deltaNotes(delta: DeltaTaskPacket): string[] {
+  return [
+    ...delta.delta.notes,
+    ...delta.delta.new_evidence.map((evidence) => `Address evidence ${evidence.kind}:${evidence.ref} (${evidence.produced_by})`),
+  ];
+}
+
+/**
  * The effective packet a worker sees after a delta. Scope, role, limits and write mode are carried
- * over verbatim from the base, so a delta can never widen authority.
+ * over verbatim from the base, so a delta can never widen authority. The delta's notes are not
+ * copied into `decisions` (see `deltaNotes`).
  */
 export function applyDelta(base: TaskContextPacket, delta: DeltaTaskPacket): TaskContextPacket {
   if (delta.task_id !== base.task_id) throw new DeltaMismatchError("delta targets another task");
@@ -215,11 +241,7 @@ export function applyDelta(base: TaskContextPacket, delta: DeltaTaskPacket): Tas
   return taskContextPacketSchema.parse({
     ...base,
     known_facts: [...base.known_facts, ...delta.delta.new_known_facts],
-    decisions: [
-      ...base.decisions,
-      ...delta.delta.notes.map((note) => `Revision note: ${note}`),
-      ...delta.delta.new_evidence.map((evidence) => `Address evidence ${evidence.kind}:${evidence.ref} (${evidence.produced_by})`),
-    ],
+    decisions: base.decisions,
     acceptance_criteria: [...base.acceptance_criteria, ...added],
     context: { ...base.context, created_at: delta.created_at, sources: [...sources.values()] },
   });

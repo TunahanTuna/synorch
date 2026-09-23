@@ -1,44 +1,84 @@
-import { lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import path from "node:path";
 import {
   canonicalJson,
+  DEPENDENCY_LINK_DIRECTORIES,
+  foldPathCase,
   HarnessError,
+  isCaseInsensitivePlatform,
   isReservedWritePattern,
+  pathPatternsOverlap,
+  sameContent,
   sha256,
+  staticPrefix,
+  workspaceDigest,
   type AttemptId,
   type BlobStore,
+  type ContentIdentity,
   type Digest,
   type IsolatedWorkspace,
   type IsolationCreateOptions,
+  type IsolationFallbackReason,
   type IsolationProvider,
   type ProjectId,
   type TaskContextPacket,
 } from "../contracts/index.ts";
-import { gitCheckIgnored, gitDirtyPaths, gitHead, gitIgnoredEntries, gitShowHead, gitTopLevel, runGit, type GitRunner } from "./git.ts";
-import { findScopeViolations, matchesAny, normalizeWorkspacePath } from "./paths.ts";
+import {
+  GitCommandError,
+  gitAvailable,
+  gitCheckIgnored,
+  gitDirtyPaths,
+  gitHashBytes,
+  gitHashObjects,
+  gitHead,
+  gitIgnoredEntries,
+  gitIgnoredSubset,
+  gitShowFiltered,
+  gitSmudgeBlob,
+  gitSubmodulePaths,
+  gitTopLevel,
+  gitTrackedPaths,
+  gitTreeEntries,
+  runGit,
+  type GitRunner,
+  type GitTreeEntry,
+} from "./git.ts";
+import { findScopeViolations, isLiteralPattern, matchesAny, normalizeWorkspacePath } from "./paths.ts";
+import { contentIdentities, createWorkspaceDigestReader, resolveOnDiskPath } from "./workspace-digest.ts";
 
 /**
- * Per-attempt isolation (ADR-07).
+ * Per-attempt isolation (ADR-07, ADR-19).
  *
- * - `worktree`: a detached git worktree at `<home>/.synorch/worktrees/<project-id>/<attempt-id>`
- *   on `HEAD`; the main workspace is untouched until `integrate`.
+ * - `worktree`: a detached git worktree at `<worktrees>/<project-hash>/<attempt-hash>` on `HEAD`
+ *   (short hashed names keep Windows paths short; git runs with `core.longpaths=true`). The main
+ *   workspace is untouched until `integrate`. Dirty or untracked read inputs are overlaid from the
+ *   main tree and ignored dependency directories (`DEPENDENCY_LINK_DIRECTORIES`) are linked in
+ *   (junction on Windows); neither is ever integrated back. A retry of the same task reuses the
+ *   worktree (`IsolationCreateOptions.reuse`): it is reset to its base instead of recreated. When
+ *   creating the worktree fails, a non-high-risk task falls back to `scoped-dir` with a recorded
+ *   reason, and nothing is left behind.
  * - `scoped-dir`: writes happen in place, limited by policy to `owned_paths`. A snapshot of the
- *   whole tree (ignored files included, bounded by `SCOPED_SNAPSHOT_LIMITS`) is taken first and
- *   persisted under `<worktrees>/<project-id>/<attempt-id>.scoped`, so every change anywhere is
- *   seen (changed ⊆ owned), a failed attempt can be reverted, and crash recovery can revert a
- *   crashed attempt's partial writes (`pruneOrphanedAttempts`). Scoped-dir attempts of different
- *   tasks run one at a time: in a shared directory a change cannot be attributed to one of two
- *   concurrent writers, so a second one waits for the first to be disposed.
+ *   tree (ignored files included, but not ignored directories outside the owned paths; bounded by
+ *   `SCOPED_SNAPSHOT_LIMITS`) is taken first and persisted under `<worktrees>/<project-hash>/
+ *   <attempt-hash>.scoped`, so every change is seen (changed ⊆ owned), a failed attempt can be
+ *   reverted, and crash recovery can revert a crashed attempt's partial writes
+ *   (`pruneOrphanedAttempts`). Scoped-dir attempts of different tasks run one at a time.
  * - `shared-read-only`: explorers and reviewers; nothing may change.
  *
  * Every workspace can pin its changes as an artifact: a canonical JSON document of
  * `{path, before, after, content}` entries whose sha256 is the artifact digest a review binds to.
+ * `before`/`after` are `workspaceDigest`s in the attempt's own workspace (ADR-19). Integrate
+ * compares the main tree by `ContentIdentity` (filtered git blob id) and writes content in the main
+ * tree's representation (smudge filter, EOL), so autocrlf, `.gitattributes eol`, clean/smudge
+ * filters and Git LFS never produce a false conflict.
  *
  * Link safety (SEC-H4): integrate, seed and revert resolve every target segment by segment and
  * refuse any path that traverses a symbolic link or junction, resolves elsewhere or is a
  * multiply linked file; they never follow a link out of the workspace. Integrate also refuses a
  * `.gitignore` change that would expose an ignored link unless the link is owned and stays inside.
+ * A worktree is always removed with its dependency links unlinked first and with Node's `rm`,
+ * which never descends into a link (`git worktree remove` would empty a junction's target).
  */
 
 export const ARTIFACT_FORMAT = "synorch.artifact/v1";
@@ -57,8 +97,10 @@ export const SCOPED_SNAPSHOT_LIMITS = {
   keepTotalBytes: 256 * 1024 * 1024,
 } as const;
 
-/** Directory names never walked. `.git` is skipped except its `config` and `hooks/` at the root. */
-const WALK_SKIP = new Set([".git", "node_modules"]);
+/** Length of the hashed project and attempt directory names under the worktrees root. */
+export const WORKSPACE_NAME_LENGTH = 12;
+
+const DEPENDENCY_NAMES: ReadonlySet<string> = new Set(DEPENDENCY_LINK_DIRECTORIES);
 
 export interface ArtifactChange {
   readonly path: string;
@@ -71,8 +113,12 @@ export interface ChangeSet {
   readonly artifactBytes: Uint8Array;
   readonly changes: readonly ArtifactChange[];
   readonly contents: ReadonlyMap<string, Buffer | null>;
-  /** Changed paths that are links, special files or not expressible as workspace paths; integrate refuses them. */
+  /** Changed paths that are links, special files, inside a submodule, ambiguous or not expressible as workspace paths; integrate refuses them. */
   readonly unsafe: readonly string[];
+  /** Why an `unsafe` entry cannot be integrated, when more specific than "link or special file". */
+  readonly unsafeReasons?: ReadonlyMap<string, string>;
+  /** On-disk spelling of a changed path when it differs from its NFC workspace path (an NFD-created name). */
+  readonly diskPaths?: ReadonlyMap<string, string>;
 }
 
 export interface OrchestratedWorkspace extends IsolatedWorkspace {
@@ -119,6 +165,8 @@ export interface AttemptOwner {
   readonly host: string;
   readonly workspace_root: string;
   readonly created_at: string;
+  /** Dependency links inside the worktree, unlinked before the worktree is removed. */
+  readonly dependency_links?: readonly string[];
 }
 
 function isolationError(code: "sandbox_insufficient" | "verification_failed" | "policy_denied" | "internal", message: string): HarnessError {
@@ -131,12 +179,32 @@ function isMissingError(error: unknown): boolean {
 }
 
 function sameFsPath(left: string, right: string, platform: NodeJS.Platform): boolean {
-  return platform === "win32" || platform === "darwin" ? left.toLowerCase() === right.toLowerCase() : left === right;
+  return isCaseInsensitivePlatform(platform) ? foldPathCase(left) === foldPathCase(right) : left === right;
 }
 
 function contains(root: string, target: string): boolean {
   const relative = path.relative(root, target);
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/** Short, stable directory name for a project or attempt id (keeps worktree paths short on Windows). */
+export function workspaceDirectoryName(id: string): string {
+  return sha256(id).slice("sha256:".length, "sha256:".length + WORKSPACE_NAME_LENGTH);
+}
+
+/** `<worktreesRoot>/<project-hash>`: where one project's attempt workspaces live. */
+export function projectWorkspacesDirectory(worktreesRoot: string, projectId: string): string {
+  return path.join(worktreesRoot, workspaceDirectoryName(projectId));
+}
+
+function segmentsUnder(prefix: readonly string[], value: readonly string[], platform: NodeJS.Platform): boolean {
+  if (prefix.length > value.length) return false;
+  return prefix.every((segment, index) => sameFsPath(segment, value[index] ?? "", platform));
+}
+
+/** True when `candidate` is `ancestor` or below it (workspace-relative, platform path policy). */
+function isAtOrBelow(candidate: string, ancestor: string, platform: NodeJS.Platform): boolean {
+  return segmentsUnder(ancestor.split("/"), candidate.split("/"), platform);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -162,12 +230,14 @@ function workspaceRelative(relative: string, allowReserved: boolean): string {
  * The absolute path for writing `relative` under `root`. Each existing segment is checked with
  * `lstat` and `realpath`: a symbolic link, junction or other reparse point, a non-directory
  * parent, a directory target or a multiply linked file is refused, so the write can never land
- * outside `root`.
+ * outside `root`. The on-disk spelling is kept (an NFD-created name is written as it is on disk).
  */
 export async function resolveLinkSafeTarget(root: string, relative: string, platform: NodeJS.Platform, options: TargetOptions = {}): Promise<string> {
   const normalized = workspaceRelative(relative, options.allowReserved === true);
   const canonicalRoot = await realpath(root);
-  const segments = normalized.split("/");
+  const spelled = relative.replaceAll("\\", "/").split("/").filter((segment) => segment.length > 0 && segment !== ".");
+  // Keep the caller's spelling only when it differs from the workspace path by Unicode form alone.
+  const segments = spelled.join("/").normalize("NFC") === normalized ? spelled : normalized.split("/");
   let current = canonicalRoot;
   for (const [index, segment] of segments.entries()) {
     current = path.join(current, segment);
@@ -219,6 +289,23 @@ async function removeSafe(root: string, relative: string, platform: NodeJS.Platf
   }
 }
 
+/** Removes a symbolic link or junction itself, never what it points to; anything else is left alone. */
+async function unlinkLink(file: string): Promise<void> {
+  let info;
+  try {
+    info = await lstat(file);
+  } catch {
+    return;
+  }
+  if (!info.isSymbolicLink()) return;
+  try {
+    await unlink(file);
+  } catch {
+    // A directory junction on some Windows versions only yields to rmdir, which removes the reparse point, not the target.
+    await rmdir(file).catch(() => undefined);
+  }
+}
+
 type Observed =
   | { readonly kind: "absent" }
   | { readonly kind: "file"; readonly bytes: Buffer }
@@ -256,17 +343,12 @@ function observedDigest(observed: Observed): Digest | null {
     case "absent":
       return null;
     case "file":
-      return sha256(observed.bytes);
+      return workspaceDigest(observed.bytes);
     case "link":
       return sha256(`link:${observed.target}`);
     case "other":
       return sha256("other");
   }
-}
-
-async function readFileBytes(root: string, relative: string): Promise<Buffer | null> {
-  const observed = await observe(root, relative);
-  return observed.kind === "file" ? observed.bytes : null;
 }
 
 async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
@@ -323,15 +405,18 @@ export function decodeArtifact(bytes: Uint8Array): ArtifactDocument {
   return parsed as ArtifactDocument;
 }
 
+/** Pre-attempt state of an attempt workspace. Paths are as named on disk. */
 interface Baseline {
   beforeDigest(relative: string): Promise<Digest | null>;
   /** Pre-attempt bytes; `null` when the path did not exist, `undefined` when no copy is available. */
   beforeContent(relative: string): Promise<Buffer | null | undefined>;
   candidates(signal: AbortSignal): Promise<readonly string[]>;
+  /** Candidates that can never be integrated, with the reason (for example: inside a submodule). */
+  flagged?(): ReadonlyMap<string, string>;
 }
 
 // ---------------------------------------------------------------------------------------------
-// Scoped-dir snapshot (SEC-M1, SEC-M3)
+// Tree walk and scoped-dir snapshot (SEC-M1, SEC-M3, ADR-19 B9)
 // ---------------------------------------------------------------------------------------------
 
 interface TreeEntry {
@@ -339,7 +424,16 @@ interface TreeEntry {
   readonly kind: "file" | "link";
 }
 
-async function walkTree(root: string, limit: number, skip: ReadonlySet<string> = WALK_SKIP, excluded?: string): Promise<TreeEntry[]> {
+interface WalkOptions {
+  /** Directories not descended into (`relative` is the directory's workspace path). */
+  readonly skipDirectory?: (relative: string, name: string) => boolean;
+  /** Synorch's own attempt data never counts as a workspace change, even when it lives inside the tree. */
+  readonly excluded?: string;
+  /** Watch the repository's own `.git/config` and `.git/hooks/` at the root (they execute or configure code). */
+  readonly watchGitConfig?: boolean;
+}
+
+async function walkTree(root: string, limit: number, options: WalkOptions = {}): Promise<TreeEntry[]> {
   const entries: TreeEntry[] = [];
   const visit = async (relative: string, filter?: (name: string) => boolean): Promise<void> => {
     const directory = relative === "" ? root : path.join(root, ...relative.split("/"));
@@ -354,13 +448,12 @@ async function walkTree(root: string, limit: number, skip: ReadonlySet<string> =
       const childRelative = relative === "" ? child.name : `${relative}/${child.name}`;
       if (child.isSymbolicLink()) entries.push({ relative: childRelative, kind: "link" });
       else if (child.isDirectory()) {
-        // Synorch's own attempt data never counts as a workspace change, even when it lives inside the tree.
-        if (excluded !== undefined && sameFsPath(path.resolve(directory, child.name), path.resolve(excluded), process.platform)) continue;
-        if (skip.has(child.name)) {
-          // The repository's own hooks and config execute or configure code: watch them.
-          if (relative === "" && child.name === ".git") await visit(childRelative, (name) => name === "config" || name === "hooks");
+        if (options.excluded !== undefined && sameFsPath(path.resolve(directory, child.name), path.resolve(options.excluded), process.platform)) continue;
+        if (options.watchGitConfig === true && relative === "" && child.name === ".git") {
+          await visit(childRelative, (name) => name === "config" || name === "hooks");
           continue;
         }
+        if (options.skipDirectory?.(childRelative, child.name) === true) continue;
         await visit(childRelative);
       } else if (child.isFile()) entries.push({ relative: childRelative, kind: "file" });
       if (entries.length > limit) {
@@ -370,6 +463,20 @@ async function walkTree(root: string, limit: number, skip: ReadonlySet<string> =
   };
   await visit("");
   return entries;
+}
+
+/**
+ * Directories a scoped snapshot never walks: `.git` (except config/hooks), the ignored directories
+ * git reports (`skipDirs`) and dependency directories by name, unless an owned path overlaps them.
+ */
+function scopedSkipRule(skipDirs: readonly string[], ownedPaths: readonly string[], platform: NodeJS.Platform): (relative: string, name: string) => boolean {
+  const key = (value: string): string => (isCaseInsensitivePlatform(platform) ? foldPathCase(value) : value);
+  const skipped = new Set(skipDirs.map(key));
+  return (relative, name) => {
+    if (name === ".git") return true;
+    if (skipped.has(key(relative))) return true;
+    return DEPENDENCY_NAMES.has(name) && !ownedPaths.some((owned) => pathPatternsOverlap(owned, relative));
+  };
 }
 
 type Method = "h" | "s" | "l";
@@ -405,7 +512,7 @@ async function sign(root: string, entry: TreeEntry, method: Method | undefined, 
     if (hash) {
       const bytes = await readFile(file);
       if (budget !== undefined) budget.hashed += bytes.byteLength;
-      const digest = sha256(bytes);
+      const digest = workspaceDigest(bytes);
       return { method: "h", signature: digest, digest, bytes };
     }
     const signature = `stat:${info.size}:${info.mtimeMs}`;
@@ -422,6 +529,8 @@ interface ScopedManifest {
   readonly owned_paths: readonly string[];
   readonly git_head: string | null;
   readonly created_at: string;
+  /** Ignored directories the snapshot did not walk (and later walks skip too). */
+  readonly skip_dirs?: readonly string[];
   readonly entries: Readonly<Record<string, readonly [Method, string, string, boolean]>>;
 }
 
@@ -434,6 +543,8 @@ class ScopedSnapshot implements Baseline {
   private readonly directory: string;
   private readonly records: ReadonlyMap<string, SnapshotRecord>;
   private readonly git: { readonly runner: GitRunner; readonly head: string } | undefined;
+  private readonly skipDirs: readonly string[];
+  private readonly platform: NodeJS.Platform;
   public readonly ownedPaths: readonly string[];
 
   private constructor(
@@ -442,12 +553,24 @@ class ScopedSnapshot implements Baseline {
     records: ReadonlyMap<string, SnapshotRecord>,
     git: { readonly runner: GitRunner; readonly head: string } | undefined,
     ownedPaths: readonly string[],
+    skipDirs: readonly string[],
+    platform: NodeJS.Platform,
   ) {
     this.root = root;
     this.directory = directory;
     this.records = records;
     this.git = git;
     this.ownedPaths = ownedPaths;
+    this.skipDirs = skipDirs;
+    this.platform = platform;
+  }
+
+  private walk(): Promise<TreeEntry[]> {
+    return walkTree(this.root, SCOPED_SNAPSHOT_LIMITS.maxEntries, {
+      excluded: path.dirname(this.directory),
+      watchGitConfig: true,
+      skipDirectory: scopedSkipRule(this.skipDirs, this.ownedPaths, this.platform),
+    });
   }
 
   public static async take(options: {
@@ -456,8 +579,13 @@ class ScopedSnapshot implements Baseline {
     readonly owner: AttemptOwner;
     readonly ownedPaths: readonly string[];
     readonly git: { readonly runner: GitRunner; readonly head: string } | undefined;
+    readonly skipDirs: readonly string[];
+    readonly platform: NodeJS.Platform;
+    /** Clean tracked files: restorable from the base commit (digest-verified), so no copy is kept. */
+    readonly restorableFromGit?: ReadonlySet<string>;
   }): Promise<ScopedSnapshot> {
-    const entries = await walkTree(options.root, SCOPED_SNAPSHOT_LIMITS.maxEntries, WALK_SKIP, path.dirname(options.directory));
+    const snapshot = new ScopedSnapshot(options.root, options.directory, new Map(), options.git, options.ownedPaths, options.skipDirs, options.platform);
+    const entries = await snapshot.walk();
     await rm(options.directory, { recursive: true, force: true });
     await mkdir(path.join(options.directory, "blobs"), { recursive: true, mode: 0o700 });
     await writeJsonAtomic(path.join(options.directory, SCOPED_OWNER_FILE), options.owner);
@@ -470,7 +598,8 @@ class ScopedSnapshot implements Baseline {
       const signed = await sign(options.root, entry, undefined, budget);
       if (signed === undefined) continue;
       let kept = false;
-      if (signed.bytes !== undefined && keptBytes + signed.bytes.byteLength <= SCOPED_SNAPSHOT_LIMITS.keepTotalBytes) {
+      const fromGit = options.git !== undefined && options.restorableFromGit?.has(entry.relative) === true;
+      if (!fromGit && signed.bytes !== undefined && keptBytes + signed.bytes.byteLength <= SCOPED_SNAPSHOT_LIMITS.keepTotalBytes) {
         const name = signed.digest.slice("sha256:".length);
         if (!written.has(name)) {
           await writeFile(path.join(options.directory, "blobs", name), signed.bytes, { mode: 0o600 });
@@ -488,14 +617,15 @@ class ScopedSnapshot implements Baseline {
       owned_paths: options.ownedPaths,
       git_head: options.git?.head ?? null,
       created_at: new Date().toISOString(),
+      skip_dirs: options.skipDirs,
       entries: Object.fromEntries([...records].map(([relative, record]) => [relative, [record.method, record.signature, record.digest, record.kept] as const])),
     };
     await writeJsonAtomic(path.join(options.directory, SCOPED_MANIFEST_FILE), manifest);
-    return new ScopedSnapshot(options.root, options.directory, records, options.git, options.ownedPaths);
+    return new ScopedSnapshot(options.root, options.directory, records, options.git, options.ownedPaths, options.skipDirs, options.platform);
   }
 
   /** Reloads a persisted snapshot (crash recovery); undefined when it is missing or unreadable. */
-  public static async load(directory: string, git: GitRunner): Promise<ScopedSnapshot | undefined> {
+  public static async load(directory: string, git: GitRunner, platform: NodeJS.Platform): Promise<ScopedSnapshot | undefined> {
     const manifest = (await readJson(path.join(directory, SCOPED_MANIFEST_FILE))) as Partial<ScopedManifest> | undefined;
     if (manifest?.format !== SCOPED_BASELINE_FORMAT || typeof manifest.workspace_root !== "string" || manifest.entries === undefined) return undefined;
     const records = new Map<string, SnapshotRecord>();
@@ -504,7 +634,7 @@ class ScopedSnapshot implements Baseline {
       records.set(relative, { method, signature, digest: digest as Digest, kept });
     }
     const head = typeof manifest.git_head === "string" ? { runner: git, head: manifest.git_head } : undefined;
-    return new ScopedSnapshot(manifest.workspace_root, directory, records, head, manifest.owned_paths ?? []);
+    return new ScopedSnapshot(manifest.workspace_root, directory, records, head, manifest.owned_paths ?? [], manifest.skip_dirs ?? [], platform);
   }
 
   public get workspaceRoot(): string {
@@ -521,17 +651,18 @@ class ScopedSnapshot implements Baseline {
     if (record.method === "l") return undefined;
     if (record.kept) {
       const bytes = await readFile(path.join(this.directory, "blobs", record.digest.slice("sha256:".length))).catch(() => undefined);
-      if (bytes !== undefined && sha256(bytes) === record.digest) return bytes;
+      if (bytes !== undefined && workspaceDigest(bytes) === record.digest) return bytes;
     }
     if (this.git !== undefined && record.method === "h") {
-      const bytes = await gitShowHead(this.git.runner, this.root, relative);
-      if (bytes !== undefined && sha256(bytes) === record.digest) return bytes;
+      // The checkout form (smudge + EOL) of the base blob; used only when it is byte-identical to the snapshot.
+      const bytes = await gitShowFiltered(this.git.runner, this.root, this.git.head, relative);
+      if (bytes !== undefined && workspaceDigest(bytes) === record.digest) return bytes;
     }
     return undefined;
   }
 
   public async candidates(): Promise<readonly string[]> {
-    const now = await walkTree(this.root, SCOPED_SNAPSHOT_LIMITS.maxEntries, WALK_SKIP, path.dirname(this.directory));
+    const now = await this.walk();
     const seen = new Set<string>();
     const changed: string[] = [];
     for (const entry of now) {
@@ -560,7 +691,7 @@ interface RevertOutcome {
   readonly unrestorable: string[];
 }
 
-/** Restores `paths` from `baseline`, link-safely; a path that cannot be restored is reported, never forced. */
+/** Restores `paths` (as named on disk) from `baseline`, link-safely; a path that cannot be restored is reported, never forced. */
 async function restorePaths(root: string, baseline: Baseline, paths: readonly string[], platform: NodeJS.Platform): Promise<RevertOutcome> {
   const restored: string[] = [];
   const unrestorable: string[] = [];
@@ -590,6 +721,44 @@ async function restorePaths(root: string, baseline: Baseline, paths: readonly st
 }
 
 // ---------------------------------------------------------------------------------------------
+// EOL helpers (integrate keeps the main file's line-ending style when git sees the same blob)
+// ---------------------------------------------------------------------------------------------
+
+type EolStyle = "lf" | "crlf" | "mixed" | "none";
+
+function eolStyle(bytes: Buffer): EolStyle {
+  let lf = 0;
+  let crlf = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    const byte = bytes[index];
+    if (byte === 0x0a) {
+      if (index > 0 && bytes[index - 1] === 0x0d) crlf += 1;
+      else lf += 1;
+    } else if (byte === 0x0d && bytes[index + 1] !== 0x0a) return "mixed";
+  }
+  if (lf === 0 && crlf === 0) return "none";
+  if (lf > 0 && crlf > 0) return "mixed";
+  return lf > 0 ? "lf" : "crlf";
+}
+
+function withEol(bytes: Buffer, style: "lf" | "crlf"): Buffer {
+  const lf = Buffer.from(bytes.toString("latin1").replace(/\r\n/g, "\n"), "latin1");
+  return style === "lf" ? lf : Buffer.from(lf.toString("latin1").replace(/\n/g, "\r\n"), "latin1");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Worktree failures (B7)
+// ---------------------------------------------------------------------------------------------
+
+function classifyWorktreeFailure(error: unknown): { readonly reason: IsolationFallbackReason; readonly detail: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  const detail = message.replace(/\s+/g, " ").trim().slice(0, 500);
+  if (error instanceof GitCommandError && error.spawnCode !== undefined) return { reason: "git-unavailable", detail };
+  if (/filename too long|file name too long|too long|ENAMETOOLONG|too big|path.*exceeds/i.test(message)) return { reason: "path-too-long", detail };
+  return { reason: "worktree-create-failed", detail };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------------------------
 
@@ -599,6 +768,26 @@ interface ScopedSlot {
   release(): void;
   /** Paths another workspace of this provider integrated into the main tree while this one was active. */
   readonly foreign: Map<string, Digest | null>;
+}
+
+/** One git worktree on disk; successive attempts of one task may hold it in turn (reuse). */
+interface WorktreeLease {
+  readonly target: string;
+  /** The attempt whose id names the worktree directory and owner file. */
+  readonly ownerAttemptId: AttemptId;
+  links: string[];
+  holder: OrchestratedWorkspace | undefined;
+  closed: boolean;
+  /** Main-tree identities, at create time, of paths this provider integrated earlier and copied in (`ours`). */
+  seededMainIdentities: Map<string, ContentIdentity | undefined>;
+}
+
+interface WorkspaceExtras {
+  readonly reused?: boolean;
+  readonly fallback?: NonNullable<IsolatedWorkspace["fallback"]>;
+  readonly overlaid?: readonly string[];
+  readonly dependencyLinks?: readonly string[];
+  readonly submodules?: readonly string[];
 }
 
 function abortable(signal: AbortSignal): Promise<never> {
@@ -615,14 +804,16 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
   const slots = new Set<ScopedSlot>();
   const slotOf = new Map<OrchestratedWorkspace, ScopedSlot>();
   const scopedSnapshots = new Map<AttemptId, ScopedSnapshot>();
-  /** After-digests of paths this provider integrated; such dirty paths are ours, not the user's. */
+  const leases = new Map<OrchestratedWorkspace, WorktreeLease>();
+  /** Main-tree digests of paths this provider integrated; such dirty paths are ours, not the user's. */
   const integrated = new Map<string, Digest | null>();
 
   const worktreesRoot = deps.worktreesRoot ?? path.join(home, ".synorch", "worktrees");
-  const worktreePath = (attemptId: AttemptId): string => path.join(worktreesRoot, deps.projectId, attemptId);
+  const projectDirectory = projectWorkspacesDirectory(worktreesRoot, deps.projectId);
+  const worktreePath = (attemptId: AttemptId): string => path.join(projectDirectory, workspaceDirectoryName(attemptId));
   const ownerFile = (attemptId: AttemptId): string => `${worktreePath(attemptId)}.owner.json`;
   const scopedDirectory = (attemptId: AttemptId): string => `${worktreePath(attemptId)}.scoped`;
-  const ownerOf = (attemptId: AttemptId, mode: AttemptOwner["mode"]): AttemptOwner => ({
+  const ownerOf = (attemptId: AttemptId, mode: AttemptOwner["mode"], links: readonly string[] = []): AttemptOwner => ({
     format: ATTEMPT_OWNER_FORMAT,
     attempt_id: attemptId,
     mode,
@@ -630,6 +821,7 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
     host: hostname(),
     workspace_root: deps.workspaceRoot,
     created_at: new Date().toISOString(),
+    ...(links.length > 0 ? { dependency_links: links } : {}),
   });
 
   const acquireSlot = async (taskId: string, signal: AbortSignal): Promise<ScopedSlot> => {
@@ -663,30 +855,57 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
     const changes: ArtifactChange[] = [];
     const contents = new Map<string, Buffer | null>();
     const unsafe: string[] = [];
+    const unsafeReasons = new Map<string, string>();
+    const diskPaths = new Map<string, string>();
     if (baseline !== undefined) {
       const foreign = slotOf.get(workspace.self())?.foreign;
       const candidates = [...new Set(await baseline.candidates(signal))].sort();
-      for (const relative of candidates) {
-        const normalized = normalizeWorkspacePath(relative);
+      const flagged = baseline.flagged?.() ?? new Map<string, string>();
+      const byPath = new Map<string, string[]>();
+      for (const candidate of candidates) {
+        const normalized = normalizeWorkspacePath(candidate);
         if (normalized === undefined) {
           // Not expressible as a workspace path: never silently dropped from changed ⊆ owned.
-          unsafe.push(relative);
+          unsafe.push(candidate);
           continue;
         }
-        const before = await baseline.beforeDigest(normalized);
-        const observed = await observe(workspace.root, normalized);
-        const after = observedDigest(observed);
-        if (before === after) continue;
-        if (foreign !== undefined && foreign.has(normalized) && foreign.get(normalized) === after) continue;
-        if (observed.kind === "link" || observed.kind === "other") unsafe.push(normalized);
-        changes.push({ path: normalized, before, after });
-        contents.set(normalized, observed.kind === "file" ? observed.bytes : null);
+        byPath.set(normalized, [...(byPath.get(normalized) ?? []), candidate]);
+      }
+      for (const [normalized, spellings] of [...byPath].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))) {
+        const changed: { readonly onDisk: string; readonly before: Digest | null; readonly after: Digest | null; readonly observed: Observed }[] = [];
+        for (const onDisk of spellings) {
+          const before = await baseline.beforeDigest(onDisk);
+          const observed = await observe(workspace.root, onDisk);
+          const after = observedDigest(observed);
+          if (before !== after) changed.push({ onDisk, before, after, observed });
+        }
+        const first = changed[0];
+        if (first === undefined) continue;
+        if (foreign !== undefined && changed.length === 1 && foreign.has(normalized) && foreign.get(normalized) === first.after) continue;
+        if (changed.length > 1) {
+          unsafe.push(normalized);
+          unsafeReasons.set(normalized, `${changed.length} files differ only in Unicode normalization (${changed.map((entry) => JSON.stringify(entry.onDisk)).join(", ")})`);
+        } else if (flagged.has(first.onDisk)) {
+          unsafe.push(normalized);
+          unsafeReasons.set(normalized, flagged.get(first.onDisk) ?? "cannot be integrated");
+        } else if (first.observed.kind === "link" || first.observed.kind === "other") unsafe.push(normalized);
+        changes.push({ path: normalized, before: first.before, after: first.after });
+        contents.set(normalized, first.observed.kind === "file" ? first.observed.bytes : null);
+        if (first.onDisk !== normalized) diskPaths.set(normalized, first.onDisk);
       }
     }
     const artifactBytes = encodeArtifact(workspace.mode, workspace.baseCommit, changes, contents);
     const artifactDigest = sha256(artifactBytes);
     if (deps.blobs !== undefined) await deps.blobs.put(artifactBytes, ARTIFACT_MEDIA_TYPE);
-    return { artifactDigest, artifactBytes, changes, contents, unsafe };
+    return {
+      artifactDigest,
+      artifactBytes,
+      changes,
+      contents,
+      unsafe,
+      ...(unsafeReasons.size > 0 ? { unsafeReasons } : {}),
+      ...(diskPaths.size > 0 ? { diskPaths } : {}),
+    };
   };
 
   const build = (
@@ -696,7 +915,8 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
     root: string,
     baseCommit: string | undefined,
     baseline: Baseline | undefined,
-    cleanup: () => Promise<void>,
+    cleanup: (self: OrchestratedWorkspace) => Promise<void>,
+    extras: WorkspaceExtras = {},
     slot?: ScopedSlot,
   ): OrchestratedWorkspace => {
     let disposed = false;
@@ -707,6 +927,8 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
       baseCommit,
       ownedPaths: packet.scope.owned_paths,
       forbiddenPaths: packet.scope.forbidden_paths,
+      digest: createWorkspaceDigestReader(root, { platform }),
+      ...extras,
       changeSet: (signal) => pinned({ mode, root, baseCommit, self: () => workspace }, baseline, signal),
       async snapshot(signal) {
         const set = await workspace.changeSet(signal);
@@ -723,15 +945,17 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
         const paths = set.changes
           .map((change) => change.path)
           .filter((relative) => matchesAny(relative, packet.scope.owned_paths, platform) || !matchesAny(relative, inputs, platform));
-        const outcome = await restorePaths(root, baseline, paths, platform);
-        return outcome.restored;
+        const onDisk = paths.map((relative) => set.diskPaths?.get(relative) ?? relative);
+        const outcome = await restorePaths(root, baseline, onDisk, platform);
+        const back = new Map(paths.map((relative, index) => [onDisk[index] ?? relative, relative]));
+        return outcome.restored.map((relative) => back.get(relative) ?? relative);
       },
       async dispose() {
         if (disposed) return;
         disposed = true;
         slotOf.delete(workspace);
         try {
-          await cleanup();
+          await cleanup(workspace);
         } finally {
           slot?.release();
         }
@@ -741,27 +965,120 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
     return workspace;
   };
 
-  const gitBaseline = async (root: string, signal: AbortSignal, snapshotDirty: boolean): Promise<Baseline> => {
-    const dirty = new Map<string, Buffer | null>();
-    if (snapshotDirty) {
-      for (const relative of await gitDirtyPaths(git, root, signal)) {
-        dirty.set(relative, await readFileBytes(root, relative));
+  /** Deletes a worktree without ever descending into a link: links first, then Node's `rm`, then `worktree prune`. */
+  const discardLease = async (lease: WorktreeLease): Promise<void> => {
+    lease.closed = true;
+    for (const link of lease.links) await unlinkLink(path.join(lease.target, ...link.split("/")));
+    await rm(lease.target, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+    await git(["worktree", "prune"], deps.workspaceRoot).catch(() => undefined);
+    await rm(ownerFile(lease.ownerAttemptId), { force: true }).catch(() => undefined);
+  };
+
+  /** Removes everything untracked or ignored in a worktree (like `git clean -fdx`) with Node's `rm`, which never follows a junction. */
+  const cleanUntracked = async (target: string, signal: AbortSignal): Promise<void> => {
+    const output = (await git(["ls-files", "--others", "--directory", "-z"], target, signal)).stdout.toString("utf8");
+    for (const entry of output.split("\0").filter((value) => value.length > 0)) {
+      const relative = entry.replace(/\/+$/, "");
+      if (relative.length === 0 || relative.split("/").includes("..")) continue;
+      await rm(path.join(target, ...relative.split("/")), { recursive: true, force: true, maxRetries: 3 });
+    }
+  };
+
+  interface PopulateInput {
+    readonly packet: TaskContextPacket;
+    readonly head: string;
+    readonly ours: readonly string[];
+    readonly mainDirty: readonly string[];
+    readonly overlay: readonly string[];
+    readonly submodules: readonly string[];
+  }
+
+  /**
+   * Fills a fresh or reset worktree: paths this provider integrated earlier (`ours`), overlaid
+   * read inputs, dependency links; then records the baseline the change set is computed against.
+   */
+  const populate = async (lease: WorktreeLease, input: PopulateInput, signal: AbortSignal): Promise<{ baseline: Baseline; overlaid: string[] }> => {
+    const target = lease.target;
+    const owned = input.packet.scope.owned_paths;
+    const seeded = new Map<string, Buffer | null>();
+    const copyFromMain = async (relative: string): Promise<boolean> => {
+      const observed = await observe(deps.workspaceRoot, relative);
+      if (observed.kind === "file") await writeSafe(target, relative, observed.bytes, platform);
+      else if (observed.kind === "absent") await removeSafe(target, relative, platform);
+      else return false;
+      seeded.set(relative, observed.kind === "file" ? observed.bytes : null);
+      return true;
+    };
+    for (const relative of input.ours) await copyFromMain(relative);
+    lease.seededMainIdentities = input.ours.length === 0 ? new Map() : await contentIdentities(deps.workspaceRoot, input.ours, signal, { git, platform });
+
+    const overlaid: string[] = [];
+    if (input.overlay.length > 0) {
+      for (const relative of input.mainDirty) {
+        if (seeded.has(relative) || matchesAny(relative, owned, platform) || !matchesAny(relative, input.overlay, platform)) continue;
+        if (await copyFromMain(relative)) overlaid.push(normalizeWorkspacePath(relative) ?? relative);
       }
     }
+
+    // Dependency links: ignored, present in the main tree, not overlapping any owned path.
+    const links: string[] = [];
+    for (const entry of await gitIgnoredEntries(git, deps.workspaceRoot, signal)) {
+      if (!entry.endsWith("/")) continue;
+      const relative = entry.replace(/\/+$/, "");
+      const name = relative.split("/").at(-1) ?? "";
+      if (!DEPENDENCY_NAMES.has(name) || owned.some((pattern) => pathPatternsOverlap(pattern, relative))) continue;
+      const parent = path.dirname(path.join(target, ...relative.split("/")));
+      const parentInfo = await lstat(parent).catch(() => undefined);
+      if (parentInfo === undefined || !parentInfo.isDirectory() || parentInfo.isSymbolicLink()) continue;
+      if ((await lstat(path.join(target, ...relative.split("/"))).catch(() => undefined)) !== undefined) continue;
+      links.push(relative);
+    }
+    if (links.length > 0) {
+      // Record the links before creating them: a crash in between must still unlink them before removal.
+      lease.links = links;
+      await writeJsonAtomic(ownerFile(lease.ownerAttemptId), ownerOf(lease.ownerAttemptId, "worktree", links));
+      for (const relative of links) {
+        await symlink(path.join(deps.workspaceRoot, ...relative.split("/")), path.join(target, ...relative.split("/")), platform === "win32" ? "junction" : "dir");
+      }
+    }
+
+    const ownedGitlinks = input.submodules.filter((gitlink) => owned.some((pattern) => pathPatternsOverlap(pattern, gitlink)));
+    const literalOwned = owned.filter((pattern) => isLiteralPattern(pattern));
+    const excludedPrefixes = [...links];
     const content = async (relative: string): Promise<Buffer | null> => {
-      if (dirty.has(relative)) return dirty.get(relative) ?? null;
-      return (await gitShowHead(git, root, relative)) ?? null;
+      if (seeded.has(relative)) return seeded.get(relative) ?? null;
+      return (await gitShowFiltered(git, target, input.head, relative)) ?? null;
     };
-    return {
+    let flagged = new Map<string, string>();
+    const baseline: Baseline = {
       beforeContent: content,
       beforeDigest: async (relative) => {
         const bytes = await content(relative);
-        return bytes === null ? null : sha256(bytes);
+        return bytes === null ? null : workspaceDigest(bytes);
       },
       async candidates(inner) {
-        return [...(await gitDirtyPaths(git, root, inner)), ...dirty.keys()];
+        const found = new Set<string>([...(await gitDirtyPaths(git, target, inner)), ...seeded.keys()]);
+        // Owned paths are also scanned directly (B8): an owned literal file git ignores, and anything
+        // written inside a submodule directory, which the superproject's status never reports.
+        const literalFiles: string[] = [];
+        for (const pattern of literalOwned) {
+          if ((await observe(target, pattern)).kind === "file" && !found.has(pattern)) literalFiles.push(pattern);
+        }
+        for (const relative of await gitIgnoredSubset(git, target, literalFiles, inner)) found.add(relative);
+        const nextFlagged = new Map<string, string>();
+        for (const gitlink of ownedGitlinks) {
+          for (const entry of await walkTree(path.join(target, ...gitlink.split("/")), 50_000, { skipDirectory: (_relative, name) => name === ".git" })) {
+            const relative = `${gitlink}/${entry.relative}`;
+            found.add(relative);
+            nextFlagged.set(relative, `it is inside the submodule ${gitlink}; Synorch never integrates writes inside a submodule`);
+          }
+        }
+        flagged = nextFlagged;
+        return [...found].filter((relative) => !excludedPrefixes.some((prefix) => isAtOrBelow(relative, prefix, platform)));
       },
+      flagged: () => flagged,
     };
+    return { baseline, overlaid };
   };
 
   /**
@@ -782,13 +1099,97 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
       const relative = entry.replace(/\/+$/, "");
       const links = (await observe(deps.workspaceRoot, relative)).kind === "link" ? [relative] : [];
       if (links.length === 0) {
-        for (const child of await walkTree(path.join(deps.workspaceRoot, ...relative.split("/")), 10_000, new Set()).catch(() => [{ relative: "", kind: "link" as const }])) {
+        for (const child of await walkTree(path.join(deps.workspaceRoot, ...relative.split("/")), 10_000).catch(() => [{ relative: "", kind: "link" as const }])) {
           if (child.kind === "link") links.push(child.relative === "" ? relative : `${relative}/${child.relative}`);
         }
       }
       exposed.push(...links);
     }
     return exposed;
+  };
+
+  /** A worktree workspace over `lease`, with the lease's dispose semantics (only the current holder removes it). */
+  const worktreeWorkspace = (
+    attemptId: AttemptId,
+    packet: TaskContextPacket,
+    head: string,
+    lease: WorktreeLease,
+    baseline: Baseline,
+    extras: WorkspaceExtras,
+  ): OrchestratedWorkspace => {
+    const workspace = build(
+      attemptId,
+      packet,
+      "worktree",
+      lease.target,
+      head,
+      baseline,
+      async (self) => {
+        leases.delete(self);
+        // A workspace superseded by a reuse no longer owns the worktree; the reusing one disposes it.
+        if (lease.holder !== self || lease.closed) return;
+        await discardLease(lease);
+      },
+      { ...extras, dependencyLinks: [...lease.links] },
+    );
+    lease.holder = workspace;
+    leases.set(workspace, lease);
+    return workspace;
+  };
+
+  const openWorktree = async (packet: TaskContextPacket, attemptId: AttemptId, input: PopulateInput, extras: WorkspaceExtras, signal: AbortSignal): Promise<OrchestratedWorkspace> => {
+    const lease: WorktreeLease = { target: worktreePath(attemptId), ownerAttemptId: attemptId, links: [], holder: undefined, closed: false, seededMainIdentities: new Map() };
+    try {
+      await mkdir(path.dirname(lease.target), { recursive: true });
+      await writeJsonAtomic(ownerFile(attemptId), ownerOf(attemptId, "worktree"));
+      await git(["worktree", "add", "--detach", lease.target, input.head], deps.workspaceRoot, signal);
+      const { baseline, overlaid } = await populate(lease, input, signal);
+      return worktreeWorkspace(attemptId, packet, input.head, lease, baseline, { ...extras, ...(overlaid.length > 0 ? { overlaid } : {}) });
+    } catch (error: unknown) {
+      await discardLease(lease);
+      throw error;
+    }
+  };
+
+  const reuseWorktree = async (
+    previous: OrchestratedWorkspace,
+    packet: TaskContextPacket,
+    attemptId: AttemptId,
+    input: PopulateInput,
+    extras: WorkspaceExtras,
+    signal: AbortSignal,
+  ): Promise<OrchestratedWorkspace | undefined> => {
+    const lease = leases.get(previous);
+    if (lease === undefined || lease.closed || lease.holder !== previous) return undefined;
+    try {
+      for (const link of lease.links) await unlinkLink(path.join(lease.target, ...link.split("/")));
+      lease.links = [];
+      await writeJsonAtomic(ownerFile(lease.ownerAttemptId), ownerOf(lease.ownerAttemptId, "worktree"));
+      await git(["checkout", "-q", "-f", "--detach", input.head], lease.target, signal);
+      await git(["reset", "-q", "--hard", input.head], lease.target, signal);
+      await cleanUntracked(lease.target, signal);
+      leases.delete(previous);
+      const { baseline, overlaid } = await populate(lease, input, signal);
+      return worktreeWorkspace(attemptId, packet, input.head, lease, baseline, { ...extras, reused: true, ...(overlaid.length > 0 ? { overlaid } : {}) });
+    } catch (error: unknown) {
+      if (signal.aborted) throw error;
+      leases.delete(previous);
+      await discardLease(lease);
+      return undefined;
+    }
+  };
+
+  const refuseOwnedInsideSubmodule = (owned: readonly string[], submodules: readonly string[]): void => {
+    for (const pattern of owned) {
+      const prefix = staticPrefix(pattern);
+      const gitlink = submodules.find((candidate) => segmentsUnder(candidate.split("/"), prefix, platform));
+      if (gitlink !== undefined) {
+        throw isolationError(
+          "policy_denied",
+          `owned path ${pattern} is inside the submodule ${gitlink}; Synorch does not write inside submodules (own paths outside it, or work in the submodule's own repository)`,
+        );
+      }
+    }
   };
 
   return {
@@ -798,52 +1199,77 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
         const root = options?.readRoot ?? deps.workspaceRoot;
         return build(attemptId, packet, "shared-read-only", root, undefined, undefined, async () => {});
       }
+      const owned = packet.scope.owned_paths;
       const top = await gitTopLevel(git, deps.workspaceRoot);
       const isGitRoot = top !== undefined && (await samePath(top, deps.workspaceRoot, platform));
       const head = isGitRoot ? await gitHead(git, deps.workspaceRoot) : undefined;
       let reason = isGitRoot ? (head === undefined ? "the repository has no commit" : undefined) : "the workspace is not a git repository";
+      const submodules = isGitRoot ? await gitSubmodulePaths(git, deps.workspaceRoot, signal) : [];
+      refuseOwnedInsideSubmodule(owned, submodules);
       const ours: string[] = [];
+      let mainDirty: string[] = [];
       if (reason === undefined) {
-        const dirty = await gitDirtyPaths(git, deps.workspaceRoot, signal);
-        for (const relative of dirty) {
+        mainDirty = await gitDirtyPaths(git, deps.workspaceRoot, signal);
+        for (const relative of mainDirty) {
           const current = observedDigest(await observe(deps.workspaceRoot, relative));
-          if (integrated.has(relative) && integrated.get(relative) === current) ours.push(relative);
+          const key = normalizeWorkspacePath(relative) ?? relative;
+          if (integrated.has(key) && integrated.get(key) === current) ours.push(relative);
         }
-        const overlap = dirty.filter((relative) => !ours.includes(relative) && matchesAny(relative, packet.scope.owned_paths, platform));
+        const overlap = mainDirty.filter((relative) => !ours.includes(relative) && matchesAny(relative, owned, platform));
         if (overlap.length > 0) reason = `uncommitted changes overlap owned paths (${overlap.slice(0, 5).join(", ")})`;
       }
+      const common: WorkspaceExtras = submodules.length > 0 ? { submodules } : {};
+      let fallback: IsolatedWorkspace["fallback"];
       if (packet.isolation === "worktree" && reason === undefined && head !== undefined) {
-        const target = worktreePath(attemptId);
-        await mkdir(path.dirname(target), { recursive: true });
-        await writeJsonAtomic(ownerFile(attemptId), ownerOf(attemptId, "worktree"));
-        await git(["worktree", "add", "--detach", target, head], deps.workspaceRoot, signal);
-        for (const relative of ours) {
-          const bytes = await readFileBytes(deps.workspaceRoot, relative);
-          if (bytes === null) await removeSafe(target, relative, platform);
-          else await writeSafe(target, relative, bytes, platform);
+        const input: PopulateInput = { packet, head, ours, mainDirty, overlay: options?.overlay ?? [], submodules };
+        const previous = options?.reuse as OrchestratedWorkspace | undefined;
+        if (previous !== undefined) {
+          const reused = await reuseWorktree(previous, packet, attemptId, input, common, signal);
+          if (reused !== undefined) return reused;
         }
-        const baseline = await gitBaseline(target, signal, ours.length > 0);
-        return build(attemptId, packet, "worktree", target, head, baseline, async () => {
-          try {
-            await git(["worktree", "remove", "--force", target], deps.workspaceRoot);
-          } catch {
-            await rm(target, { recursive: true, force: true });
-            await git(["worktree", "prune"], deps.workspaceRoot).catch(() => undefined);
+        try {
+          return await openWorktree(packet, attemptId, input, common, signal);
+        } catch (error: unknown) {
+          if (signal.aborted) throw error;
+          const failure = classifyWorktreeFailure(error);
+          if (packet.risk === "high-risk") {
+            throw isolationError("sandbox_insufficient", `high-risk writing task requires a worktree, but creating it failed (${failure.reason}): ${failure.detail}`);
           }
-          await rm(ownerFile(attemptId), { force: true }).catch(() => undefined);
-        });
+          fallback = { from: "worktree", reason: failure.reason, detail: failure.detail };
+        }
+      } else if (packet.isolation === "worktree" && top === undefined && !(await gitAvailable(git, deps.workspaceRoot))) {
+        fallback = { from: "worktree", reason: "git-unavailable", detail: "git could not be started" };
+        reason = "git is not available";
       }
       if (packet.risk === "high-risk") {
         throw isolationError("sandbox_insufficient", `high-risk writing task requires a worktree, but ${reason ?? "scoped-dir was requested"}`);
       }
       const slot = await acquireSlot(packet.task_id, signal);
       try {
+        const skipDirs = isGitRoot
+          ? (await gitIgnoredEntries(git, deps.workspaceRoot, signal))
+              .filter((entry) => entry.endsWith("/"))
+              .map((entry) => entry.replace(/\/+$/, ""))
+              .filter((relative) => relative.length > 0 && !owned.some((pattern) => pathPatternsOverlap(pattern, relative)))
+          : [];
+        // Clean tracked files outside the owned paths are restored from the base commit (checkout
+        // form, digest-verified) instead of copied; owned files always keep a copy.
+        let restorableFromGit: ReadonlySet<string> = new Set();
+        if (isGitRoot && head !== undefined) {
+          const dirty = new Set(reason === undefined ? mainDirty : await gitDirtyPaths(git, deps.workspaceRoot, signal));
+          restorableFromGit = new Set(
+            (await gitTrackedPaths(git, deps.workspaceRoot, signal)).filter((relative) => !dirty.has(relative) && !matchesAny(relative, owned, platform)),
+          );
+        }
         const snapshot = await ScopedSnapshot.take({
           root: deps.workspaceRoot,
           directory: scopedDirectory(attemptId),
           owner: ownerOf(attemptId, "scoped-dir"),
-          ownedPaths: packet.scope.owned_paths,
+          ownedPaths: owned,
           git: isGitRoot && head !== undefined ? { runner: git, head } : undefined,
+          skipDirs,
+          platform,
+          restorableFromGit,
         });
         scopedSnapshots.set(attemptId, snapshot);
         return build(
@@ -857,6 +1283,7 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
             scopedSnapshots.delete(attemptId);
             await snapshot.destroy();
           },
+          { ...common, ...(fallback === undefined ? {} : { fallback }) },
           slot,
         );
       } catch (error: unknown) {
@@ -883,6 +1310,10 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
         throw isolationError("policy_denied", `artifact touches paths outside the owned scope: ${violations.map((v) => `${v.path} (${v.reason})`).join(", ")}`);
       }
       if (set.unsafe.length > 0) {
+        const reasons = set.unsafe.filter((entry) => set.unsafeReasons?.has(entry));
+        if (reasons.length > 0) {
+          throw isolationError("policy_denied", `artifact contains paths that cannot be integrated: ${reasons.slice(0, 10).map((entry) => `${entry}: ${set.unsafeReasons?.get(entry) ?? ""}`).join("; ")}`);
+        }
         throw isolationError("policy_denied", `artifact contains links or special files, which are never integrated: ${set.unsafe.slice(0, 10).join(", ")}`);
       }
       if (workspace.mode === "shared-read-only") {
@@ -894,6 +1325,7 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
         await scopedSnapshots.get(orchestrated.attemptId as AttemptId)?.markIntegrated();
         return;
       }
+      const lease = leases.get(workspace as OrchestratedWorkspace);
       const canonicalRoot = await realpath(deps.workspaceRoot);
       const refused: string[] = [];
       for (const link of await exposedIgnoredLinks(set.changes, workspace.root, signal)) {
@@ -904,22 +1336,90 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
       if (refused.length > 0) {
         throw isolationError("policy_denied", `a .gitignore change would expose ignored links (${refused.slice(0, 5).join(", ")}); only an owned link inside the workspace may be un-ignored`);
       }
+      const paths = set.changes.map((change) => change.path);
+      const worktreeName = (relative: string): string => set.diskPaths?.get(relative) ?? relative;
+      // Where each path lives in the main tree (an existing NFD-named file keeps its spelling).
+      const mainName = new Map<string, string>();
+      for (const relative of paths) mainName.set(relative, (await resolveOnDiskPath(deps.workspaceRoot, relative, platform)) ?? relative);
       // Resolve every target before writing any byte: a link anywhere refuses the whole artifact.
-      const conflicts: string[] = [];
+      for (const relative of paths) await resolveLinkSafeTarget(deps.workspaceRoot, mainName.get(relative) ?? relative, platform);
+
+      // Base identities: the base commit's blob, or (for paths this provider integrated earlier) the main tree at create time.
+      const seeded = lease?.seededMainIdentities ?? new Map<string, ContentIdentity | undefined>();
+      const base = new Map<string, ContentIdentity | null>();
+      const gitlinkBases: string[] = [];
+      const fromTree = paths.filter((relative) => !seeded.has(worktreeName(relative)));
+      const tree = workspace.baseCommit === undefined ? new Map<string, GitTreeEntry>() : await gitTreeEntries(git, workspace.root, workspace.baseCommit, fromTree.map(worktreeName), signal);
+      for (const relative of paths) {
+        if (seeded.has(worktreeName(relative))) {
+          base.set(relative, seeded.get(worktreeName(relative)) ?? null);
+          continue;
+        }
+        const entry = tree.get(worktreeName(relative));
+        if (entry?.mode === "160000") gitlinkBases.push(relative);
+        base.set(relative, entry === undefined ? null : { scheme: "git-blob", oid: entry.oid });
+      }
+      if (gitlinkBases.length > 0) {
+        throw isolationError("policy_denied", `artifact replaces submodule entries, which are never integrated: ${gitlinkBases.slice(0, 5).join(", ")}`);
+      }
+
+      // Written content in the main tree's representation: clean in the worktree (blob), smudge for the main tree.
+      const writes = set.changes.filter((change) => set.contents.get(change.path) !== null && set.contents.get(change.path) !== undefined);
+      const writeNames = writes.map((change) => worktreeName(change.path));
+      const ignoredInWorktree = await gitIgnoredSubset(git, workspace.root, writeNames, signal);
+      const blobs = await gitHashObjects(git, workspace.root, writeNames.filter((name) => !ignoredInWorktree.has(name)), { write: true, signal });
+      const ignoredInMain = await gitIgnoredSubset(git, deps.workspaceRoot, writes.map((change) => mainName.get(change.path) ?? change.path), signal);
+      const finalBytes = new Map<string, Buffer>();
+      const after = new Map<string, ContentIdentity | null>();
       for (const change of set.changes) {
-        await resolveLinkSafeTarget(deps.workspaceRoot, change.path, platform);
-        const current = observedDigest(await observe(deps.workspaceRoot, change.path));
-        if (current !== change.before) conflicts.push(change.path);
+        const raw = set.contents.get(change.path);
+        if (raw === null || raw === undefined) {
+          after.set(change.path, null);
+          continue;
+        }
+        const target = mainName.get(change.path) ?? change.path;
+        const oid = blobs.get(worktreeName(change.path));
+        if (oid === undefined || ignoredInMain.has(target)) {
+          finalBytes.set(change.path, raw);
+          after.set(change.path, { scheme: "workspace", digest: workspaceDigest(raw) });
+          continue;
+        }
+        let bytes = await gitSmudgeBlob(git, deps.workspaceRoot, oid, target, signal);
+        const existing = await observe(deps.workspaceRoot, target);
+        if (existing.kind === "file" && !existing.bytes.includes(0) && !bytes.includes(0)) {
+          const mainStyle = eolStyle(existing.bytes);
+          const newStyle = eolStyle(bytes);
+          if ((mainStyle === "lf" || mainStyle === "crlf") && (newStyle === "lf" || newStyle === "crlf") && mainStyle !== newStyle) {
+            // Keep the main file's line endings when git stores the very same blob either way.
+            const candidate = withEol(bytes, mainStyle);
+            if ((await gitHashBytes(git, deps.workspaceRoot, target, candidate, signal)) === oid) bytes = candidate;
+          }
+        }
+        finalBytes.set(change.path, bytes);
+        after.set(change.path, { scheme: "git-blob", oid });
+      }
+
+      const current = await contentIdentities(deps.workspaceRoot, paths, signal, { git, platform });
+      const conflicts: string[] = [];
+      for (const relative of paths) {
+        const now = current.get(relative);
+        const was = base.get(relative) ?? null;
+        const next = after.get(relative) ?? null;
+        const unchanged = now === undefined ? was === null : was !== null && sameContent(now, was);
+        const alreadyApplied = now === undefined ? next === null : next !== null && sameContent(now, next);
+        if (!unchanged && !alreadyApplied) conflicts.push(relative);
       }
       if (conflicts.length > 0) {
         throw isolationError("verification_failed", `integration conflict: the main workspace changed at ${conflicts.join(", ")}`);
       }
       for (const change of set.changes) {
-        const content = set.contents.get(change.path);
-        if (content === null || content === undefined) await removeSafe(deps.workspaceRoot, change.path, platform);
-        else await writeSafe(deps.workspaceRoot, change.path, content, platform);
-        integrated.set(change.path, change.after);
-        for (const slot of slots) slot.foreign.set(change.path, change.after);
+        const target = mainName.get(change.path) ?? change.path;
+        const bytes = finalBytes.get(change.path);
+        if (bytes === undefined) await removeSafe(deps.workspaceRoot, target, platform);
+        else await writeSafe(deps.workspaceRoot, target, bytes, platform);
+        const digest = bytes === undefined ? null : workspaceDigest(bytes);
+        integrated.set(change.path, digest);
+        for (const slot of slots) slot.foreign.set(change.path, digest);
       }
     },
     async seed(workspace, artifactBytes) {
@@ -949,7 +1449,7 @@ export interface PruneOrphansOptions {
 }
 
 export interface PruneReport {
-  /** Worktree directories removed (their attempt's process is gone). */
+  /** Worktree directories removed (their attempt's process is gone), by attempt id. */
   readonly removedWorktrees: readonly string[];
   /** Crashed scoped-dir attempts: owned paths restored, other changes left in place, and paths no copy existed for. */
   readonly revertedScoped: readonly { readonly attemptId: string; readonly restored: readonly string[]; readonly leftInPlace: readonly string[]; readonly unrestorable: readonly string[] }[];
@@ -981,80 +1481,85 @@ function parseOwner(value: unknown): AttemptOwner | undefined {
 }
 
 /**
- * Removes attempt workspaces a crashed process left under `<worktrees>/<project-id>`: git
- * worktrees are removed, and a scoped-dir attempt's partial writes inside its owned paths are
- * reverted from the persisted snapshot (changes elsewhere are reported, not reverted, because the
- * user may have edited those files since). Nothing whose owner is live is touched. Integrated
- * scoped-dir attempts are only cleaned up.
+ * Removes attempt workspaces a crashed process left under the project's worktrees directory (the
+ * hashed one, and the pre-ADR-19 `<worktrees>/<project-id>`): git worktrees are removed with their
+ * dependency links unlinked first, and a scoped-dir attempt's partial writes inside its owned
+ * paths are reverted from the persisted snapshot (changes elsewhere are reported, not reverted,
+ * because the user may have edited those files since). Nothing whose owner is live is touched.
+ * Integrated scoped-dir attempts are only cleaned up.
  */
 export async function pruneOrphanedAttempts(options: PruneOrphansOptions): Promise<PruneReport> {
   const git = options.git ?? runGit;
   const platform = options.platform ?? process.platform;
   const isLive = options.isLive ?? isAttemptOwnerLive;
-  const directory = path.join(options.worktreesRoot, options.projectId);
   const report = { removedWorktrees: [] as string[], revertedScoped: [] as PruneReport["revertedScoped"][number][], live: [] as string[], unknown: [] as string[] };
-  let names: string[];
-  try {
-    names = await readdir(directory);
-  } catch {
-    return report;
-  }
-  const owned = new Set<string>();
-  for (const name of names.filter((entry) => entry.endsWith(".owner.json"))) {
-    const attemptId = name.slice(0, -".owner.json".length);
-    owned.add(attemptId);
-    const owner = parseOwner(await readJson(path.join(directory, name)));
-    if (owner === undefined) {
-      report.unknown.push(attemptId);
-      continue;
-    }
-    if (isLive(owner)) {
-      report.live.push(attemptId);
-      continue;
-    }
-    const target = path.join(directory, attemptId);
+  const directories = [...new Set([projectWorkspacesDirectory(options.worktreesRoot, options.projectId), path.join(options.worktreesRoot, options.projectId)])];
+  for (const directory of directories) {
+    let names: string[];
     try {
-      await git(["worktree", "remove", "--force", target], options.workspaceRoot);
+      names = await readdir(directory);
     } catch {
-      await rm(target, { recursive: true, force: true }).catch(() => undefined);
-    }
-    await rm(path.join(directory, name), { force: true }).catch(() => undefined);
-    report.removedWorktrees.push(attemptId);
-  }
-  for (const name of names.filter((entry) => entry.endsWith(".scoped"))) {
-    const attemptId = name.slice(0, -".scoped".length);
-    const scoped = path.join(directory, name);
-    const owner = parseOwner(await readJson(path.join(scoped, SCOPED_OWNER_FILE)));
-    if (owner === undefined) {
-      report.unknown.push(attemptId);
       continue;
     }
-    if (isLive(owner)) {
-      report.live.push(attemptId);
-      continue;
-    }
-    const state = ((await readJson(path.join(scoped, SCOPED_STATE_FILE))) as { state?: string } | undefined)?.state;
-    const snapshot = await ScopedSnapshot.load(scoped, git);
-    if (snapshot !== undefined && state !== "integrated") {
-      if (!(await samePath(snapshot.workspaceRoot, options.workspaceRoot, platform))) {
-        report.unknown.push(attemptId);
+    const owned = new Set<string>();
+    for (const name of names.filter((entry) => entry.endsWith(".owner.json"))) {
+      const base = name.slice(0, -".owner.json".length);
+      owned.add(base);
+      const owner = parseOwner(await readJson(path.join(directory, name)));
+      if (owner === undefined) {
+        report.unknown.push(base);
         continue;
       }
-      const changed = [...(await snapshot.candidates())].sort();
-      const inside = changed.filter((relative) => matchesAny(relative, snapshot.ownedPaths, platform));
-      const outcome = await restorePaths(options.workspaceRoot, snapshot, inside, platform);
-      report.revertedScoped.push({
-        attemptId,
-        restored: outcome.restored,
-        leftInPlace: changed.filter((relative) => !inside.includes(relative)),
-        unrestorable: outcome.unrestorable,
-      });
+      if (isLive(owner)) {
+        report.live.push(owner.attempt_id);
+        continue;
+      }
+      const target = path.join(directory, base);
+      const links = [...(owner.dependency_links ?? []), ...DEPENDENCY_LINK_DIRECTORIES];
+      for (const link of links) {
+        const normalized = normalizeWorkspacePath(link);
+        if (normalized !== undefined) await unlinkLink(path.join(target, ...normalized.split("/")));
+      }
+      // Node's rm never descends into a link; `git worktree remove` would empty a junction's target.
+      await rm(target, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+      await rm(path.join(directory, name), { force: true }).catch(() => undefined);
+      report.removedWorktrees.push(owner.attempt_id);
     }
-    await rm(scoped, { recursive: true, force: true }).catch(() => undefined);
-  }
-  for (const name of names) {
-    if (name.endsWith(".owner.json") || name.endsWith(".scoped") || owned.has(name)) continue;
-    report.unknown.push(name);
+    for (const name of names.filter((entry) => entry.endsWith(".scoped"))) {
+      const base = name.slice(0, -".scoped".length);
+      const scoped = path.join(directory, name);
+      const owner = parseOwner(await readJson(path.join(scoped, SCOPED_OWNER_FILE)));
+      if (owner === undefined) {
+        report.unknown.push(base);
+        continue;
+      }
+      if (isLive(owner)) {
+        report.live.push(owner.attempt_id);
+        continue;
+      }
+      const state = ((await readJson(path.join(scoped, SCOPED_STATE_FILE))) as { state?: string } | undefined)?.state;
+      const snapshot = await ScopedSnapshot.load(scoped, git, platform);
+      if (snapshot !== undefined && state !== "integrated") {
+        if (!(await samePath(snapshot.workspaceRoot, options.workspaceRoot, platform))) {
+          report.unknown.push(owner.attempt_id);
+          continue;
+        }
+        const changed = [...(await snapshot.candidates())].sort();
+        const inside = changed.filter((relative) => matchesAny(relative, snapshot.ownedPaths, platform));
+        const outcome = await restorePaths(options.workspaceRoot, snapshot, inside, platform);
+        report.revertedScoped.push({
+          attemptId: owner.attempt_id,
+          restored: outcome.restored,
+          leftInPlace: changed.filter((relative) => !inside.includes(relative)),
+          unrestorable: outcome.unrestorable,
+        });
+      }
+      await rm(scoped, { recursive: true, force: true }).catch(() => undefined);
+    }
+    for (const name of names) {
+      if (name.endsWith(".owner.json") || name.endsWith(".scoped") || owned.has(name)) continue;
+      report.unknown.push(name);
+    }
   }
   await git(["worktree", "prune"], options.workspaceRoot).catch(() => undefined);
   return report;

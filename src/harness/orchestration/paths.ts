@@ -1,32 +1,44 @@
 import {
   CONTROL_PLANE_WRITE_PREFIX,
+  foldPathCase,
+  isCaseInsensitivePlatform,
   isReservedWritePattern,
   matchesPathPattern,
+  normalizePathUnicode,
   pathPatternSchema,
 } from "../contracts/index.ts";
 
 /**
- * Ownership checks over the shared contract glob matcher. Paths the real diff reports are compared
- * case-sensitively except on Windows, where the file system itself is case-insensitive. A literal
- * pattern owns itself and everything below it, so `src/auth` and `src/auth/**` grant the same files.
+ * Ownership checks over the shared contract glob matcher (ADR-19 path policy). Every path is
+ * compared in NFC; on case-insensitive platforms (`CASE_INSENSITIVE_PLATFORMS`: win32, darwin)
+ * comparisons go through `foldPathCase` and nothing else, so the isolation matcher, the policy and
+ * the tools agree. A literal pattern owns itself and everything below it, so `src/auth` and
+ * `src/auth/**` grant the same files.
  */
 
 const GLOB = /[*?[\]{}]/;
 
 export function normalizeWorkspacePath(value: string): string | undefined {
   const parsed = pathPatternSchema.safeParse(value);
-  return parsed.success ? parsed.data : undefined;
+  return parsed.success ? normalizePathUnicode(parsed.data) : undefined;
 }
 
 export function matchesPattern(path: string, pattern: string, platform: NodeJS.Platform = process.platform): boolean {
   const candidate = normalizeWorkspacePath(path);
   const normalizedPattern = normalizeWorkspacePath(pattern);
   if (candidate === undefined || normalizedPattern === undefined) return false;
-  return matchesPathPattern(candidate, normalizedPattern, { caseInsensitive: platform === "win32" });
+  return matchesPathPattern(candidate, normalizedPattern, { caseInsensitive: isCaseInsensitivePlatform(platform) });
 }
 
 export function matchesAny(path: string, patterns: readonly string[], platform: NodeJS.Platform = process.platform): boolean {
   return patterns.some((pattern) => matchesPattern(path, pattern, platform));
+}
+
+/** Two workspace paths name the same file under the platform's path policy (NFC, `foldPathCase`). */
+export function sameWorkspacePath(left: string, right: string, platform: NodeJS.Platform = process.platform): boolean {
+  const a = normalizePathUnicode(left);
+  const b = normalizePathUnicode(right);
+  return isCaseInsensitivePlatform(platform) ? foldPathCase(a) === foldPathCase(b) : a === b;
 }
 
 export function isLiteralPattern(pattern: string): boolean {

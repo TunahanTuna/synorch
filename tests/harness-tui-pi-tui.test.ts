@@ -319,6 +319,49 @@ test("the approval dialog answers from the keyboard and Esc rejects", async () =
   await tui.stop("completed");
 });
 
+test("T1 the workspace-trust dialog offers Not now (pre-selected), session-only and persistent trust", async () => {
+  const terminal = new VirtualTerminal(100, 30);
+  const tui = renderer(terminal);
+  await tui.start(HEADER);
+  const request = (): ApprovalRequest => ({
+    approval_id: approvalIdSchema.parse(createId("approval")),
+    run_id: RUN,
+    subject_kind: "workspace-trust",
+    subject_digest: sha256("trust"),
+    summary: "Trust /repo?",
+    scope: "once",
+    requested_at: "2026-09-22T10:00:00Z",
+  });
+
+  const enter = tui.approvals.request(request(), new AbortController().signal);
+  await settle(tui, terminal);
+  const text = terminal.text();
+  assert.match(text, /Trust this workspace\?/);
+  assert.match(text, /Not now/);
+  assert.match(text, /Trust for this session only/);
+  assert.match(text, /Trust this workspace\b/);
+  assert.doesNotMatch(text, /Allow once/);
+  assert.ok(text.indexOf("Not now") < text.indexOf("Trust for this session only"), "Not now is listed first");
+  terminal.type("\r");
+  assert.equal((await enter).outcome, "rejected", "Enter on the pre-selected item is Not now");
+
+  const session = tui.approvals.request(request(), new AbortController().signal);
+  await settle(tui, terminal);
+  terminal.type("\x1b[B");
+  terminal.type("\r");
+  assert.equal((await session).outcome, "allowed-once");
+
+  const persist = tui.approvals.request(request(), new AbortController().signal);
+  await settle(tui, terminal);
+  terminal.type("\x1b[B");
+  terminal.type("\x1b[B");
+  terminal.type("\r");
+  const persisted = await persist;
+  assert.equal(persisted.outcome, "allowed-for-scope");
+  assert.equal(persisted.decided_by, "user");
+  await tui.stop("completed");
+});
+
 test("Ctrl+C cancels the active request, then offers a safe exit, then exits; Esc only cancels", async () => {
   const terminal = new VirtualTerminal(80, 24);
   let clock = 0;

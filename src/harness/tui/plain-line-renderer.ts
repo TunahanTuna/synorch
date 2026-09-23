@@ -12,6 +12,7 @@ import type {
   TerminalRenderer,
   UserInputSource,
 } from "../contracts/index.ts";
+import { WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
 import { HeadlessApprovalBroker, withApprovalDeadline, type ApprovalChoice } from "./approvals.ts";
 import { HeadlessAuthInteraction, LineAuthInteraction } from "./auth-interaction.ts";
 import { describeEvent, levelPrefix, type EventLine } from "./describe.ts";
@@ -392,6 +393,14 @@ class LineApprovalBroker implements ApprovalBroker {
 
   public request(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
     return withApprovalDeadline(request, this.mode, signal, this.clock, async (promptSignal) => {
+      if (request.subject_kind === "workspace-trust") {
+        this.write(`${this.style.yellow("Trust this workspace?")} ${sanitizeInline(request.summary, 2000)}\n`);
+        this.write(`${WORKSPACE_TRUST_CHOICES.map((choice, index) => `  [${choice.key}] ${choice.label}${index === 0 ? " (default)" : ""}`).join("\n")}\n`);
+        this.write(`Choose [${WORKSPACE_TRUST_CHOICES.map((choice, index) => (index === 0 ? choice.key.toUpperCase() : choice.key)).join("/")}]: `);
+        const answer = (await this.lines.next(promptSignal))?.trim().toLowerCase() ?? "";
+        const picked = WORKSPACE_TRUST_CHOICES.find((choice) => answer === choice.key || answer === choice.label.toLowerCase());
+        return picked?.outcome ?? "rejected";
+      }
       const scoped = request.scope !== "once";
       this.write(`${this.style.yellow(`Approval needed (${request.subject_kind})`)}: ${sanitizeInline(request.summary, 2000)}\n`);
       if (request.effect !== undefined) this.write(`  effect: ${request.effect}; scope: ${request.scope}\n`);

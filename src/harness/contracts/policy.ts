@@ -301,11 +301,12 @@ export interface PolicyInputs {
  * test command runs, so such commands need the user to trust the workspace once. Trust lives only
  * in the user scope (`<synorch home>/trust.json`), keyed by the canonical workspace root and a
  * repository identity; nothing in the repository can grant it. `flag` is `--trust-workspace`,
- * valid for one run and never persisted.
+ * valid for one run and never persisted; `session` is the prompt's "Trust for this session only",
+ * valid for the current runtime and never persisted.
  */
 export const TRUST_GRANT_SOURCES = ["prompt", "command"] as const;
 export type TrustGrantSource = (typeof TRUST_GRANT_SOURCES)[number];
-export const TRUST_USE_SOURCES = ["store", "flag"] as const;
+export const TRUST_USE_SOURCES = ["store", "flag", "session"] as const;
 export type TrustUseSource = (typeof TRUST_USE_SOURCES)[number];
 
 export interface WorkspaceTrustState {
@@ -323,8 +324,20 @@ export interface WorkspaceTrustState {
 /** The policy reason code for a code-executing command in an untrusted workspace. */
 export const WORKSPACE_UNTRUSTED_CODE = "workspace-untrusted";
 
+/**
+ * What trusting a workspace means, shown by the prompt, `syn trust` and the docs. It names both
+ * halves of the risk: the repository's own tests/build scripts and any code the AI writes during
+ * the session run unconfined, and can reach files outside the workspace, credentials included.
+ */
 export const WORKSPACE_TRUST_NOTICE =
-  "This workspace's tests and build scripts will run with your user permissions; Synorch cannot confine them on this platform.";
+  "In a trusted workspace, its tests and build scripts, and any code the AI writes during the session, run with your user permissions. They can read and change files outside the workspace, including your Synorch credentials, because Synorch's sandbox on this platform is not full.";
+
+/** The choices the workspace-trust prompt offers, in order; the first is pre-selected. */
+export const WORKSPACE_TRUST_CHOICES = [
+  { outcome: "rejected", label: "Not now", key: "n" },
+  { outcome: "allowed-once", label: "Trust for this session only", key: "s" },
+  { outcome: "allowed-for-scope", label: "Trust this workspace", key: "t" },
+] as const;
 
 export interface PolicyEngine {
   compute(inputs: PolicyInputs): EffectivePolicy;

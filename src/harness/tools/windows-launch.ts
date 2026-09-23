@@ -1,4 +1,5 @@
-import { readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -15,7 +16,14 @@ import path from "node:path";
  *    double-quoted (`"` doubled, `%` neutralized), so no argument can end cmd's quoting or expand
  *    a variable; CR, LF and NUL cannot cross cmd.exe and are refused.
  *
- * Other platforms spawn the argv unchanged.
+ * PATH entries that resolve (real path, case-folded on Windows) inside an untrusted root (the
+ * workspace, the Synorch home) are skipped, so a repository cannot plant `git.cmd` or `node` in a
+ * directory that happens to be on PATH and have it run instead of the real program. With untrusted
+ * roots, a bare program found nowhere else fails to start instead of falling back to the platform's
+ * own search (which on Windows also tries the current directory).
+ *
+ * Other platforms spawn the argv unchanged unless untrusted roots are given; then a bare program
+ * name is resolved on PATH the same way and spawned by its absolute path.
  */
 export interface LaunchPlan {
   readonly file: string;
@@ -30,6 +38,8 @@ export interface LaunchOptions {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
   readonly platform?: NodeJS.Platform;
+  /** Directories whose PATH entries are never used for program lookup (workspace roots, Synorch home). */
+  readonly untrustedRoots?: readonly string[];
 }
 
 export class UnsafeLaunchError extends Error {}
@@ -40,11 +50,20 @@ const DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD";
 export async function planLaunch(argv: readonly [string, ...string[]], options: LaunchOptions): Promise<LaunchPlan> {
   const [program, ...args] = argv;
   const direct: LaunchPlan = { file: program, args, env: options.env, verbatim: false, via: "direct" };
-  if ((options.platform ?? process.platform) !== "win32") return direct;
+  const guarded = (options.untrustedRoots ?? []).length > 0;
+  if ((options.platform ?? process.platform) !== "win32") {
+    if (!guarded || program.includes("/")) return direct;
+    const found = await resolvePosixProgram(program, options);
+    if (found === undefined) throw new UnsafeLaunchError(notFound(program));
+    return { ...direct, file: found };
+  }
   const resolved = await resolveProgram(program, options);
-  if (resolved === undefined) return direct;
+  if (resolved === undefined) {
+    if (guarded && !/[\\/]/.test(program) && !path.win32.isAbsolute(program)) throw new UnsafeLaunchError(notFound(program));
+    return direct;
+  }
   if (!isShim(resolved)) return { ...direct, file: resolved };
-  const shim = await nodeShimTarget(resolved, options.env);
+  const shim = await nodeShimTarget(resolved, options.env, options.untrustedRoots);
   if (shim !== undefined) return { file: shim.node, args: [shim.script, ...args], env: shim.env, verbatim: false, via: "node-shim" };
   return {
     file: commandInterpreter(options.env),
@@ -70,13 +89,62 @@ export async function resolveProgram(program: string, options: LaunchOptions): P
   if (/[\\/]/.test(program) || path.win32.isAbsolute(program)) {
     return firstFile(names.map((name) => path.win32.resolve(options.cwd, name)));
   }
+  const untrusted = await canonicalRoots(options.untrustedRoots, true);
   for (const directory of (envValue(options.env, "PATH") ?? "").split(";")) {
     const cleaned = directory.trim().replace(/^"|"$/g, "");
     if (cleaned === "" || !path.win32.isAbsolute(cleaned)) continue;
+    if (await insideUntrusted(cleaned, untrusted, true)) continue;
     const found = await firstFile(names.map((name) => path.win32.join(cleaned, name)));
     if (found !== undefined) return found;
   }
   return undefined;
+}
+
+/** POSIX PATH lookup (absolute entries only, untrusted roots skipped); the file must be executable. */
+async function resolvePosixProgram(program: string, options: LaunchOptions): Promise<string | undefined> {
+  const untrusted = await canonicalRoots(options.untrustedRoots, false);
+  for (const directory of (envValue(options.env, "PATH") ?? "").split(":")) {
+    if (directory === "" || !path.posix.isAbsolute(directory)) continue;
+    if (await insideUntrusted(directory, untrusted, false)) continue;
+    const candidate = path.posix.join(directory, program);
+    if (!(await isFile(candidate))) continue;
+    try {
+      await access(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function notFound(program: string): string {
+  return `${program} was not found on PATH (PATH entries inside the workspace or the Synorch home are never used for program lookup)`;
+}
+
+async function canonical(target: string): Promise<string> {
+  try {
+    return await realpath(target);
+  } catch {
+    return path.resolve(target);
+  }
+}
+
+async function canonicalRoots(roots: readonly string[] | undefined, fold: boolean): Promise<string[]> {
+  const resolved = await Promise.all((roots ?? []).map((root) => canonical(root)));
+  return resolved.map((root) => (fold ? root.toLowerCase() : root));
+}
+
+/** True when `directory` (after realpath, case-folded on Windows) is one of `roots` or inside one. */
+async function insideUntrusted(directory: string, roots: readonly string[], fold: boolean): Promise<boolean> {
+  if (roots.length === 0) return false;
+  const real = await canonical(directory);
+  const candidate = fold ? real.toLowerCase() : real;
+  const pathModule = fold ? path.win32 : path.posix;
+  return roots.some((root) => {
+    const relative = pathModule.relative(root, candidate);
+    return relative === "" || (!relative.startsWith("..") && !pathModule.isAbsolute(relative));
+  });
 }
 
 async function firstFile(candidates: readonly string[]): Promise<string | undefined> {
@@ -164,7 +232,7 @@ const LAUNCH_LINE =
 const NODE_PATH_DEFAULT = /^@set "node_path=([^"%]*)"$/i;
 const NODE_PATH_APPEND = /^@set "node_path=([^"]*)"$/i;
 
-async function nodeShimTarget(shimPath: string, env: Readonly<Record<string, string>>): Promise<NodeShim | undefined> {
+async function nodeShimTarget(shimPath: string, env: Readonly<Record<string, string>>, untrustedRoots: readonly string[] | undefined): Promise<NodeShim | undefined> {
   let content: string;
   try {
     const info = await stat(shimPath);
@@ -194,7 +262,7 @@ async function nodeShimTarget(shimPath: string, env: Readonly<Record<string, str
   const nodeEnv = shimNodePath(nodePaths, env);
   if (nodeEnv === null) return undefined;
   const bundled = path.win32.join(shimDir, "node.exe");
-  const node = (await isFile(bundled)) ? bundled : await resolveProgram("node", { cwd: shimDir, env });
+  const node = (await isFile(bundled)) ? bundled : await resolveProgram("node", { cwd: shimDir, env, ...(untrustedRoots === undefined ? {} : { untrustedRoots }) });
   if (node === undefined || isShim(node)) return undefined;
   return { node, script, env: nodeEnv };
 }

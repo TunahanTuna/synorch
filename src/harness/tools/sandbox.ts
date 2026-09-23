@@ -51,14 +51,20 @@ export async function probeSandbox(options: SandboxProbeOptions = {}): Promise<S
   }
 }
 
-export function createSandboxRunner(report: SandboxReport): SandboxRunner {
+export interface SandboxRunnerOptions {
+  /** Roots whose PATH entries never resolve a program (the session workspace, the Synorch home); each spec may add more. */
+  readonly untrustedRoots?: readonly string[];
+}
+
+export function createSandboxRunner(report: SandboxReport, options: SandboxRunnerOptions = {}): SandboxRunner {
   const checked = sandboxReportSchema.parse(report);
   return {
     probe: async () => checked,
     run: async (spec: ProcessSpec, signal: AbortSignal): Promise<ProcessResult> => {
+      const untrustedRoots = [...(options.untrustedRoots ?? []), ...(spec.untrustedRoots ?? [])];
       const result = await runProcess(
         sandboxedArgv(checked, spec),
-        { cwd: spec.cwd, env: spec.env, stdin: spec.stdin, timeoutMs: spec.timeoutMs, outputLimitBytes: spec.outputLimitBytes },
+        { cwd: spec.cwd, env: spec.env, stdin: spec.stdin, timeoutMs: spec.timeoutMs, outputLimitBytes: spec.outputLimitBytes, untrustedRoots },
         signal,
       );
       const stderr = result.termination === "spawn-failed" && result.stderr.length === 0 ? `failed to start ${spec.argv[0]}: ${result.spawnError ?? "unknown error"}` : result.stderr;

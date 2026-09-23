@@ -254,3 +254,49 @@ test("the real pnpm --version runs through exec under the partial-sandbox allowl
   assert.equal(outcome.result.exit_code, 0, outcome.result.text);
   assert.match(outcome.result.text, /--- stdout ---\n\d+\.\d+\.\d+/);
 });
+
+test("S1 program lookup skips PATH entries inside the workspace or the Synorch home: a planted shim is never used", windowsOnly, async (t) => {
+  const root = await tempDir(t, "syn-shim-ws-");
+  const home = await tempDir(t, "syn-shim-home-");
+  await mkdir(path.join(root, "src"), { recursive: true });
+  const planted = path.join(root, "tools", "bin");
+  const homeBin = path.join(home, "bin");
+  await mkdir(planted, { recursive: true });
+  await mkdir(homeBin, { recursive: true });
+  const marker = path.join(root, "planted-ran");
+  const plantedShim = `@echo off\r\ntype nul > "${marker}"\r\n`;
+  await writeFile(path.join(planted, "node.cmd"), plantedShim);
+  await writeFile(path.join(planted, "synfixture-tool.cmd"), plantedShim);
+  await writeFile(path.join(homeBin, "synfixture-home.cmd"), plantedShim);
+  // Another spelling of the same directory: upper-cased and with a trailing separator.
+  const env = withPath(`${planted.toUpperCase()}\\;${homeBin}`);
+
+  const guarded = { cwd: root, env, untrustedRoots: [root, home] };
+  const node = await planLaunch(["node", "-v"], guarded);
+  assert.ok(!node.file.toLowerCase().startsWith(root.toLowerCase()), `node resolved outside the workspace: ${node.file}`);
+  assert.match(node.file, /node\.exe$/i);
+  await assert.rejects(planLaunch(["synfixture-tool"], guarded), /not found on PATH/);
+  await assert.rejects(planLaunch(["synfixture-home"], guarded), /not found on PATH/);
+  const unguarded = await planLaunch(["synfixture-tool"], { cwd: root, env });
+  assert.equal(unguarded.via, "cmd-shim", "without untrusted roots the lookup is unchanged");
+
+  await writeFile(path.join(root, "src", "real.mjs"), 'console.log("real node");\n');
+  const harness = harnessFor(root, env, [["node", "src/real.mjs"], ["synfixture-tool"]]);
+  const real = await harness.call("exec", { argv: ["node", "src/real.mjs"] });
+  assert.equal(real.state, "succeeded", JSON.stringify(real.result));
+  assert.match(real.result.text, /real node/);
+  const refused = await harness.call("exec", { argv: ["synfixture-tool"] });
+  assert.match(JSON.stringify(refused.result), /not found on PATH/);
+  assert.equal(existsSync(marker), false, "the planted shim never ran");
+});
+
+test("S1 on POSIX a bare program is resolved on PATH outside the untrusted roots", { skip: WINDOWS ? "POSIX PATH lookup" : false }, async (t) => {
+  const root = await tempDir(t, "syn-path-ws-");
+  const planted = path.join(root, "bin");
+  await mkdir(planted, { recursive: true });
+  await writeFile(path.join(planted, "node"), "#!/bin/sh\necho planted\n", { mode: 0o755 });
+  const env = { PATH: `${planted}:${process.env.PATH ?? ""}` };
+  const plan = await planLaunch(["node", "-v"], { cwd: root, env, untrustedRoots: [root] });
+  assert.ok(path.isAbsolute(plan.file) && !plan.file.startsWith(root), plan.file);
+  await assert.rejects(planLaunch(["synfixture-missing"], { cwd: root, env, untrustedRoots: [root] }), /not found on PATH/);
+});

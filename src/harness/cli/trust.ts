@@ -87,8 +87,12 @@ export async function trustCommand(io: TrustCommandIO, target: string | undefine
 
 /**
  * The one-time interactive prompt: when exec is not fully sandboxed, the workspace is untrusted and
- * a human is attached, ask once through the renderer's approval UI. A grant is persisted in the
- * user scope and audited; a refusal leaves the workspace untrusted for this session.
+ * a human is attached, ask once through the renderer's approval UI. The renderers show the
+ * dedicated `WORKSPACE_TRUST_CHOICES` for this subject, "Not now" pre-selected:
+ *
+ *   rejected           "Not now"                      the workspace stays untrusted
+ *   allowed-once       "Trust for this session only"  trusted for this runtime; nothing persisted
+ *   allowed-for-scope  "Trust this workspace"         persisted in trust.json and audited
  */
 export async function promptWorkspaceTrust(runtime: Runtime, renderer: SessionRenderer, signal: AbortSignal): Promise<void> {
   const state = runtime.trust.state();
@@ -101,7 +105,7 @@ export async function promptWorkspaceTrust(runtime: Runtime, renderer: SessionRe
       run_id: createId("run"),
       subject_kind: "workspace-trust",
       subject_digest: digestOf({ root: state.root, identity: state.identity }),
-      summary: `Trust ${runtime.workspaceRoot}? ${WORKSPACE_TRUST_NOTICE} Without trust, verification and build/test commands are refused (autonomous) or asked for one by one (ask). Revoke later with syn trust --revoke.`,
+      summary: `Trust ${runtime.workspaceRoot}? ${WORKSPACE_TRUST_NOTICE} Without trust, verification and build/test commands are refused (autonomous) or asked for one by one (ask). "Trust this workspace" is remembered until syn trust --revoke.`,
       scope: "once",
       requested_at: now.toISOString(),
     },
@@ -111,6 +115,11 @@ export async function promptWorkspaceTrust(runtime: Runtime, renderer: SessionRe
     renderer.render({ kind: "notice", level: "warning", message: `workspace not trusted: verification and build/test commands will be ${runtime.policyMode === "ask" ? "asked for" : "refused"} (syn trust grants it later)` });
     return;
   }
+  if (decision.outcome === "allowed-once") {
+    runtime.trust.grantSession();
+    renderer.render({ kind: "notice", level: "warning", message: `trusted ${runtime.workspaceRoot} for this session only (not saved). ${WORKSPACE_TRUST_NOTICE}` });
+    return;
+  }
   const granted = await runtime.trust.grant("prompt");
-  renderer.render({ kind: "notice", level: granted.trusted ? "info" : "warning", message: granted.trusted ? `trusted ${runtime.workspaceRoot}` : `trust was not recorded: ${granted.reason ?? "unknown reason"}` });
+  renderer.render({ kind: "notice", level: granted.trusted ? "info" : "warning", message: granted.trusted ? `trusted ${runtime.workspaceRoot} (saved in ${runtime.trust.file}; revoke with syn trust --revoke)` : `trust was not recorded: ${granted.reason ?? "unknown reason"}` });
 }

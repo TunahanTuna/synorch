@@ -76,7 +76,7 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | `steer/queued` | `text` | Sonraki step'te | core |
 | `trust/granted` | `workspace_root` (kanonik kök), `repo_identity` (`git:`/`dir:` + 64 hex), `source` (`prompt`\|`command`) | Hayır | cli (`syn trust decisions` oturumu) |
 | `trust/revoked` | `workspace_root`, `repo_identity` | Hayır | cli (`syn trust decisions` oturumu) |
-| `trust/used` | `workspace_root`, `repo_identity`, `source` (`store`\|`flag`), `sandbox_enforcement` | Hayır | orchestration (run günlüğü) |
+| `trust/used` | `workspace_root`, `repo_identity`, `source` (`store`\|`flag`\|`session`), `sandbox_enforcement` | Hayır | orchestration (run günlüğü) |
 
 Eşleşme invariant'ları: her `tool/call_proposed` bir `tool/result_recorded` veya `tool/interrupted` ile; her `approval/requested` bir `approval/decided` ile; her `step/started` bir `step/ended` ile kapanır. Kapanmamış olanlar recovery'de [identity-and-state.md](./identity-and-state.md#3-crash-recovery-eşlemesi) tablosuyla kapatılır. Kayıtlı assistant mesajındaki her `tool_call` parçası runtime `tool_call_id` taşır.
 

@@ -1,6 +1,6 @@
 # Synorch CLI Harness: araştırma ve tasarım dosyası
 
-> Durum: araştırma, kabul edilmiş kararlar (ADR-01…17), normatif sözleşmeler ve paylaşılan sözleşme kodu (`src/harness/contracts/`); runtime davranışı henüz uygulanmadı. İnceleme tarihi: 2026-09-22.
+> Durum: araştırma, kabul edilmiş kararlar (ADR-01…17), normatif sözleşmeler ve paylaşılan sözleşme kodu (`src/harness/contracts/`); runtime `harness` dalında uygulandı (`src/harness/`: `syn agent`, `syn run`, `syn runs`, `syn show`, `syn doctor --runtime`, `syn login`/`logout`/`auth status`, `syn memory`, `syn trust`). Faz 1 ve Faz 2 çıkış kapıları Windows'ta otomatik kanıtla kapandı; bağımsız güvenlik incelemesi 3. turda ACCEPT verdi. Gerçek hesaplar, gerçek TTY matrisi ve Linux/macOS host'ları henüz doğrulanmadı ([kapanış kaydı](./delivery/milestones/phase-1-2.md), [canlı smoke test](./delivery/live-smoke-test.md)). `main`e taşınmadı. Güncelleme: 2026-09-23.
 
 Bu dizin, Synorch'un gelecekte kendi CLI agent harness'ını geliştirmek için başvuru kaynağıdır. `harness` bu girişimin ana entegrasyon dalıdır; geliştirme işlerinin tabanı ve hedefi burasıdır. `main`e taşıma ayrı karardır. [Bugünkü Synorch mimarisi](../AI-ORCHESTRATION-ARCHITECTURE.md) ve [önceki çok sağlayıcılı harness vizyonu](../FUTURE-MULTI-PROVIDER-HARNESS.md) geçerliliğini korur. Bu belgeler onların yerine geçmez; kaynak araştırmasını, somut runtime sınırlarını ve doğrulama ölçütlerini ekler.
 

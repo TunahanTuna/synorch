@@ -50,9 +50,11 @@ Output:
   result or error last) and everything human to stderr. --stream-deltas adds delta frames.
 
 Workspace trust:
-  Without a full OS sandbox, verification and build/test commands run repository code with
-  your user permissions. They need a trusted workspace (syn trust). --trust-workspace trusts
-  it for this run only; a headless run that needs trust and lacks it exits 3.
+  Without a full OS sandbox, verification and build/test commands run repository code, and
+  any code the AI writes during the session, with your user permissions: it can reach files
+  outside the workspace, including your Synorch credentials. Such commands need a trusted
+  workspace (syn trust). --trust-workspace trusts it for this run only; a headless run that
+  needs trust and lacks it exits 3.
 
 ${SESSION}
 
@@ -112,9 +114,12 @@ Usage:
   syn trust --revoke [--target <path>] Remove the trust record.
 
   Without a full OS sandbox (Windows today), Synorch cannot confine code that verification and
-  build/test commands run: it runs with your user permissions. Such commands run only in a
-  trusted workspace. Trust is keyed by the workspace path and repository identity, lives only
-  in your user scope and is never read from the repository. Grants and revocations are audited.
+  build/test commands run, including any code the AI writes during the session: it runs with
+  your user permissions and can read and change files outside the workspace, including your
+  Synorch credentials. Such commands run only in a trusted workspace. Trust is keyed by the
+  workspace path and repository identity, lives only in your user scope and is never read from
+  the repository. Grants and revocations are audited. The interactive prompt also offers
+  "Trust for this session only", which is never saved.
 
 ${COMMON}
 `,

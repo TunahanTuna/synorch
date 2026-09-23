@@ -117,6 +117,8 @@ export interface RuntimeTrust {
   state(): WorkspaceTrustState;
   /** Persists trust for this workspace in the user scope, records `trust/granted`, and applies it to policies computed from now on. */
   grant(source: TrustGrantSource): Promise<WorkspaceTrustState>;
+  /** Trusts the workspace for this runtime only ("Trust for this session only"); nothing is persisted. */
+  grantSession(): WorkspaceTrustState;
 }
 
 /** Asks the human attached to the session a question (the `ask_user` tool); resolves with the answer. */
@@ -427,10 +429,14 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       }
       return granted;
     },
+    grantSession() {
+      if (!trustState.trusted) trustState = { ...trustState, trusted: true, source: "session", reason: undefined };
+      return trustState;
+    },
   };
   const policy = withRoleDefinitions(createPolicyEngine({ synorchHome: home, workspaceTrusted: () => trustState.trusted }), canonical.roles);
   const sandbox = overrides.sandbox ?? (await probeSandbox({ platform }));
-  const runner = createSandboxRunner(sandbox);
+  const runner = createSandboxRunner(sandbox, { untrustedRoots: [workspaceRoot, home] });
   const userConfig = config.userPolicy === undefined ? undefined : { policy: config.userPolicy };
   const workspaceConfig = config.workspacePolicy === undefined ? undefined : { policy: config.workspacePolicy };
 

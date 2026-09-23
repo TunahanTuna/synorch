@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
-import { deriveProjectId, sha256, type AnyModelAdapter } from "../src/harness/contracts/index.ts";
+import { fileURLToPath } from "node:url";
+import { deriveProjectId, sha256, WORKSPACE_TRUST_NOTICE, type AnyModelAdapter } from "../src/harness/contracts/index.ts";
 import { commandHelp, parseHarnessArgs, runHarnessCommand, TRUST_AUDIT_TITLE, UsageError } from "../src/harness/cli/index.ts";
 import { createWorkspaceTrustStore, TRUST_FILE, workspaceIdentity } from "../src/harness/policy/index.ts";
 import { createScriptedAdapter } from "../src/harness/providers/index.ts";
 import { createSessionStore } from "../src/harness/store/index.ts";
+import { probeSandbox } from "../src/harness/tools/index.ts";
 import {
   call,
   calls,
@@ -31,7 +34,8 @@ import {
  * Grants, revocations and uses are audited. Fixtures are benign: a tiny module and its check.
  */
 
-const BUGGY = "export function add(a, b) {\n  return a - b;\n}\n";
+const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+const BUGGY ="export function add(a, b) {\n  return a - b;\n}\n";
 const FIXED = "export function add(a, b) {\n  return a + b;\n}\n";
 const CHECK = 'import { add } from "./src/add.js";\nif (add(2, 3) !== 5) { console.error("add is wrong"); process.exit(1); }\nconsole.log("ok");\n';
 const VERIFY = "node check.mjs";
@@ -145,6 +149,70 @@ test("SEC-N1 a headless run whose plan needs trust exits 3 before any worker; --
   }
 });
 
+test("SEC-N1 a real `syn run --mode jsonl` child process in an untrusted workspace exits 3 with an error frame before any attempt/started", { timeout: 90_000 }, async (t) => {
+  const report = await probeSandbox({ platform: process.platform });
+  if (report.enforcement === "full") {
+    t.skip("this host has a full OS sandbox, so verification commands do not need workspace trust");
+    return;
+  }
+  const sandbox = await createSandbox(FILES, { git: true });
+  try {
+    const plannerScript = path.join(sandbox.home, "planner.json");
+    const workerScript = path.join(sandbox.home, "worker.json");
+    await writeFile(
+      plannerScript,
+      JSON.stringify([
+        { tool_calls: [{ name: "plan_propose", arguments: planArguments("Fix add()", [{ key: "fix-add", risk: "standard", owned: ["src/add.js"], read: ["src/add.js", "check.mjs"], verification: [VERIFY], criteria: ["add(2, 3) returns 5"] }]) }] },
+        { text: "planned" },
+      ]),
+    );
+    await writeFile(workerScript, JSON.stringify([{ tool_calls: [{ name: "write_file", arguments: { path: "src/add.js", content: FIXED } }] }, { text: "unreachable" }]));
+    await writeFile(
+      path.join(sandbox.home, "config.yaml"),
+      [
+        "adapters:",
+        `  - { id: plan-script, kind: scripted, script: ${JSON.stringify(plannerScript)} }`,
+        `  - { id: worker-script, kind: scripted, script: ${JSON.stringify(workerScript)} }`,
+        "routes:",
+        "  - { tier: orchestrator, provider: scripted, model: planner, adapter: plan-script }",
+        "  - { tier: complex_worker, provider: scripted, model: worker, adapter: worker-script }",
+        "  - { tier: fast_worker, provider: scripted, model: worker, adapter: worker-script }",
+        "",
+      ].join("\n"),
+    );
+    const child = spawn(process.execPath, [CLI, "run", "Fix add()", "--mode", "jsonl"], {
+      cwd: sandbox.workspace,
+      env: { ...process.env, SYNORCH_HOME: sandbox.home, SYNORCH_CREDENTIAL_STORE: "file", NO_COLOR: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+    const code = await new Promise<number | null>((resolve) => child.once("exit", (exitCode) => resolve(exitCode)));
+
+    assert.equal(code, 3, `${stdout}\n${stderr}`);
+    const { frames, problems } = parseFrames(stdout);
+    assert.deepEqual(problems, []);
+    assert.equal(frames[0]?.type, "hello");
+    const errorIndex = frames.findIndex((frame) => frame.type === "error");
+    assert.equal(errorIndex, frames.length - 1, "the error frame is the single terminal frame");
+    const last = frames[errorIndex];
+    assert.ok(last?.type === "error");
+    assert.equal(last.data.code, "approval_unavailable");
+    assert.match(last.data.message, /workspace trust unavailable/);
+    const attempts = frames.filter((frame) => frame.type === "event" && frame.data.type === "attempt/started");
+    assert.equal(attempts.length, 0, "no attempt started before (or after) the error frame");
+    assert.equal(await readFile(path.join(sandbox.workspace, "src/add.js"), "utf8"), BUGGY);
+    assert.equal(existsSync(path.join(sandbox.home, TRUST_FILE)), false);
+    const hello = frames[0];
+    assert.ok(hello?.type === "hello");
+    assert.equal(eventsOf(await readSession(sandbox.home, hello.data.session_id), "attempt/started").length, 0);
+  } finally {
+    await sandbox.cleanup();
+  }
+});
+
 test("SEC-N1 syn trust grants in the user scope only, is audited, shows in doctor, is used by the next run and is revoked", async () => {
   const sandbox = await createSandbox(FILES, { git: true });
   try {
@@ -152,7 +220,8 @@ test("SEC-N1 syn trust grants in the user scope only, is audited, shows in docto
     assert.equal((await doctorTrust(sandbox)).status, "warn");
     const grant = capture({ cwd: sandbox.root });
     assert.equal(await runHarnessCommand(["trust", "--target", sandbox.workspace], grant.io, overridesFor(sandbox)), 0, grant.stderr());
-    assert.match(grant.stdout(), /tests and build scripts will run with your user permissions; Synorch cannot confine them on this platform/);
+    assert.ok(grant.stdout().includes(WORKSPACE_TRUST_NOTICE), grant.stdout());
+    assert.match(grant.stdout(), /any code the AI writes during the session.*outside the workspace, including your Synorch credentials.*sandbox on this platform is not full/);
     const stored = JSON.parse(await readFile(path.join(sandbox.home, TRUST_FILE), "utf8")) as { workspaces: { root: string; identity: string; granted_by: string }[] };
     const identity = workspaceIdentity(sandbox.workspace);
     assert.deepEqual(stored.workspaces.map((record) => [record.root, record.identity, record.granted_by]), [[identity.root, identity.identity, "command"]]);
@@ -212,40 +281,74 @@ test("SEC-N1 repository content can never grant trust: a trust file in the repo,
   }
 });
 
-test("SEC-N1 an interactive session asks once through the approval UI; yes persists and audits trust, and the run uses it", async () => {
+/** `trust/used` sources recorded by the project's run sessions (the audit session excluded). */
+async function trustUses(sandbox: Sandbox): Promise<string[]> {
+  const sessions = createSessionStore(sandbox.home);
+  const runs = (await sessions.list(deriveProjectId(sandbox.workspace, process.platform))).filter((summary) => summary.manifest.title !== TRUST_AUDIT_TITLE);
+  const sources: string[] = [];
+  for (const summary of runs) for (const event of eventsOf(await readSession(sandbox.home, summary.manifest.session_id), "trust/used")) sources.push(event.data.source);
+  return sources;
+}
+
+test("T1 an interactive session asks once with its own choices; Trust this workspace persists and audits trust, and the run uses it", async () => {
   const sandbox = await createSandbox(FILES, { git: true });
   try {
     await configure(sandbox);
-    const run = capture({ cwd: sandbox.workspace, stdin: new ScriptedInput("y\n", true), stdinIsTTY: true });
+    const run = capture({ cwd: sandbox.workspace, stdin: new ScriptedInput("t\n", true), stdinIsTTY: true });
     const code = await runHarnessCommand(["run", "Fix add()", "--plain"], run.io, overridesFor(sandbox, { adapters: scenario().adapters }));
     assert.equal(code, 0, `${run.stdout()}\n${run.stderr()}`);
-    assert.match(run.stdout(), /Approval needed \(workspace-trust\)/);
-    assert.match(run.stdout(), /tests and build scripts will run with your user permissions; Synorch cannot confine them on this platform/);
+    assert.match(run.stdout(), /Trust this workspace\?/);
+    assert.match(run.stdout(), /\[n\] Not now \(default\)/);
+    assert.ok(run.stdout().includes(WORKSPACE_TRUST_NOTICE), run.stdout());
+    assert.match(`${run.stdout()}${run.stderr()}`, /saved in .*trust\.json; revoke with syn trust --revoke/);
     const granted = eventsOf(await auditEvents(sandbox), "trust/granted");
     assert.deepEqual(granted.map((event) => event.data.source), ["prompt"]);
     assert.equal(createWorkspaceTrustStore(sandbox.home).status(sandbox.workspace).trusted, true);
+    assert.deepEqual(await trustUses(sandbox), ["store"]);
     assert.equal(await readFile(path.join(sandbox.workspace, "src/add.js"), "utf8"), FIXED);
   } finally {
     await sandbox.cleanup();
   }
 });
 
-test("SEC-N1 declining the interactive prompt leaves the workspace untrusted and nothing is stored", async () => {
+test("T1 Trust for this session only runs the verification but persists nothing and audits no grant", async () => {
   const sandbox = await createSandbox(FILES, { git: true });
   try {
     await configure(sandbox);
-    const run = capture({ cwd: sandbox.workspace, stdin: new ScriptedInput("n\n", true), stdinIsTTY: true });
+    const run = capture({ cwd: sandbox.workspace, stdin: new ScriptedInput("s\n", true), stdinIsTTY: true });
     const code = await runHarnessCommand(["run", "Fix add()", "--plain"], run.io, overridesFor(sandbox, { adapters: scenario().adapters }));
-    assert.notEqual(code, 0, "the verification command could not run");
-    assert.match(run.stderr(), /workspace not trusted/);
-    assert.match(run.stdout(), /exec denied: node check\.mjs .*the workspace is not trusted/);
-    assert.equal(existsSync(path.join(sandbox.home, TRUST_FILE)), false);
+    assert.equal(code, 0, `${run.stdout()}\n${run.stderr()}`);
+    assert.match(run.stderr(), /for this session only \(not saved\)/);
+    assert.equal(await readFile(path.join(sandbox.workspace, "src/add.js"), "utf8"), FIXED);
+    assert.equal(existsSync(path.join(sandbox.home, TRUST_FILE)), false, "session trust is never written to trust.json");
+    assert.equal(createWorkspaceTrustStore(sandbox.home).status(sandbox.workspace).trusted, false);
     assert.equal(eventsOf(await auditEvents(sandbox), "trust/granted").length, 0);
-    assert.equal(await readFile(path.join(sandbox.workspace, "src/add.js"), "utf8"), BUGGY, "nothing unverified was integrated");
+    assert.deepEqual(await trustUses(sandbox), ["session"], "the run records that it relied on session trust");
+    assert.equal((await doctorTrust(sandbox)).status, "warn", "the next process starts untrusted again");
   } finally {
     await sandbox.cleanup();
   }
 });
+
+for (const answer of ["\n", "n\n", "y\n"]) {
+  test(`T1 answering ${JSON.stringify(answer)} to the trust prompt is Not now: the workspace stays untrusted and nothing is stored`, async () => {
+    const sandbox = await createSandbox(FILES, { git: true });
+    try {
+      await configure(sandbox);
+      const run = capture({ cwd: sandbox.workspace, stdin: new ScriptedInput(answer, true), stdinIsTTY: true });
+      const code = await runHarnessCommand(["run", "Fix add()", "--plain"], run.io, overridesFor(sandbox, { adapters: scenario().adapters }));
+      assert.notEqual(code, 0, "the verification command could not run");
+      assert.match(run.stderr(), /workspace not trusted/);
+      assert.match(run.stdout(), /exec denied: node check\.mjs .*the workspace is not trusted/);
+      assert.equal(existsSync(path.join(sandbox.home, TRUST_FILE)), false);
+      assert.equal(eventsOf(await auditEvents(sandbox), "trust/granted").length, 0);
+      assert.deepEqual(await trustUses(sandbox), []);
+      assert.equal(await readFile(path.join(sandbox.workspace, "src/add.js"), "utf8"), BUGGY, "nothing unverified was integrated");
+    } finally {
+      await sandbox.cleanup();
+    }
+  });
+}
 
 test("SEC-N1 syn trust and --trust-workspace parse strictly; trust help states the risk", () => {
   assert.deepEqual(parseHarnessArgs(["trust"]), { kind: "trust", common: { target: undefined, plain: false, color: "auto" }, revoke: false });

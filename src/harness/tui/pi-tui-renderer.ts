@@ -34,6 +34,7 @@ import type {
   TerminalRenderer,
   UserInputSource,
 } from "../contracts/index.ts";
+import { WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
 import { withApprovalDeadline, type ApprovalChoice } from "./approvals.ts";
 import { deviceCodeText } from "./auth-interaction.ts";
 import { describeEvent, levelPrefix, type EventLine } from "./describe.ts";
@@ -633,12 +634,19 @@ export class PiTuiRenderer implements TerminalRenderer {
   private requestApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
     return withApprovalDeadline(request, this.options.policyMode, signal, this.clock, (promptSignal) =>
       new Promise<ApprovalChoice>((resolve, reject) => {
-        const items = [{ value: "allowed-once", label: "Allow once" }];
-        if (request.scope !== "once") items.push({ value: "allowed-for-scope", label: `Allow for this ${request.scope}` });
-        items.push({ value: "rejected", label: "Reject" });
+        const trust = request.subject_kind === "workspace-trust";
+        const items: { value: string; label: string }[] = [];
+        if (trust) {
+          // "Not now" first, so the pre-selected answer never trusts anything.
+          for (const choice of WORKSPACE_TRUST_CHOICES) items.push({ value: choice.outcome, label: choice.label });
+        } else {
+          items.push({ value: "allowed-once", label: "Allow once" });
+          if (request.scope !== "once") items.push({ value: "allowed-for-scope", label: `Allow for this ${request.scope}` });
+          items.push({ value: "rejected", label: "Reject" });
+        }
         const list = new SelectList(items, items.length, this.selectTheme);
         const box = new Box(1, 0);
-        box.addChild(new Text(this.style.yellow(`Approval needed (${request.subject_kind})`), 0, 0));
+        box.addChild(new Text(this.style.yellow(trust ? "Trust this workspace?" : `Approval needed (${request.subject_kind})`), 0, 0));
         box.addChild(new Text(sanitizeInline(request.summary, 2000), 0, 0));
         if (request.effect !== undefined) box.addChild(new Text(this.style.dim(`effect ${request.effect} · scope ${request.scope}`), 0, 0));
         box.addChild(list);

@@ -114,6 +114,8 @@ export interface ProcessSpec {
   readonly outputLimitBytes: number;
   readonly writeRoots: readonly string[];
   readonly network: "deny" | "allow";
+  /** Roots (the task's workspace) whose PATH entries are never used to look up `argv[0]`; the runner adds its own (Synorch home, session workspace). */
+  readonly untrustedRoots?: readonly string[];
 }
 
 /**

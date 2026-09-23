@@ -109,6 +109,7 @@ export function createExecTool(options: ProcessToolOptions): Tool<ExecInput> {
             outputLimitBytes: metadata.output_limit_bytes,
             writeRoots: writeRoots(context),
             network: context.policy.network.mode === "deny" ? "deny" : "allow",
+            untrustedRoots: [context.workspaceRoot],
           },
           context.signal,
         );
@@ -230,6 +231,7 @@ async function runGit(argv: [string, ...string[]], context: ToolExecutionContext
       outputLimitBytes: limit,
       writeRoots: [],
       network: "deny",
+      untrustedRoots: [context.workspaceRoot],
     },
     context.signal,
   );

@@ -131,7 +131,7 @@ function trustCheck(state: WorkspaceTrustState, file: string, report: SandboxRep
     return { id: "trust", status: "ok", summary: `not needed: the full sandbox confines build/test commands (workspace ${state.trusted ? "trusted" : "not trusted"})`, details };
   }
   if (state.trusted) {
-    return { id: "trust", status: "ok", summary: `workspace trusted (${state.source ?? "store"}): verification and build/test commands run unconfined with your user permissions`, details };
+    return { id: "trust", status: "ok", summary: `workspace trusted (${state.source ?? "store"}): verification and build/test commands, and code the AI writes, run unconfined with your user permissions and can reach files outside the workspace`, details };
   }
   return {
     id: "trust",

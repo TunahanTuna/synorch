@@ -9,6 +9,8 @@ export interface ProcessOptions {
   readonly stdin: string | undefined;
   readonly timeoutMs: number;
   readonly outputLimitBytes: number;
+  /** PATH entries inside these roots (workspace, Synorch home) are skipped when the program is looked up. */
+  readonly untrustedRoots?: readonly string[];
 }
 
 const INTERRUPT_GRACE_MS = 1_500;
@@ -25,7 +27,7 @@ export async function runProcess(argv: readonly [string, ...string[]], options: 
   const started = performance.now();
   let launch: LaunchPlan;
   try {
-    launch = await planLaunch(argv, { cwd: options.cwd, env: options.env });
+    launch = await planLaunch(argv, { cwd: options.cwd, env: options.env, ...(options.untrustedRoots === undefined ? {} : { untrustedRoots: options.untrustedRoots }) });
   } catch (error: unknown) {
     return failedSpawn(error, started);
   }

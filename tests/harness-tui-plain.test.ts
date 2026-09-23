@@ -223,6 +223,35 @@ test("an interactive plain terminal asks [y/N]; the default and a timeout refuse
   await renderer.stop("completed");
 });
 
+test("T1 the plain workspace-trust prompt has its own choices and defaults to Not now", async () => {
+  const input = new FakeInput(true);
+  const { renderer, stdout } = setup({ input, interactive: true });
+  const trust = (): ApprovalRequest => ({ ...approval("once"), subject_kind: "workspace-trust", effect: undefined, summary: "Trust /repo?" });
+
+  const empty = renderer.approvals.request(trust(), new AbortController().signal);
+  input.type("\n");
+  assert.equal((await empty).outcome, "rejected", "Enter alone is Not now");
+  assert.match(stdout(), /Trust this workspace\? Trust \/repo\?/);
+  assert.match(stdout(), /\[n\] Not now \(default\)\n {2}\[s\] Trust for this session only\n {2}\[t\] Trust this workspace\n/);
+  assert.match(stdout(), /Choose \[N\/s\/t\]: /);
+  assert.doesNotMatch(stdout(), /Allow\?/);
+
+  const yes = renderer.approvals.request(trust(), new AbortController().signal);
+  input.type("y\n");
+  assert.equal((await yes).outcome, "rejected", "the generic yes is not an answer to the trust prompt");
+
+  const session = renderer.approvals.request(trust(), new AbortController().signal);
+  input.type("s\n");
+  assert.equal((await session).outcome, "allowed-once");
+
+  const persist = renderer.approvals.request(trust(), new AbortController().signal);
+  input.type("t\r\n");
+  const persisted = await persist;
+  assert.equal(persisted.outcome, "allowed-for-scope");
+  assert.equal(persisted.decided_by, "user");
+  await renderer.stop("completed");
+});
+
 test("secrets are read in raw mode without echo and notices are acknowledged explicitly", async () => {
   const input = new FakeInput(true);
   const { renderer, stdout, stderr } = setup({ input, interactive: true });

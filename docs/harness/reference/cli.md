@@ -24,6 +24,7 @@ Bu belge Aşama A'da kesinleşen davranışı (argüman ayrıştırma, yardım m
 | `syn auth status [--json]` | Tek alt komut `status`. |
 | `syn memory status\|search\|show\|related\|review\|accept\|reject\|open\|reindex …` | Alt komut adı doğrulanır; geri kalan argümanlar I6'nın `memoryCommand`'ına aynen gider. |
 | `syn trust [--revoke] [--target <path>]` | Konumsal argüman yok; bilinmeyen bayrak usage hatası. |
+| `syn config [list [--json] \| get <anahtar> [--json] \| set <anahtar> <değer> \| unset <anahtar> \| edit \| path]` | Alt komut yoksa `list`; bilinmeyen alt komut en yakın öneriyle usage hatası (`ls`, `rm`, `open` takma adları). `--json` yalnız `list`/`get`. Bkz. §11.1. |
 
 Ortak bayraklar: `-t, --target <path>`, `--plain`, `--color always|never|auto`, `-h, --help`. Yalnız `agent` ve `run`: `--policy autonomous|ask` (varsayılan `autonomous`) ve tekrarlanabilir `--profile <tier>=<route>` (tier `orchestrator|complex_worker|fast_worker`, aynı tier iki kez verilemez, kalıcı yazılmaz). `login`/`logout` için `--profile` credential profilidir.
 
@@ -186,7 +187,7 @@ Hedef deponun Synorch yapısı (`syn init`/`syn sync` çıktısı) oturumun her 
 
 Güven kuralı: depo metni `project` güvenindedir; tarif eder ve daraltır, asla yetki vermez. `writes_product_files: false` bir worker'ın yazma kapsamını ve `workspace-write` etkisini kaldırır; orchestrator için `.ai/tasks/` altındaki daha dar bir `control_plane_write_scope` `.ai/tasks/**`'ın yerini alır; explorer/reviewer/orchestrator için `writes_product_files: true` veya `.ai/tasks/` dışı kapsam **yok sayılır** ve tanılamaya yazılır. Manifest ek bir `role` katmanı olarak policy'ye girer (`source: .ai/agents/<rol>/AGENT.md`), dolayısıyla yürürlükteki manifest bir policy kaynağıdır ve hiçbir araç onu yazamaz (`policy-self-modification`). `assertNotWider` daraltmanın hiçbir etkiyi veya yazma desenini genişletmediğini her hesaplamada doğrular.
 
-Geri dönüş: depoda `.ai/` yoksa `src/templates/structure-templates.ts`'in (`syn init`'in yazacağı) içeriği bellekte kullanılır; `.ai/` varsa eksik veya geçersiz her parça (anayasa, kayıt, tek bir manifest) tek tek yerleşik karşılığıyla tamamlanır ve tanılamaya yazılır. Oturum başlığı (`notice: canonical .ai: …`) ve `doctor --runtime` (`canonical` sonucu; depo yapısı tanısız ise `ok`, yerleşik geri dönüş veya tanı varsa `warn`) hangisinin kullanıldığını söyler. Boundary testi yalnız `cli` modülünün bu tek şablon dosyasını import etmesine izin verir.
+Geri dönüş: depoda `.ai/` yoksa `src/templates/structure-templates.ts`'in (`syn init`'in yazacağı) içeriği bellekte kullanılır; `.ai/` varsa eksik veya geçersiz her parça (anayasa, kayıt, tek bir manifest) tek tek yerleşik karşılığıyla tamamlanır ve tanılamaya yazılır. **Init gerektirmeyen kullanım (K1.5-4):** yerleşik yapı birinci sınıf moddur; paketlenmiş `syn` hiçbir `syn init` olmadan her depoda anayasa, 8 çekirdek protokol, 5 rol ve 9 skill ile çalışır (şablonlar TypeScript olarak `dist/`e derlenir; npm `files` `dist` ve `skill-sources`'ı içerir). `syn init` yalnız özelleştirmek içindir. `doctor --runtime` `canonical` sonucu tanı yoksa her iki modda `ok`'tur ve yerleşik modda `canonical: built-in Synorch structure (…; customize with syn init)` bilgisini verir; yalnız tanı (eksik/geçersiz parça) `warn` yapar. `syn run`/legacy başlığı yerleşik mod için notice basmaz, yalnız deponun kendi yapısını duyurur. Boundary testi yalnız `cli` modülünün bu tek şablon dosyasını import etmesine izin verir.
 
 ## 11. Yapılandırma
 
@@ -223,6 +224,30 @@ budget: { max_wall_time_seconds: 1800, max_cost_usd: 5 }                    # ka
 
 `scripted` betik dosyası JSON dizisidir; her öğe bir model isteğini yanıtlar: ham `ModelStreamEvent` dizisi, `{ "text" }`, `{ "tool_calls": [{ "name", "arguments" }] }` veya `{ "error": { "code", "message", "retry_after_ms"? } }`. Araç argümanlarında `$last_tool_call_id` ve `$tool_call_id[N]` istekteki araç sonuçlarının harness kimlikleriyle değiştirilir (kanıt göstermek için). Örnek: `tests/fixtures/cli/runtime/noop/`.
 
+### 11.1 `syn config` ve `/config` (K1.5-3)
+
+`src/harness/cli/config-command.ts`. YAML düzenlemeden kullanıcı katmanını (`<home>/config.yaml`) yönetir; **yalnız kullanıcı katmanı yazılır**, repo katmanları yalnız daraltır (SEC-C1, yukarıdaki kural). Her yazma, oturumun kullandığı şema ve adapter kontrolleriyle (`validateUserConfigText`) doğrulanır, sonra atomik olarak (geçici dosya + rename) yerine konur; `yaml` Document API'siyle düzenlendiği için yorumlar ve diğer anahtarlar korunur.
+
+| Anahtar | Tür | Kapsam |
+| --- | --- | --- |
+| `routes.<tier>[.<rol>]` | `provider/model[@adapter]` (ör. `openai/gpt-6-sol`, `anthropic/opus-5.5@claude-code`); adapter yoksa sağlayıcı `openai`/`anthropic`/`scripted` olmalı | kullanıcı |
+| `ui.permission_mode` | `ask\|auto\|full\|plan` | kullanıcı |
+| `ui.color`, `ui.mouse` | boolean (`true/false/on/off/yes/no/1/0`) | kullanıcı |
+| `ui.glyphs` | `auto\|rich\|safe\|ascii` (`SYN_GLYPHS` önceliklidir) | kullanıcı |
+| `policy.mode`, `policy.require_full_sandbox` | `autonomous\|ask`, boolean | daraltılabilir (en katı) |
+| `budget.max_wall_time_seconds`, `budget.max_cost_usd` | pozitif tamsayı / sayı | daraltılabilir (en küçük) |
+| `memory.root` | yol | kullanıcı |
+
+- `list [--json]`: her anahtarın etkin değeri ve kaynağı (`user`, `default`, repo daraltıyorsa `project (narrowed)`/`workspace (narrowed)`), yok sayılan repo anahtarlarının uyarıları. JSON: `{user_config, files, settings: [{key, value, source, scope}], warnings}`.
+- `get <anahtar>`: yalnız değer (betikler için); ayarlı değilse exit 1.
+- `set`/`unset`: tipli ayrıştırma; bilinmeyen anahtar/değer en yakın öneriyle (`Did you mean ui.mouse?`) exit 2 ve dosyaya dokunulmaz. `adapters` yalnız `edit` ile.
+- `edit`: `$VISUAL`/`$EDITOR` (Windows'ta `notepad`, diğerlerinde `vi`) `<home>/config.yaml.edit` taslağını açar; taslak doğrulanırsa yerine konur, doğrulanmazsa yapılandırma değişmez, hata basılır ve bir sonraki `syn config edit` taslaktan devam eder.
+- `path`: kullanıcı yapılandırmasının yolu.
+
+`ui.mouse` etkileşimli görünümü fare yakalaması açık başlatır (`SYN_MOUSE` yalnız ayarsızken), `ui.glyphs` glif setini seçer.
+
+**`/config` (oturum içi).** TUI'da ayar listesi mevcut picker primitive'iyle açılır (`openModelPicker`, `ModelPickerEntry.label` ve `PickerHeading` ile): satır başına anahtar, değer, kaynak; Enter düzenler — boolean anında tersine döner, enum ve route için seçenekler (route'larda yapılandırılmış route'lar + "Type a value…"), sayı/metin için soru; her listede "unset" vardır; Esc kapatır. `ui.permission_mode` ve `ui.mouse` hemen uygulanır, diğerleri yeni konuşmalarda. `/config <anahtar>` tek değeri, `/config <anahtar> <değer>` doğrudan yazar; plain renderer'da `/config` listeyi basar.
+
 ## 12. Komutların davranışı
 
 | Komut | Davranış |
@@ -254,6 +279,7 @@ budget: { max_wall_time_seconds: 1800, max_cost_usd: 5 }                    # ka
 | `/usage`, `/cost` | Oturum/gün istek, girdi/çıktı/cache token, sağlayıcı/model/tier, kota % (header varsa), API key için `~$` tahmini; günlük toplam `<home>/usage/usage.json` (90 gün). `/usage` U3 `UsageView`'dir. |
 | `/evidence`, `/why [araç]`, `/graph` | U3 `EvidenceView` / `WhyView` / plan grafiği (worker run'ları, son policy kararı ve onu değiştiren komutlar). |
 | `/compact [odak]`, `/context`, `/diff`, `/tasks`, `/permissions`, `/memory`, `/log` | Elle compaction (summary-v1), okuma raporları. |
+| `/config [anahtar [değer]]` | Ayar ekranı (§11.1); yalnız kullanıcı yapılandırmasını yazar. |
 | `/clear`, `/resume [n\|id]` | Yeni konuşma / son konuşmalar listesi ve geçiş; resume ve `--continue` 3 satırlık "where we were / since then / next" kartı basar. |
 
 Çalışırken yazılan mesaj: worker'lar sürüyorsa `Coordinator.steer`, tur sürüyorsa `driver.steer` (sonraki adım sınırında okunur; tur bitmişse `drainSteers` ile yeni tura taşınır). Esc turu keser; worker'lar sürerken ilk Esc uyarır, ikincisi durdurur. `@yol` ve renderer eklentileri (U1 `Attachment`) digest'li ve boyut sınırlı (dosya 64 KiB, toplam 192 KiB) mesaja eklenir; görüntüler metin kanalı nedeniyle henüz gönderilmez (net uyarı).

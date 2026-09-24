@@ -69,8 +69,8 @@ test("doctor --runtime --json reports each area separately and makes no network 
     assert.equal(byId.get("trust")?.status, "warn", "an untrusted workspace on a partial sandbox is reported (SEC-N1)");
     assert.match(byId.get("trust")?.summary ?? "", /not trusted.*syn trust/);
     const canonical = byId.get("canonical");
-    assert.equal(canonical?.status, "warn", "a repository without .ai/ runs on the built-in defaults, and doctor says so");
-    assert.match(canonical?.summary ?? "", /canonical \.ai: none in .*; using the built-in Synorch defaults \(constitution loaded, 8 core protocol\(s\), 5 role manifest\(s\), 9 skill\(s\)/);
+    assert.equal(canonical?.status, "ok", "a repository without .ai/ runs on the built-in structure, a first-class mode (K1.5-4)");
+    assert.match(canonical?.summary ?? "", /canonical: built-in Synorch structure \(constitution loaded, 8 core protocol\(s\), 5 role manifest\(s\), 9 skill\(s\).*customize with syn init\)/);
     assert.equal(byId.get("sandbox")?.status, "warn", "a partial sandbox is reported, not hidden");
     assert.equal(byId.get("store")?.status, "ok");
     const auth = byId.get("auth")?.details as { provider_id: string; method: string; state: string }[];
@@ -89,7 +89,7 @@ test("doctor --runtime --json reports each area separately and makes no network 
     const human = capture({ cwd: sandbox.workspace });
     assert.equal(await runHarnessCommand(["doctor", "--runtime"], human.io, overrides), 0);
     assert.match(human.stdout(), /^WARN  sandbox/m);
-    assert.match(human.stdout(), /^WARN  canonical\s+canonical \.ai: none in/m);
+    assert.match(human.stdout(), /^OK    canonical\s+canonical: built-in Synorch structure/m);
     assert.match(human.stdout(), /No network request was made/);
     assert.deepEqual(network.urls, []);
 

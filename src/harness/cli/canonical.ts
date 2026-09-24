@@ -26,7 +26,9 @@ import type { ProjectInstructions, SkillCatalog, SkillEntry } from "../context/i
  * Everything is parsed with the generator's own schemas (`src/domain/canonical-contracts.ts`). The
  * text is repository content: it can describe and restrict, never grant. A manifest that asks for
  * more than the harness allows is reported and ignored. Without a `.ai/` directory the built-in
- * defaults `syn init` would write (`src/templates`) are used, and the session says so.
+ * Synorch structure `syn init` would write (`src/templates`, compiled into the package) is used: a
+ * first-class mode (K1.5-4), so `syn` works in any repository without `syn init`, which only
+ * customizes it.
  */
 
 export type CanonicalOrigin = "repository" | "builtin";
@@ -521,7 +523,7 @@ export function describeCanonical(canonical: CanonicalStructure, workspaceRoot: 
   const parts = `constitution ${canonical.instructions.constitution === undefined ? "missing" : "loaded"}, ${canonical.protocolIds.length} core protocol(s), ${canonical.roles.size} role manifest(s), ${canonical.skillEntries.length} skill(s) in the catalog`;
   return canonical.origin === "repository"
     ? `canonical .ai: ${path.join(workspaceRoot, ".ai")} (${parts})`
-    : `canonical .ai: none in ${workspaceRoot}; using the built-in Synorch defaults (${parts}); run syn init to customize`;
+    : `canonical: built-in Synorch structure (${parts}; customize with syn init)`;
 }
 
 export function describeProfiles(canonical: CanonicalStructure): string | undefined {

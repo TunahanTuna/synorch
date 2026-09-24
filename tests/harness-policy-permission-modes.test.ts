@@ -71,12 +71,29 @@ test("hard rails and hard refusals deny in every mode", () => {
   for (const mode of ["ask", "auto", "full", "plan", undefined] as const) {
     assert.equal(decide(mode, write(".git/config")), "deny", `.git internals (${mode})`);
     assert.equal(decide(mode, exec(["git", "commit", "-m", "x"])), "deny", `git integration (${mode})`);
-    assert.equal(decide(mode, exec(["rm", "-rf", "/"])), "deny", `destructive outside (${mode})`);
-    assert.equal(decide(mode, exec(["git", "push", "--force", "origin", "main"])), "deny", `force push (${mode})`);
     assert.equal(decide(mode, exec(["node", "--require", "evil.js", "x.js"])), "deny", `module injection (${mode})`);
     const escape = action({ tool_name: "write_file", effect: "workspace-write", paths: [], escapes: [{ requested: "../outside.txt", access: "write", reason: "outside-workspace" }] });
     assert.equal(decide(mode, escape), "deny", `write escape (${mode})`);
   }
+});
+
+test("destructive commands ask in every interactive mode (full included), deny headless and in plan (owner decision 2026-09-24)", () => {
+  for (const mode of ["ask", "auto", "full"] as const) {
+    assert.equal(decide(mode, exec(["rm", "-rf", "/"])), "ask", `destructive outside (${mode})`);
+    assert.equal(decide(mode, exec(["git", "push", "--force", "origin", "main"])), "ask", `force push (${mode})`);
+    assert.equal(decide(mode, exec(["npm", "publish"])), "ask", `publish (${mode})`);
+  }
+  for (const mode of ["plan", undefined] as const) {
+    assert.equal(decide(mode, exec(["git", "push", "--force", "origin", "main"])), "deny", `force push (${mode})`);
+    assert.equal(decide(mode, exec(["rm", "-rf", "/"])), "deny", `destructive outside (${mode})`);
+  }
+  const { engine, policy } = session("full");
+  const prompt = engine.evaluate(exec(["git", "push", "--force"]), policy);
+  assert.equal(prompt.rail, undefined, "a prompt carries no rail");
+  assert.ok(prompt.reasons.some((reason) => reason.code === "destructive-prompt"));
+  assert.ok(prompt.reasons.some((reason) => reason.code === "git-force-push"), "the card says why");
+  assert.equal(decide("full", exec(["git", "push", "origin", "main"])), "allow", "plain push stays allowed in full");
+  assert.equal(decide("auto", exec(["git", "push", "origin", "main"])), "ask", "plain push asks in auto");
 });
 
 test("a repository layer that asks narrows auto and full to ask; workers inherit only full; read-only roles never", () => {

@@ -63,6 +63,8 @@ export interface RendererRequest {
   readonly view?: "events" | "conversation";
   readonly glyphs?: GlyphSet;
   readonly debug?: boolean;
+  /** `ui.mouse`: start with mouse capture on (interactive renderer only; SYN_MOUSE still applies when unset). */
+  readonly mouse?: boolean;
 }
 
 export interface SessionRenderer extends TerminalRenderer {
@@ -235,6 +237,7 @@ export async function createSessionRenderer(io: RendererIO, request: RendererReq
         ...(request.view === undefined ? {} : { view: request.view }),
         ...(request.glyphs === undefined ? {} : { glyphs: request.glyphs }),
         ...(request.debug === undefined ? {} : { debug: request.debug }),
+        ...(request.mouse === undefined ? {} : { mouse: request.mouse }),
         ...(io.terminal === undefined ? {} : { terminal: io.terminal }),
       }),
     );

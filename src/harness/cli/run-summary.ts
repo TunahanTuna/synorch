@@ -28,7 +28,8 @@ export function headerFor(runtime: Runtime, notices: readonly string[] = []): Se
   const sandboxNotes = runtime.sandbox.enforcement === "full" ? [] : runtime.sandbox.notes.map((note) => `sandbox ${runtime.sandbox.enforcement}: ${note}`);
   const profiles = describeProfiles(runtime.canonical);
   const canonicalNotes = [
-    describeCanonical(runtime.canonical, runtime.workspaceRoot),
+    // The built-in structure is the normal mode without .ai/ (K1.5-4); only a repository's own structure is announced.
+    ...(runtime.canonical.origin === "repository" ? [describeCanonical(runtime.canonical, runtime.workspaceRoot)] : []),
     ...(profiles === undefined ? [] : [profiles]),
     ...runtime.canonical.diagnostics.map((diagnostic) => `canonical .ai: ${diagnostic}`),
   ];

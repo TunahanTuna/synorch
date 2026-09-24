@@ -195,21 +195,26 @@ interface DecisionBuilder {
   decision: EffectDecision;
   rail: HardRail | undefined;
   readonly reasons: { code: string; layer: PolicyLayer; message: string }[];
-  /** Whether every denial so far is one a permission mode may lift (see `PERMISSION_LIFTABLE_CODES`). */
+  /** Whether every denial so far is one a permission mode may lift (see `PERMISSION_LIFTABLE_CODES`), or a destructive-command rule. */
   liftable: boolean;
+  /** A destructive-command rule denied (owner decision 2026-09-24: an interactive mode asks instead). */
+  destructive: boolean;
 }
 
 /** Roles that inherit `full` access from the session's permission mode; read-only roles and the orchestrator never do. */
 const WORKER_FULL_ROLES: ReadonlySet<AgentRole> = new Set(["implementer", "debugger"]);
 
 function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, options: PolicyEngineOptions): PolicyDecision {
-  const builder: DecisionBuilder = { decision: "allow", rail: undefined, reasons: [], liftable: true };
+  const builder: DecisionBuilder = { decision: "allow", rail: undefined, reasons: [], liftable: true, destructive: false };
   const deny = (layer: PolicyLayer, code: string, message: string, rail?: HardRail): void => {
     builder.decision = "deny";
-    if (rail !== undefined && builder.rail === undefined) builder.rail = rail;
+    if (rail !== undefined && (builder.rail === undefined || (builder.rail === "destructive-command" && rail !== "destructive-command"))) builder.rail = rail;
     // An allowlist refusal is liftable only on the partial-sandbox list; the read-only list and hard refusals (layer role) never are.
     const liftable = rail === undefined && (PERMISSION_LIFTABLE_CODES as readonly string[]).includes(code) && !(code === "exec-not-allowlisted" && layer === "role");
-    if (!liftable) builder.liftable = false;
+    // A destructive-command rule (force push, publish, recursive delete…) is promptable; every other rail stays a hard rail.
+    const promptable = rail === "destructive-command" && layer === "platform";
+    if (promptable) builder.destructive = true;
+    else if (!liftable) builder.liftable = false;
     builder.reasons.push({ code, layer, message: message.slice(0, 500) });
   };
 
@@ -265,7 +270,19 @@ type Deny = (layer: PolicyLayer, code: string, message: string, rail?: HardRail)
  */
 function liftByPermission(builder: DecisionBuilder, policy: EffectivePolicy, readOnly: boolean): void {
   const mode = policy.permission_mode;
-  if ((mode !== "auto" && mode !== "full") || readOnly || builder.decision !== "deny" || builder.rail !== undefined || !builder.liftable) return;
+  if (readOnly || builder.decision !== "deny" || !builder.liftable) return;
+  if (builder.destructive) {
+    // Owner decision 2026-09-24: destructive-command rules ask in every interactive mode, `full` included
+    // (an action card, never silent); headless has no human, so its broker still refuses. Sandbox escapes,
+    // reserved paths, credential stores, secret egress and policy sources remain hard rails (not liftable).
+    if (mode !== "ask" && mode !== "auto" && mode !== "full") return;
+    if (builder.rail !== "destructive-command") return;
+    builder.decision = "ask";
+    builder.rail = undefined;
+    builder.reasons.push({ code: "destructive-prompt", layer: "approval", message: "a destructive command always asks you first, in every permission mode" });
+    return;
+  }
+  if ((mode !== "auto" && mode !== "full") || builder.rail !== undefined) return;
   if (mode === "auto") {
     builder.decision = "ask";
     builder.reasons.push({ code: "permission-prompt", layer: "approval", message: "auto mode asks you before anything outside the allowlist runs" });

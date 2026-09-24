@@ -42,6 +42,16 @@ Mevcut Synorch protokolü her görev planı için kullanıcı onayı öngörür 
 - Önceki "Alternatives" maddesindeki *"Otonom modda dış yazma için prompt: reddedildi"* kararı etkileşimli `auto` için tersine çevrildi; headless ve mod yokken geçerlidir.
 - Kanıt: `src/harness/contracts/policy.ts` (`PERMISSION_MODES`, `PERMISSION_LIFTABLE_CODES`, `approvalRequestSchema.command/details`), `src/harness/policy/engine.ts` (`liftByPermission`), `src/harness/cli/conversation.ts` (broker, `/permissions`), `tests/harness-policy-permission-modes.test.ts`, `tests/harness-e2e-permission-modes.test.ts`; sözleşme: [policy ve onay §9](../contracts/policy-and-approval.md).
 
+### 2026-09-24 owner revision (ek) — yıkıcı komutlar `full`'da da sorar
+
+Ürün sahibi kararı (bağlayıcı, ekleyici): `full` modda yıkıcı komut kuralları (`DESTRUCTIVE_COMMAND_RULES`: force push, `npm publish`, özyinelemeli silme — çalışma alanı dışı dahil —, `git reset --hard`, `git clean -f`, disk biçimlendirme, uzak betik çalıştırma vb.) **sert ret yerine etkileşimli soru** (eylem kartı) üretir; `auto` ve `ask`'te de sorar. Headless (insan yok) aynen reddeder; `plan` ve varsayılan-ret (mod yok) reddeder; salt-okur roller reddeder.
+
+- **Motor:** `destructive-command` rail'i taşıyan, katmanı `platform` olan bulgu "sorulabilir"dir; kararın tek sert olmayan retleri bunlar (ve `PERMISSION_LIFTABLE_CODES`) ise `ask|auto|full`'da karar `ask` olur, rail kaldırılır ve `destructive-prompt` gerekçesi eklenir (kural kodu, ör. `git-force-push`, kartta "neden" olarak kalır). Aynı kararda başka bir rail varsa o rail raporlanır ve karar `deny` kalır.
+- **Sert rail olarak kalanlar (her mod):** çalışma alanı dışına çözülen yazmalar ve kaçışlar (`write-outside-scope`), `.git` iç yapısı ve Synorch home (`reserved-path-write`), kimlik bilgisi depoları (`credential-access`, `foreign-credential-store`), sır sızdırma (`secret-egress`), policy kaynakları (`policy-self-modification`), git entegrasyonu ve modül enjeksiyonu.
+- Düz `git push` (force yok) değişmedi: `auto`'da sorar, `full`'da izinli.
+- Broker: soru etkileşimli konuşmada eylem kartıdır; headless broker `unavailable` ile reddeder (exit 3).
+- Kanıt: `src/harness/policy/engine.ts` (`liftByPermission`, `DecisionBuilder.destructive`), `tests/harness-policy-permission-modes.test.ts` ("destructive commands ask in every interactive mode…").
+
 ## Alternatives
 
 - **Her plan için zorunlu kullanıcı onayı:** Ürün sahibinin otonom çalışma kararına aykırı; trivial işte gereksiz onay. Reddedildi.

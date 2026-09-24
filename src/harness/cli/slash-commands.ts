@@ -205,6 +205,8 @@ export interface ConversationCommandHost {
   resume(argument: string): Promise<void>;
   mouse(argument: string): Promise<void>;
   graph(): Promise<void>;
+  /** `/config [key [value]]`: the settings screen, or read / set one key (user configuration). */
+  config(argument: string): Promise<void>;
 }
 
 export interface SlashCommand {
@@ -247,6 +249,7 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/graph", description: "the plan graph of the current or last worker run", whileBusy: true, run: (host) => host.graph() },
   { name: "/tasks", description: "tasks of this conversation's worker runs", whileBusy: true, run: (host, argument) => host.report("tasks", argument) },
   { name: "/permissions", argsHint: "[ask|auto|full|plan | allow <prefix> | remove <prefix>]", description: "permission mode, allow rules and trust; switch mode or edit rules", whileBusy: true, run: (host, argument) => host.report("permissions", argument) },
+  { name: "/config", argsHint: "[key [value]]", description: "settings: routes, permission mode, budget, mouse, glyphs (saved to your user config)", whileBusy: true, run: (host, argument) => host.config(argument) },
   { name: "/log", argsHint: "[n]", description: "raw event log of this conversation (debug)", whileBusy: true, run: (host, argument) => host.report("log", argument) },
   { name: "/cancel", description: "stop the current work (the conversation stays resumable)", whileBusy: true, run: async (host) => host.cancel() },
   { name: "/exit", aliases: ["/quit"], description: "leave (resume with syn agent --continue)", whileBusy: true, rendererLocal: true, run: async () => true },

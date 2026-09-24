@@ -55,6 +55,8 @@ import type { RouteOverride } from "./args.ts";
  */
 
 export const CONFIG_FILE = "config.yaml";
+export const GLYPH_SET_CHOICES = ["auto", "rich", "safe", "ascii"] as const;
+export type GlyphSetChoice = (typeof GLYPH_SET_CHOICES)[number];
 export const ADAPTER_KINDS_CONFIGURABLE = ["openai-chatgpt", "openai-responses", "anthropic-messages", "claude-code", "scripted"] as const;
 export type ConfigurableAdapterKind = (typeof ADAPTER_KINDS_CONFIGURABLE)[number];
 
@@ -107,7 +109,16 @@ const configFileSchema = z.strictObject({
   memory: memoryConfigSchema.optional(),
   routes: z.array(routeEntrySchema).optional(),
   adapters: z.array(adapterEntrySchema).optional(),
-  ui: z.strictObject({ color: z.boolean().optional(), permission_mode: permissionModeSchema.optional() }).optional(),
+  ui: z
+    .strictObject({
+      color: z.boolean().optional(),
+      permission_mode: permissionModeSchema.optional(),
+      /** Start the interactive view with mouse capture on (wheel scroll, click to expand). */
+      mouse: z.boolean().optional(),
+      /** Glyph set of the interactive view; `auto` (or unset) detects it. `SYN_GLYPHS` still wins. */
+      glyphs: z.enum(GLYPH_SET_CHOICES).optional(),
+    })
+    .optional(),
   budget: z
     .strictObject({
       max_wall_time_seconds: z.int().positive().optional(),
@@ -116,6 +127,25 @@ const configFileSchema = z.strictObject({
     .optional(),
 });
 type ConfigFile = z.infer<typeof configFileSchema>;
+export type UserConfigFile = ConfigFile;
+
+/**
+ * Validates the text of a user configuration file exactly as a session would read it (schema and
+ * adapter checks). Returns the parsed file, or throws a `config_invalid` HarnessError.
+ */
+export function validateUserConfigText(text: string, file: string): ConfigFile {
+  let raw: unknown;
+  try {
+    raw = parseYaml(text);
+  } catch (error) {
+    throw configError(`not valid YAML: ${(error as Error).message.split("\n")[0] ?? ""}`, file);
+  }
+  if (raw === null || raw === undefined) return {};
+  const parsed = configFileSchema.safeParse(raw);
+  if (!parsed.success) throw configError(formatZodIssues(parsed.error), file);
+  adaptersOf(parsed.data, "user", file);
+  return parsed.data;
+}
 
 export type ConfigLayer = "user" | "workspace" | "project";
 
@@ -155,6 +185,10 @@ export interface RuntimeConfig {
   readonly color: boolean | undefined;
   /** `ui.permission_mode` (user layer only): the interactive conversation's starting permission mode. */
   readonly permissionMode: PermissionMode | undefined;
+  /** `ui.mouse` (user layer only). */
+  readonly mouse: boolean | undefined;
+  /** `ui.glyphs` (user layer only); `auto` or undefined detects the set. */
+  readonly glyphs: GlyphSetChoice | undefined;
   readonly budget: { readonly maxWallTimeSeconds: number | undefined; readonly maxCostUsd: number | undefined };
 }
 
@@ -432,6 +466,8 @@ export async function loadRuntimeConfig(
     memory: user?.memory,
     color: user?.ui?.color,
     permissionMode: user?.ui?.permission_mode,
+    mouse: user?.ui?.mouse,
+    glyphs: user?.ui?.glyphs,
     budget: {
       maxWallTimeSeconds: smallest(layers.map((layer) => layer?.budget?.max_wall_time_seconds)),
       maxCostUsd: smallest(layers.map((layer) => layer?.budget?.max_cost_usd)),

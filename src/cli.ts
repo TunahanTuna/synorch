@@ -36,13 +36,14 @@ Runtime commands (syn <command> --help for details):
   auth status       Provider identities, without secrets.
   memory <command>  Project memory: status, search, show, review, accept, reject.
   trust [--revoke]  Trust this workspace's tests and build scripts to run unconfined.
+  config <command>  User settings: list, get, set, unset, edit, path.
 
 Safety:
   Existing differing files are never overwritten unless --force is explicit.
   Model fallback is never silent.
 `;
 
-const HARNESS_COMMAND_NAMES: readonly string[] = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust"];
+const HARNESS_COMMAND_NAMES: readonly string[] = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust", "config"];
 
 const LEGACY_OPTIONS = {
   target: { type: "string", short: "t" },

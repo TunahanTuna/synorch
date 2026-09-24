@@ -19,6 +19,7 @@ import { createSessionStore } from "../store/index.ts";
 import { formatHarnessError, JsonlRenderer, PlainLineRenderer, type FrameSink, type GuardProcess, type InputStream, type PiTuiRendererOptions } from "../tui/index.ts";
 import { parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";
 import { loadRuntimeConfig, resolveHome } from "./config.ts";
+import { configCommand } from "./config-command.ts";
 import { doctorRuntime } from "./doctor.ts";
 import { commandHelp } from "./help.ts";
 import { runsCommand, showCommand } from "./inspect.ts";
@@ -34,7 +35,7 @@ import { trustCommand } from "./trust.ts";
  * dynamic `import("./harness/cli/index.ts")`, so `inspect/init/sync/doctor` never load it. The
  * composition root itself is `createRuntime()` in `runtime.ts`.
  */
-export const HARNESS_COMMANDS = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust"] as const;
+export const HARNESS_COMMANDS = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust", "config"] as const;
 export type HarnessCommand = (typeof HARNESS_COMMANDS)[number];
 
 export { harnessCommandFlags, parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";
@@ -245,6 +246,19 @@ async function dispatch(parsed: Exclude<ParsedCommand, { kind: "help" }>, io: Ha
         { cwd: io.cwd, home, platform, stdout: (text) => void io.stdout.write(text), stderr: (text) => void io.stderr.write(text) },
         parsed.common.target,
         parsed.revoke,
+      );
+    case "config":
+      return configCommand(
+        { subcommand: parsed.subcommand, args: parsed.args, json: parsed.json, target: parsed.common.target },
+        {
+          home,
+          cwd: io.cwd,
+          env: io.env,
+          platform,
+          stdout: (text) => void io.stdout.write(text),
+          stderr: (text) => void io.stderr.write(text),
+          ...(overrides.configCeiling === undefined ? {} : { discovery: { ceiling: overrides.configCeiling, platform } }),
+        },
       );
     case "memory": {
       const config = await loadRuntimeConfig(home, io.cwd, [], {

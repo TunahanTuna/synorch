@@ -86,7 +86,8 @@ function canonicalCheck(runtime: Runtime): DoctorCheck {
   const profiles = describeProfiles(canonical);
   return {
     id: "canonical",
-    status: canonical.origin === "repository" && canonical.diagnostics.length === 0 ? "ok" : "warn",
+    // The built-in structure is a first-class mode (K1.5-4): only diagnostics make this a warning.
+    status: canonical.diagnostics.length === 0 ? "ok" : "warn",
     summary: `${describeCanonical(canonical, runtime.workspaceRoot)}${profiles === undefined ? "" : `; ${profiles}`}`,
     details: [
       {

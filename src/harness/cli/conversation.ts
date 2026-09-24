@@ -57,6 +57,7 @@ import { mayContainImage, resolveAttachments } from "./attachments.ts";
 const IMAGE_ADAPTERS: ReadonlySet<string> = new Set(["openai-chatgpt", "openai-responses", "anthropic-messages", "claude-code"]);
 import { profileHintsFor } from "./canonical.ts";
 import { createCommandGrantStore, normalizeGrant, type CommandGrantStore } from "./command-grants.ts";
+import { formatListing, listSettings, setUserSetting, settingFor, unsetUserSetting, type ConfigListing, type SettingRow } from "./config-command.ts";
 import type { OrchestrateInput } from "./orchestrate-tool.ts";
 import { OrchestrationTracker } from "./orchestration-view.ts";
 import { runModelCommand } from "./model-picker.ts";
@@ -310,7 +311,11 @@ class Conversation implements ConversationCommandHost {
         stderrHasColors: streamHasColors(io.stderr as { isTTY?: boolean; hasColors?: () => boolean }),
       },
     );
-    this.glyphs = selectGlyphs(io.env, io.platform, settings.kind === "plain");
+    const configuredGlyphs = runtime?.config.glyphs;
+    this.glyphs =
+      configuredGlyphs !== undefined && configuredGlyphs !== "auto" && (io.env.SYN_GLYPHS ?? "").trim() === "" && settings.kind !== "plain"
+        ? GLYPH_SETS[configuredGlyphs]
+        : selectGlyphs(io.env, io.platform, settings.kind === "plain");
     const debugEnv = io.env.SYN_DEBUG;
     this.debug = this.parsed.debug || (debugEnv !== undefined && debugEnv !== "" && debugEnv !== "0");
     this.renderer = await createSessionRenderer(io, {
@@ -331,6 +336,7 @@ class Conversation implements ConversationCommandHost {
       view: "conversation",
       glyphs: this.glyphs,
       debug: this.debug,
+      ...(runtime?.config.mouse === undefined ? {} : { mouse: runtime.config.mouse }),
     });
     if (runtime === undefined || failure !== undefined) return this.fail(failure ?? failureInfo(new Error("runtime unavailable")));
     this.runtime = runtime;
@@ -654,7 +660,7 @@ class Conversation implements ConversationCommandHost {
 
   private fullAccessNotice(): string {
     const trusted = this.runtime.trust.recorded().trusted;
-    return `${this.glyphs.warn} Full access: Synorch edits and runs any command in this folder without asking (hard rails still apply)${trusted ? "" : "; the folder is trusted for this session only (not saved)"} ${this.glyphs.sep} Shift+Tab leaves`;
+    return `${this.glyphs.warn} Full access: Synorch edits and runs any command in this folder without asking, except destructive commands (hard rails still apply)${trusted ? "" : "; the folder is trusted for this session only (not saved)"} ${this.glyphs.sep} Shift+Tab leaves`;
   }
 
   /**
@@ -1338,7 +1344,8 @@ class Conversation implements ConversationCommandHost {
       `Sandbox         ${runtime.sandbox.backend} (${runtime.sandbox.enforcement})`,
       `Always allowed  ${rules.length === 0 ? "none yet (answer \"Always allow\" in a prompt, or /permissions allow <prefix>)" : rules.join(` ${g.sep} `)}`,
       ...(rules.length === 0 ? [] : ["                /permissions remove <prefix> deletes a rule"]),
-      `Never           ${HARD_RAILS.join(", ")} (hard rails, every mode); git history changes stay with you`,
+      `Always asks     destructive commands (force push, publish, recursive delete, reset --hard…), in every mode`,
+      `Never           ${HARD_RAILS.filter((rail) => rail !== "destructive-command").join(", ")} (hard rails, every mode); git history changes stay with you`,
     ];
   }
 
@@ -1888,6 +1895,103 @@ class Conversation implements ConversationCommandHost {
     this.print([`Mouse mode ${wanted ? "on: wheel scrolls, click expands; /select for native text selection" : "off: the terminal selects text"}`]);
   }
 
+  /**
+   * `/config` (K1.5-3): the settings screen built on the picker (Enter edits, booleans toggle, enums
+   * and routes offer choices, Esc closes); `/config <key>` shows one value, `/config <key> <value>`
+   * sets it. Only the user configuration is written; the permission mode and mouse apply at once.
+   */
+  public async config(argument: string): Promise<void> {
+    const [key, ...rest] = argument.split(/\s+/).filter((part) => part !== "");
+    const listing = async (): Promise<ConfigListing | undefined> =>
+      listSettings(this.runtime.home, this.runtime.workspaceRoot).catch((error: unknown) => {
+        this.print([`${this.glyphs.warn} ${failureInfo(error).message}`, "Fix it with syn config edit"]);
+        return undefined;
+      });
+    if (key !== undefined) {
+      if (rest.length > 0) {
+        await this.applySetting(key, rest.join(" "));
+        return;
+      }
+      try {
+        const definition = settingFor(key);
+        const row = (await listing())?.rows.find((candidate) => candidate.key === definition.key);
+        this.print([`${definition.key} = ${row?.value ?? "(not set)"} (${row?.source ?? "default"}) ${this.glyphs.sep} ${definition.description}`]);
+      } catch (error) {
+        this.print([failureInfo(error).message]);
+      }
+      return;
+    }
+    const controls = this.renderer.controls;
+    if (controls === undefined) {
+      const current = await listing();
+      if (current !== undefined) this.print([...formatListing(current).slice(0, -1), "Change: /config <key> <value> (or syn config set)"]);
+      return;
+    }
+    for (;;) {
+      const current = await listing();
+      if (current === undefined) return;
+      const entries: ModelPickerEntry[] = current.rows.map((row, index) => ({
+        id: String(index),
+        tier: row.key,
+        provider: "",
+        model: "",
+        label: row.value ?? "(not set)",
+        auth: row.source === "workspace" || row.source === "project" ? `${row.source} (narrowed)` : row.source,
+        current: false,
+        description: row.description,
+      }));
+      const chosen = await controls
+        .openModelPicker(entries, this.outer.signal, { title: "Settings", hint: `Enter changes · Esc closes · saved to ${current.userFile}` })
+        .catch(() => undefined);
+      const row = chosen === undefined ? undefined : current.rows[Number(chosen.id)];
+      if (row === undefined) return;
+      const value = await this.pickSettingValue(row, controls);
+      if (value !== undefined) await this.applySetting(row.key, value);
+    }
+  }
+
+  private async pickSettingValue(row: SettingRow, controls: NonNullable<SessionRenderer["controls"]>): Promise<string | undefined> {
+    if (row.kind === "boolean") return row.value === "true" ? "false" : "true";
+    const unset = "(unset: use the default)";
+    let choices: string[] = [];
+    if (row.kind === "enum") choices = [...(row.choices ?? [])];
+    if (row.kind === "route") {
+      const known = this.runtime.config.router.rules.map((rule) => `${rule.route.provider_id}/${rule.route.model_id}`);
+      choices = [...new Set(known)];
+    }
+    const typeIt = "Type a value…";
+    if (row.kind === "route" || row.kind === "int" || row.kind === "number" || row.kind === "string") choices.push(typeIt);
+    choices.push(unset);
+    const entries: ModelPickerEntry[] = choices.map((choice, index) => ({ id: String(index), tier: "", provider: "", model: "", label: choice, auth: "", current: choice === row.value }));
+    const picked = choices.length === 2 && choices[0] === typeIt ? { id: "0" } : await controls.openModelPicker(entries, this.outer.signal, { title: row.key, hint: `${row.description} — Enter selects, Esc cancels` }).catch(() => undefined);
+    const choice = picked === undefined ? undefined : choices[Number(picked.id)];
+    if (choice === undefined) return undefined;
+    if (choice === unset) return UNSET_SETTING;
+    if (choice !== typeIt) return choice;
+    const hint = row.kind === "route" ? "provider/model[@adapter], e.g. openai/gpt-6-sol" : row.kind === "string" ? "text" : "a positive number";
+    const answer = await this.askUser(`New value for ${row.key} (${hint}; empty cancels)`, undefined, this.outer.signal).catch(() => "");
+    return answer.trim() === "" ? undefined : answer.trim();
+  }
+
+  private async applySetting(key: string, value: string): Promise<void> {
+    const g = this.glyphs;
+    try {
+      const change = value === UNSET_SETTING ? await unsetUserSetting(this.runtime.home, key) : await setUserSetting(this.runtime.home, key, value);
+      const shown = change.value ?? "default";
+      let effect = "new conversations use it";
+      if (change.key === "ui.permission_mode") {
+        this.setMode((change.value ?? "auto") as PermissionMode);
+        effect = "applied now";
+      } else if (change.key === "ui.mouse" && this.renderer.controls !== undefined) {
+        this.renderer.controls.setMouseMode(change.value === "true");
+        effect = "applied now";
+      } else if (change.key.startsWith("routes.")) effect = "new conversations use it; /model switches this one";
+      this.print([`${g.ok} ${change.key} = ${shown}${change.previous !== undefined && change.previous !== change.value ? ` (was ${change.previous})` : ""} ${g.sep} ${effect}`]);
+    } catch (error) {
+      this.print([`${g.warn} ${error instanceof Error ? error.message : String(error)}`]);
+    }
+  }
+
   /** `/graph`: the plan graph of the running or last worker run of this conversation. */
   public async graph(): Promise<void> {
     const tracker = this.orchestration?.tracker ?? this.lastTracker;
@@ -1903,10 +2007,13 @@ class Conversation implements ConversationCommandHost {
 
 const PERMISSION_MODE_WORDS = ["ask", "auto", "full", "plan"] as const;
 
+/** `/config` picker choice that removes the key from the user configuration. */
+const UNSET_SETTING = "(unset)";
+
 const MODE_MEANINGS: Readonly<Record<PermissionMode, string>> = {
   ask: "asks before every edit and command",
   auto: "edits and allowlisted commands run; anything outside the allowlist asks you first",
-  full: "no prompts: everything in this folder is allowed except the hard rails",
+  full: "no prompts except destructive commands (force push, publish, recursive delete…); hard rails stay",
   plan: "read-only: reads and plans, no edits or commands",
 };
 

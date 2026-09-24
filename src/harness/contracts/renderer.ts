@@ -110,6 +110,14 @@ export interface ModelPickerEntry {
   readonly description?: string;
   /** When set, the row is shown but cannot be chosen; the text says why. */
   readonly disabled?: string;
+  /** Replaces the `provider/model` column (the `/config` screen reuses the picker for settings). */
+  readonly label?: string;
+}
+
+/** Title and hint line of a picker opened for something other than models (`/config`). */
+export interface PickerHeading {
+  readonly title: string;
+  readonly hint: string;
 }
 
 /**
@@ -122,7 +130,7 @@ export interface InteractiveInputControls {
   /** Called when the user attaches something (before submit); submit also carries the attachments. */
   onAttachment(listener: (attachment: Attachment) => void): () => void;
   /** Resolves with the chosen row, or undefined on Esc / abort. */
-  openModelPicker(entries: readonly ModelPickerEntry[], signal?: AbortSignal): Promise<ModelPickerEntry | undefined>;
+  openModelPicker(entries: readonly ModelPickerEntry[], signal?: AbortSignal, heading?: PickerHeading): Promise<ModelPickerEntry | undefined>;
   /**
    * Permission mode (Shift+Tab / Alt+M cycles ask -> auto -> full -> plan): the renderer shows it in
    * the footer; the session applies the policy and announces the change.

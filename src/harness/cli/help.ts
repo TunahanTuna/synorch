@@ -141,6 +141,35 @@ Usage:
 
 ${COMMON}
 `,
+  config: `syn config — your Synorch settings, without editing YAML
+
+Usage:
+  syn config [list] [--json]       Effective values and where each comes from.
+  syn config get <key> [--json]    One value (exit 1 when it is not set).
+  syn config set <key> <value>     Validate and save to your user configuration.
+  syn config unset <key>           Remove a key from your user configuration.
+  syn config edit                  Open the file in $VISUAL / $EDITOR (notepad on Windows);
+                                   it is saved only when it validates.
+  syn config path                  Print the user configuration path.
+
+Keys:
+  routes.<tier>[.<role>]           provider/model[@adapter], e.g. openai/gpt-6-sol
+                                   tiers: orchestrator, complex_worker, fast_worker, session
+  ui.permission_mode               ask | auto | full | plan
+  ui.color, ui.mouse               true | false
+  ui.glyphs                        auto | rich | safe | ascii
+  policy.mode                      autonomous | ask
+  policy.require_full_sandbox      true | false
+  budget.max_wall_time_seconds     positive whole number
+  budget.max_cost_usd              positive number
+  memory.root                      path of the memory vault
+
+  Only your user configuration (<synorch home>/config.yaml) is written. A repository's
+  .synorch/config.yaml may only narrow policy and budgets; list shows when it does.
+  In a session, /config opens the same settings interactively.
+
+${COMMON}
+`,
   memory: `syn memory — project memory
 
 Usage:

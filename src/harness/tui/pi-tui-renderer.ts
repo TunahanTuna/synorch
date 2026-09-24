@@ -31,6 +31,7 @@ import type {
   DeviceCodePrompt,
   InteractiveInputControls,
   ModelPickerEntry,
+  PickerHeading,
   ModelStreamEvent,
   PermissionMode,
   PolicyMode,
@@ -547,7 +548,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         this.attachmentListeners.add(listener);
         return () => this.attachmentListeners.delete(listener);
       },
-      openModelPicker: (entries, signal) => this.openModelPicker(entries, signal),
+      openModelPicker: (entries, signal, heading) => this.openModelPicker(entries, signal, heading),
       get permissionMode() {
         return self.permission;
       },
@@ -1080,22 +1081,22 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   }
 
   /** `/model` picker: rows come from the session, which also applies the choice (U2). */
-  private openModelPicker(entries: readonly ModelPickerEntry[], signal?: AbortSignal): Promise<ModelPickerEntry | undefined> {
+  private openModelPicker(entries: readonly ModelPickerEntry[], signal?: AbortSignal, heading?: PickerHeading): Promise<ModelPickerEntry | undefined> {
     if (entries.length === 0 || this.stopped) return Promise.resolve(undefined);
     return new Promise((resolve) => {
       const glyphs = this.presenter?.glyphs ?? GLYPH_SETS.rich;
       const tierWidth = Math.min(14, Math.max(...entries.map((entry) => entry.tier.length)));
       const items = entries.map((entry, index) => ({
         value: String(index),
-        label: `${entry.current ? glyphs.bullet : " "} ${entry.tier.padEnd(tierWidth)}  ${entry.provider}/${entry.model}`,
+        label: `${entry.current ? glyphs.bullet : " "} ${entry.tier.padEnd(tierWidth)}  ${entry.label ?? `${entry.provider}/${entry.model}`}`,
         description: [entry.auth, entry.current ? "current" : undefined, entry.disabled, entry.description].filter((part) => part !== undefined && part !== "").join(` ${glyphs.sep} `),
       }));
       const list = new SelectList(items, Math.min(items.length, 10), this.selectTheme, { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 60 });
       const current = entries.findIndex((entry) => entry.current);
       if (current >= 0) list.setSelectedIndex(current);
       const box = new Box(1, 0);
-      box.addChild(new Text(this.style.cyan("Select model"), 0, 0));
-      box.addChild(new Text(this.style.dim("route per tier · provider/model · auth  —  Enter selects, Esc cancels"), 0, 0));
+      box.addChild(new Text(this.style.cyan(heading?.title ?? "Select model"), 0, 0));
+      box.addChild(new Text(this.style.dim(heading?.hint ?? "route per tier · provider/model · auth  —  Enter selects, Esc cancels"), 0, 0));
       box.addChild(list);
       let settled = false;
       const finish = (entry: ModelPickerEntry | undefined): void => {

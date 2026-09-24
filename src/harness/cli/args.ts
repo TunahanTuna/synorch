@@ -1,5 +1,6 @@
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 import { closestMatch } from "../../domain/suggest.ts";
+import { parseConfigPositionals, type ConfigSubcommand } from "./config-command.ts";
 import {
   AUTH_METHODS,
   modelTierSchema,
@@ -86,7 +87,8 @@ export type ParsedCommand =
   | { readonly kind: "login"; readonly common: CommonFlags; readonly provider: ProviderId; readonly method: AuthMethodKind | undefined; readonly profile: string | undefined; readonly deviceCode: boolean; readonly args: readonly string[] }
   | { readonly kind: "logout"; readonly common: CommonFlags; readonly provider: ProviderId; readonly profile: string | undefined; readonly args: readonly string[] }
   | { readonly kind: "auth-status"; readonly common: CommonFlags; readonly json: boolean; readonly args: readonly string[] }
-  | { readonly kind: "memory"; readonly subcommand: MemorySubcommand; readonly args: readonly string[] };
+  | { readonly kind: "memory"; readonly subcommand: MemorySubcommand; readonly args: readonly string[] }
+  | { readonly kind: "config"; readonly common: CommonFlags; readonly subcommand: ConfigSubcommand; readonly args: readonly string[]; readonly json: boolean };
 
 const COMMON_OPTIONS = {
   target: { type: "string", short: "t" },
@@ -136,6 +138,7 @@ export const HARNESS_COMMAND_OPTIONS = {
   },
   logout: { ...COMMON_OPTIONS, profile: { type: "string" } },
   auth: { ...COMMON_OPTIONS, json: { type: "boolean", default: false } },
+  config: { ...COMMON_OPTIONS, json: { type: "boolean", default: false } },
 } as const satisfies Record<string, ParseArgsOptionsConfig>;
 
 /** Every spelling (`--name`, `-x`) a command accepts; empty for commands whose options belong to another module. */
@@ -336,6 +339,14 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
         throw new UsageError(positionals.length === 0 ? "syn auth requires a sub-command: status" : `Unknown auth sub-command: ${positionals.join(" ")}. Expected status.`, command);
       }
       return { kind: "auth-status", common: common(command, values), json: values.json, args };
+    }
+    case "config": {
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.config);
+      if (values.help) return { kind: "help", command };
+      const parsed = parseConfigPositionals(positionals);
+      if ("error" in parsed) throw new UsageError(parsed.error, command);
+      if (values.json && parsed.subcommand !== "list" && parsed.subcommand !== "get") throw new UsageError(`--json applies to syn config list and get, not ${parsed.subcommand}.`, command);
+      return { kind: "config", common: common(command, values), subcommand: parsed.subcommand, args: parsed.args, json: values.json };
     }
     case "memory": {
       const [subcommand, ...rest] = args;

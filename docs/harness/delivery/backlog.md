@@ -77,6 +77,13 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - **K4.2 Eksik araçlar:** araştırmanın P0/P1 çıktıları (ör. arka plan komut + çıktı izleme, todo/plan aracı, görsel okuma, LSP/diagnostics, glob).
 - **K4.3 İsteğe bağlı:** tarayıcı otomasyonu (Playwright/CDP) ve MCP üzerinden harici yetenekler (K3 MCP client ile birleşir).
 
+### K5 — Etkileşimli soru/seçim deneyimi (ürün sahibi isteği, 2026-09-24) ⭐ UX
+Ürün sahibi: "Soru sorduğunda 1 veya 2 yazıp Enter'a basmamı istiyor; cevabım modele mesaj olarak gidip thinking'e düşüyor, sonra kabul ediliyor. Ayrı bir input/pop-up/modal olsun. Claude Code'daki gibi planlarken bana seçenekli sorular sorsun."
+- **Hata (K5'in ilk işi):** onay/soru istemleri (ör. `/init` "Write the Synorch structure into this repository? 1. Create the files 2. Cancel") normal giriş kutusunu kullanıyor; yazılan cevap aynı zamanda sohbete mesaj olarak sızıyor ve modeli tetikliyor. İstem açıkken giriş yalnız isteme gitmeli.
+- **Seçim modalı (tek bileşen, tüm istemler için):** editörün yerine/üstünde odaklı katman; oklarla gezin, Enter ile seç, sayı kısayolları; tek seçim ve çoklu seçim (Space ile tikle); "Önerilen" etiketi; her soruda "Diğer…" ile serbest metin; Esc = iptal/ret; plain modda numaralı eşdeğer. `/init`, onay kartları, `/model`, `/config`, trust istemi, karar masası bu bileşeni kullanır.
+- **Agent'ın soru aracı (Claude Code AskUserQuestion benzeri):** `ask_user` yapılandırılmış sorular alır: 1–4 soru, her biri 2–4 seçenek (açıklama + isteğe bağlı önizleme), `multiSelect`, önerilen seçenek; kullanıcı cevabı yapılandırılmış olarak modele döner. Plan modunda ve planlama sırasında agent önerileriyle seçenek sunar; kullanıcı seçer veya kendi alternatifini yazar. Sohbet akışından ayrı bir etkileşim alanı olarak görünür, cevap transkripte kısa bir özet satırı olarak düşer.
+- Claude Code köprüsünde Claude'un kendi AskUserQuestion çağrıları da bu modala yönlendirilir.
+
 ### Sadeleştirme (K1.5–K3 boyunca)
 - Eski toplu yol: `syn agent --legacy` ve batch `syn run` → yeni çekirdeğe katla; orkestrasyonu `--orchestrate` ile tut.
 - Explorer yalnız orkestrasyonda (session ajanı keşfi kendisi yapar).

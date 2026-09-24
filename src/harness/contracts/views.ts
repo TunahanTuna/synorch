@@ -282,7 +282,35 @@ export interface WorkerSnapshotView {
   readonly events: readonly WorkerStreamEvent[];
 }
 
-export type HarnessView = OrchestrationView | UsageView | EvidenceView | ActionView | WhyView | WorkerDelegationView | WorkerSnapshotView;
+// ---------------------------------------------------------------------------------------------
+// Session changes (`/diff`, terminal polish brief): per file, a compact line diff.
+
+export interface DiffHunkLineView {
+  /** `+` added, `-` removed, ` ` context, `…` a gap between hunks or a cut. */
+  readonly op: "+" | "-" | " " | "…";
+  readonly text: string;
+  /** Line number in the new file (old file for removals). */
+  readonly line?: number | undefined;
+}
+
+export interface DiffFileView {
+  readonly path: string;
+  readonly change: "added" | "modified" | "deleted";
+  readonly added: number;
+  readonly removed: number;
+  readonly lines: readonly DiffHunkLineView[];
+  /** Why no lines are shown (binary, too large, changed after Synorch's edit). */
+  readonly note?: string | undefined;
+}
+
+export interface DiffView {
+  readonly kind: "diff";
+  readonly files: readonly DiffFileView[];
+  /** Files workers integrated (orchestration runs); listed without a diff. */
+  readonly integrated?: readonly { readonly path: string; readonly reviewed: boolean }[] | undefined;
+}
+
+export type HarnessView = OrchestrationView | UsageView | EvidenceView | ActionView | WhyView | WorkerDelegationView | WorkerSnapshotView | DiffView;
 export type HarnessViewKind = HarnessView["kind"];
 
 /**

@@ -5,6 +5,7 @@
  */
 export { isActive, isFinished, isWaiting, PlainBoardTracker, presentTask, renderBoard, renderBoardSummary, renderLiveBoard, type TaskPresentation, type Tone } from "./board.ts";
 export { renderAction, renderEvidence, renderWhy } from "./cards.ts";
+export { lineDiff, renderDiff } from "./diff.ts";
 export { DelegationComponent, LiveBoardComponent, PlainViews, renderView, StaticViewComponent, UserToWorkerComponent, type ViewComponent, type ViewStyleOptions } from "./components.ts";
 export { graphLevels, layoutGraph, renderGraph, type GraphOptions } from "./graph.ts";
 export {

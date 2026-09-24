@@ -323,7 +323,8 @@ test("the approval dialog answers from the keyboard and Esc rejects", async () =
   const once = tui.approvals.request(command, new AbortController().signal);
   await settle(tui, terminal);
   assert.match(terminal.text(), /Allow Synorch to run this command\?/);
-  assert.match(terminal.text(), /why +npm run lint --fix is not on the build\/test allowlist/);
+  assert.match(terminal.text(), /why: npm run lint --fix is not on the build\/test allowlist/);
+  assert.match(terminal.text(), /\$ npm run lint --fix/);
   assert.match(terminal.text(), /2\. Always allow `npm run lint` in this folder/);
   terminal.type("1");
   assert.equal((await once).outcome, "allowed-once");

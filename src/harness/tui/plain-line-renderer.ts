@@ -225,6 +225,9 @@ export class PlainLineRenderer implements TerminalRenderer, ViewHost {
         this.writeLine(`tool: ${item.title}${item.summary === undefined ? "" : ` - ${item.summary}`}`);
         return;
       }
+      case "result":
+        this.writeLine(`result: ${item.text}`);
+        return;
       case "note":
         if (item.level === "warning" || item.level === "error") this.writeErrLine(`${item.level}: ${item.text.replace(/^[!x] /, "")}`);
         else this.writeLine(this.style.dim(item.text));

@@ -3,6 +3,7 @@ import type { GlyphSet } from "../conversation-view.ts";
 import type { Styler } from "../style.ts";
 import { boardHint, PlainBoardTracker, renderBoardSummary, renderLiveBoard, selectionHint } from "./board.ts";
 import { renderAction, renderEvidence, renderWhy } from "./cards.ts";
+import { renderDiff } from "./diff.ts";
 import { renderGraph } from "./graph.ts";
 import { createViewTheme, viewGlyphs, type ViewContext, type ViewGlyphs, type ViewTheme } from "./kit.ts";
 import { renderUsage } from "./usage.ts";
@@ -42,6 +43,8 @@ export function renderView(view: HarnessView, ctx: ViewContext): string[] {
       return renderDelegation(view, ctx);
     case "worker":
       return renderWorkerSnapshot(view, ctx);
+    case "diff":
+      return renderDiff(view, ctx);
   }
 }
 

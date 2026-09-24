@@ -48,10 +48,12 @@ test("set / get / unset write typed, validated values to the user configuration 
     assert.equal((await run("set", ["ui.permission_mode", "auto"])).code, 0);
     assert.equal((await run("set", ["budget.max_wall_time_seconds", "1800"])).code, 0);
     assert.equal((await run("set", ["ui.mouse", "true"])).code, 0);
+    assert.equal((await run("set", ["routing.prefer_different_provider", "false"])).code, 0);
 
     const config = await loadRuntimeConfig(box.home, box.repo, [], { ceiling: box.root });
     assert.equal(config.permissionMode, "auto");
     assert.equal(config.mouse, true);
+    assert.equal(config.preferDifferentProvider, false);
     assert.equal(config.budget.maxWallTimeSeconds, 1800);
     assert.deepEqual(
       config.router.rules.map((rule) => `${rule.tier}=${rule.route.provider_id}/${rule.route.model_id}@${rule.route.adapter_id}`),

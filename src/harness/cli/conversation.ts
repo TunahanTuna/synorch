@@ -58,6 +58,7 @@ const IMAGE_ADAPTERS: ReadonlySet<string> = new Set(["openai-chatgpt", "openai-r
 import { profileHintsFor } from "./canonical.ts";
 import { createCommandGrantStore, normalizeGrant, type CommandGrantStore } from "./command-grants.ts";
 import { formatListing, listSettings, setUserSetting, settingFor, unsetUserSetting, type ConfigListing, type SettingRow } from "./config-command.ts";
+import { DEFAULT_ADAPTER_FOR_PROVIDER } from "./config.ts";
 import type { OrchestrateInput } from "./orchestrate-tool.ts";
 import { OrchestrationTracker } from "./orchestration-view.ts";
 import { runModelCommand } from "./model-picker.ts";
@@ -1954,15 +1955,25 @@ class Conversation implements ConversationCommandHost {
     if (row.kind === "boolean") return row.value === "true" ? "false" : "true";
     const unset = "(unset: use the default)";
     let choices: string[] = [];
+    const badges = new Map<string, string>();
     if (row.kind === "enum") choices = [...(row.choices ?? [])];
     if (row.kind === "route") {
-      const known = this.runtime.config.router.rules.map((rule) => `${rule.route.provider_id}/${rule.route.model_id}`);
-      choices = [...new Set(known)];
+      // Connected models from the catalog (K1.5-A), then the configured routes; the adapter is spelled out when it is not the provider default.
+      const catalog = await this.runtime.modelCatalog(this.outer.signal).catch(() => []);
+      for (const model of catalog.filter((candidate) => candidate.connected)) {
+        const value = `${model.provider}/${model.model}${model.adapterId === DEFAULT_ADAPTER_FOR_PROVIDER[model.provider] ? "" : `@${model.adapterId}`}`;
+        badges.set(value, model.badge);
+      }
+      for (const rule of this.runtime.config.router.rules) {
+        const value = `${rule.route.provider_id}/${rule.route.model_id}${rule.route.adapter_id === DEFAULT_ADAPTER_FOR_PROVIDER[rule.route.provider_id] ? "" : `@${rule.route.adapter_id}`}`;
+        if (!badges.has(value)) badges.set(value, "configured");
+      }
+      choices = [...badges.keys()];
     }
     const typeIt = "Type a value…";
     if (row.kind === "route" || row.kind === "int" || row.kind === "number" || row.kind === "string") choices.push(typeIt);
     choices.push(unset);
-    const entries: ModelPickerEntry[] = choices.map((choice, index) => ({ id: String(index), tier: "", provider: "", model: "", label: choice, auth: "", current: choice === row.value }));
+    const entries: ModelPickerEntry[] = choices.map((choice, index) => ({ id: String(index), tier: "", provider: "", model: "", label: choice, auth: badges.get(choice) ?? "", current: choice === row.value }));
     const picked = choices.length === 2 && choices[0] === typeIt ? { id: "0" } : await controls.openModelPicker(entries, this.outer.signal, { title: row.key, hint: `${row.description} — Enter selects, Esc cancels` }).catch(() => undefined);
     const choice = picked === undefined ? undefined : choices[Number(picked.id)];
     if (choice === undefined) return undefined;

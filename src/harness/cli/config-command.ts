@@ -57,6 +57,7 @@ const PLAIN_SETTINGS: readonly SettingDefinition[] = [
   { key: "ui.color", kind: "boolean", scope: "user", description: "colour output (unset: detect; --color and NO_COLOR still apply)", fallback: "auto", yamlPath: ["ui", "color"] },
   { key: "ui.mouse", kind: "boolean", scope: "user", description: "start with mouse capture on (wheel scroll, click to expand)", fallback: "false", yamlPath: ["ui", "mouse"] },
   { key: "ui.glyphs", kind: "enum", choices: GLYPH_SET_CHOICES, scope: "user", description: "glyph set of the interactive view (SYN_GLYPHS wins)", fallback: "auto", yamlPath: ["ui", "glyphs"] },
+  { key: "routing.prefer_different_provider", kind: "boolean", scope: "user", description: "reviewers prefer a provider other than the implementer's", fallback: "true", yamlPath: ["routing", "prefer_different_provider"] },
   { key: "policy.mode", kind: "enum", choices: POLICY_MODES, scope: "narrow", description: "approval mode for plans (ask narrows auto/full to ask)", fallback: "autonomous", yamlPath: ["policy", "mode"] },
   { key: "policy.require_full_sandbox", kind: "boolean", scope: "narrow", description: "refuse edits and commands without a full OS sandbox", fallback: "false", yamlPath: ["policy", "require_full_sandbox"] },
   { key: "budget.max_wall_time_seconds", kind: "int", scope: "narrow", description: "wall-time limit of a run in seconds (smallest layer wins)", yamlPath: ["budget", "max_wall_time_seconds"] },

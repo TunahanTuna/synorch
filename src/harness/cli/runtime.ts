@@ -357,7 +357,10 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     ...(overrides.configCeiling === undefined ? {} : { ceiling: overrides.configCeiling }),
   });
   const adapters = await buildAdapters(config, overrides, env, home);
-  const baseRouter = createModelRouter({ rules: config.router.rules }, adapters);
+  const baseRouter = createModelRouter(
+    { rules: config.router.rules, ...(config.preferDifferentProvider === undefined ? {} : { preferDifferentProvider: config.preferDifferentProvider }) },
+    adapters,
+  );
   /** An adapter for a built-in kind the configuration did not need yet (a provider first picked in `/model`). */
   const implicitAdapter = async (id: string): Promise<AnyModelAdapter | undefined> => {
     const existing = adapters.find((adapter) => adapter.adapterId === id);

@@ -119,6 +119,13 @@ const configFileSchema = z.strictObject({
       glyphs: z.enum(GLYPH_SET_CHOICES).optional(),
     })
     .optional(),
+  /** Router preferences (user layer only). */
+  routing: z
+    .strictObject({
+      /** Reviewer independence: prefer a reviewer route on a provider other than the implementer's (default true). */
+      prefer_different_provider: z.boolean().optional(),
+    })
+    .optional(),
   budget: z
     .strictObject({
       max_wall_time_seconds: z.int().positive().optional(),
@@ -185,6 +192,8 @@ export interface RuntimeConfig {
   readonly color: boolean | undefined;
   /** `ui.permission_mode` (user layer only): the interactive conversation's starting permission mode. */
   readonly permissionMode: PermissionMode | undefined;
+  /** `routing.prefer_different_provider` (user layer only); undefined means the router default (true). */
+  readonly preferDifferentProvider: boolean | undefined;
   /** `ui.mouse` (user layer only). */
   readonly mouse: boolean | undefined;
   /** `ui.glyphs` (user layer only); `auto` or undefined detects the set. */
@@ -246,6 +255,7 @@ const IGNORED_KEY_REASON: Readonly<Record<string, string>> = {
   adapters: "adapters choose endpoints and credentials; declare them in the user configuration",
   memory: "the memory root is chosen in the user configuration only",
   ui: "display settings are chosen in the user configuration only",
+  routing: "routing preferences are chosen in the user configuration only",
 };
 
 function warningsOf(layer: "workspace" | "project", file: string, read: LayerRead | undefined): ConfigWarning[] {
@@ -466,6 +476,7 @@ export async function loadRuntimeConfig(
     memory: user?.memory,
     color: user?.ui?.color,
     permissionMode: user?.ui?.permission_mode,
+    preferDifferentProvider: user?.routing?.prefer_different_provider,
     mouse: user?.ui?.mouse,
     glyphs: user?.ui?.glyphs,
     budget: {

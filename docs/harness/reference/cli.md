@@ -237,6 +237,7 @@ budget: { max_wall_time_seconds: 1800, max_cost_usd: 5 }                    # ka
 | `policy.mode`, `policy.require_full_sandbox` | `autonomous\|ask`, boolean | daraltılabilir (en katı) |
 | `budget.max_wall_time_seconds`, `budget.max_cost_usd` | pozitif tamsayı / sayı | daraltılabilir (en küçük) |
 | `memory.root` | yol | kullanıcı |
+| `routing.prefer_different_provider` | boolean (varsayılan `true`): reviewer implementer'dan farklı sağlayıcıyı tercih eder; router'a `preferDifferentProvider` olarak gider | kullanıcı |
 
 - `list [--json]`: her anahtarın etkin değeri ve kaynağı (`user`, `default`, repo daraltıyorsa `project (narrowed)`/`workspace (narrowed)`), yok sayılan repo anahtarlarının uyarıları. JSON: `{user_config, files, settings: [{key, value, source, scope}], warnings}`.
 - `get <anahtar>`: yalnız değer (betikler için); ayarlı değilse exit 1.

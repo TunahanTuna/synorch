@@ -158,6 +158,8 @@ Keys:
   ui.permission_mode               ask | auto | full | plan
   ui.color, ui.mouse               true | false
   ui.glyphs                        auto | rich | safe | ascii
+  routing.prefer_different_provider
+                                   true | false (reviewers prefer another provider)
   policy.mode                      autonomous | ask
   policy.require_full_sandbox      true | false
   budget.max_wall_time_seconds     positive whole number

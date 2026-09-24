@@ -43,6 +43,8 @@ export interface ConsultInput {
   readonly planVersion: number;
   /** Steering the user queued since the plan was approved, oldest first. */
   readonly steering: readonly string[];
+  /** K1.7: messages the user sent running workers directly since the last orchestrator turn (`to <key>: text`). */
+  readonly workerMessages?: readonly string[];
   /** One line per task of the active plan with its current state. */
   readonly tasks: readonly string[];
   readonly route: ModelRoute;
@@ -91,6 +93,8 @@ export interface TriageInput {
   readonly ownedPaths?: readonly string[];
   /** The harness-run verification commands and their outcome. */
   readonly harnessChecks?: readonly string[];
+  /** K1.7: messages the user sent running workers directly since the last orchestrator turn. */
+  readonly workerMessages?: readonly string[];
   readonly summary: string;
   readonly skippedChecks: readonly string[];
   readonly unresolvedRisks: readonly string[];
@@ -153,6 +157,7 @@ export function renderTriagePrompt(input: TriageInput): string {
       : "",
     input.skippedChecks.length > 0 ? `Skipped checks:\n${input.skippedChecks.map((line) => `- ${line}`).join("\n")}` : "",
     input.unresolvedRisks.length > 0 ? `Unresolved:\n${input.unresolvedRisks.map((line) => `- ${line}`).join("\n")}` : "",
+    renderWorkerMessages(input.workerMessages),
     `Tasks:\n${input.tasks.map((line) => `- ${line}`).join("\n")}`,
     [
       `Call task_triage exactly once for task ${input.task.key}:`,
@@ -170,9 +175,18 @@ export function renderConsultPrompt(input: ConsultInput): string {
   return [
     `The user steered the running plan v${input.planVersion} for: ${input.goal}`,
     `User steering (newest last):\n${input.steering.map((line) => `- ${line}`).join("\n")}`,
+    renderWorkerMessages(input.workerMessages),
     `Tasks:\n${input.tasks.map((line) => `- ${line}`).join("\n")}`,
     "Tasks that have not started yet will receive this steering through a revised plan. If the steering needs extra work, call task_spawn with one plan task per follow-up (same fields as a plan_propose task); use task_status to inspect tasks. You never implement anything yourself. End your turn when done.",
-  ].join("\n\n");
+  ]
+    .filter((part) => part !== "")
+    .join("\n\n");
+}
+
+/** K1.7: the user's direct messages to workers, so the orchestrator knows what its workers were told. */
+export function renderWorkerMessages(messages: readonly string[] | undefined): string {
+  if (messages === undefined || messages.length === 0) return "";
+  return `The user messaged running workers directly (they received these at their next step; take them into account):\n${messages.slice(-20).map((line) => `- ${line}`).join("\n")}`;
 }
 
 export const PLAN_FORMAT = [

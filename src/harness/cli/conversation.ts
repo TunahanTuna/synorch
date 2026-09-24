@@ -22,7 +22,6 @@ import {
   type Attachment,
   type BlobRef,
   type CompletionPacket,
-  type Coordinator,
   type Digest,
   type EffectivePolicy,
   type EventStore,
@@ -45,9 +44,10 @@ import {
   type ToolResult,
   type TurnId,
 } from "../contracts/index.ts";
-import type { CriterionView, EvidenceView, WhyView } from "../contracts/views.ts";
+import type { CriterionView, EvidenceView, OrchestrationTaskView, WhyView, WorkerControl, WorkerSeam } from "../contracts/views.ts";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageTokens, reconstructHistory } from "../context/index.ts";
+import { WorkerStreamHub, type OrchestrationCoordinator, type WorkerControlResult, type WorkerDirectory } from "../orchestration/index.ts";
 import { createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/index.ts";
 import { describeEvent, formatHarnessError, GLYPH_SETS, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
 import type { ParsedCommand } from "./args.ts";
@@ -217,7 +217,7 @@ interface CapturedFile {
 
 interface ActiveOrchestration {
   readonly tracker: OrchestrationTracker;
-  readonly coordinator: Coordinator;
+  readonly coordinator: OrchestrationCoordinator;
   readonly controller: AbortController;
   disarm: NodeJS.Timeout | undefined;
 }
@@ -253,7 +253,13 @@ class Conversation implements ConversationCommandHost {
   private sessionId: SessionId | undefined;
   private log: EventStore | undefined;
   private driver: AgentDriver | undefined;
-  private coordinator: Coordinator | undefined;
+  private coordinator: OrchestrationCoordinator | undefined;
+  /** K1.7: live streams of this process's worker attempts (the conversation's own session is never kept). */
+  private readonly hub = new WorkerStreamHub((sessionId) => sessionId === this.sessionId);
+  private workerDirectory: WorkerDirectory | undefined;
+  private workerSeam: WorkerSeam | undefined;
+  /** Plain interactive mode: input is read while workers run (steering, answers, /worker). */
+  private readingDuringWorkers = false;
   private policyCache: EffectivePolicy | undefined;
   private active: AbortController | undefined;
   private turnRunning = false;
@@ -360,6 +366,7 @@ class Conversation implements ConversationCommandHost {
     this.usageLedger = ledger;
     const unsubscribe = runtime.subscribe((event) => {
       if (event.kind === "session-event") ledger.observe(event.event);
+      this.hub.feed(event);
       this.forward(event);
     });
     const unbind = io.stdinIsTTY && this.renderer.input !== undefined ? runtime.bindUserPrompt((question, options, signal) => this.askUser(question, options, signal)) : () => undefined;
@@ -443,6 +450,7 @@ class Conversation implements ConversationCommandHost {
       // and activity tokens: their provider/usage events (with `x-codex-*` quota) reach the view too.
       if (recorded.session_id !== this.sessionId && recorded.type === "provider/usage" && this.renderer.kind !== "jsonl") this.renderer.render(event);
       if (orchestration !== undefined && recorded.session_id !== this.sessionId) {
+        this.workerLine(recorded);
         this.observeOrchestration(orchestration, recorded);
         return;
       }
@@ -886,7 +894,7 @@ class Conversation implements ConversationCommandHost {
     this.note("warning", `? ${question}`);
     if (options !== undefined && options.length > 0) this.note("info", `  ${options.map((option, index) => `${index + 1}. ${option}`).join("   ")}`);
     this.note("info", "  type your answer and press Enter");
-    if (this.renderer.kind === "tui") return this.desk.ask(signal);
+    if (this.renderer.kind === "tui" || this.readingDuringWorkers) return this.desk.ask(signal);
     const input = this.renderer.input;
     if (input === undefined) throw new DOMException("no input", "AbortError");
     for (;;) {
@@ -1055,6 +1063,7 @@ class Conversation implements ConversationCommandHost {
       if (await promptTrustForCommand(runtime, this.renderer, "the workers' checks", context.signal)) this.policyCache = undefined;
     }
     this.coordinator ??= runtime.createCoordinator(runtime.brokerFor(this.renderer.approvals));
+    this.connectWorkers(this.coordinator);
     const goal = input.brief === undefined ? input.goal : `${input.goal}\n\nContext from the conversation:\n${input.brief}`;
     const tracker = new OrchestrationTracker(goal, input.reason);
     this.lastTracker = tracker;
@@ -1066,6 +1075,7 @@ class Conversation implements ConversationCommandHost {
     if (this.renderer.kind === "tui") views?.setBoard(tracker.view());
     const ticker = views === undefined || this.renderer.kind !== "tui" ? undefined : setInterval(() => views.setBoard(tracker.view()), 1000);
     ticker?.unref?.();
+    const stopReading = this.readWhileWorkersRun();
     try {
       const outcome = await this.coordinator.run(
         {
@@ -1106,7 +1116,176 @@ class Conversation implements ConversationCommandHost {
       if (ticker !== undefined) clearInterval(ticker);
       if (orchestration.disarm !== undefined) clearTimeout(orchestration.disarm);
       this.orchestration = undefined;
+      await stopReading();
     }
+  }
+
+  // ---- K1.7: entering workers ---------------------------------------------------------------
+
+  /** Connects the worker seam (live streams + control, keyed by board key) to the renderer when an orchestration starts. */
+  private connectWorkers(coordinator: OrchestrationCoordinator): void {
+    const directory = coordinator.workers;
+    this.workerDirectory = directory;
+    this.hub.assignments = (taskKey) => directory.assignment(taskKey);
+    const rejecting = (run: (taskKey: string, text: string) => Promise<WorkerControlResult>) => async (taskKey: string, text = ""): Promise<void> => {
+      const result = await run(taskKey, text);
+      if (!result.ok) throw new Error(result.message);
+    };
+    const control: WorkerControl = {
+      message: rejecting((taskKey, text) => directory.message(taskKey, text)),
+      pause: rejecting((taskKey) => directory.pause(taskKey)),
+      resume: rejecting((taskKey) => directory.resume(taskKey)),
+      cancel: rejecting((taskKey) => directory.cancel(taskKey)),
+    };
+    this.workerSeam = { stream: this.hub, control };
+    this.renderer.views?.connectWorkers?.(this.workerSeam);
+  }
+
+  /**
+   * Main-chat lines: a delegation card when the orchestrator dispatches work (every renderer), and in
+   * plain mode the user's messages to workers and pause/resume/cancel (the TUI draws its own).
+   */
+  private workerLine(recorded: SessionEvent): void {
+    const g = this.glyphs;
+    const arrow = g.name === "rich" ? "→" : "->";
+    if (recorded.type === "task/delegated") {
+      const data = recorded.data;
+      const views = this.renderer.views;
+      if (views !== undefined) {
+        const assignment = this.workerDirectory?.assignment(data.key);
+        views.showView({ kind: "delegation", taskKey: data.key, role: data.role, model: data.model_id, objective: data.objective, ...(assignment === undefined ? {} : { assignment }) });
+      } else this.note("info", `${arrow} ${data.key} (${data.role}, ${data.model_id}): ${snippet(data.objective, 100)}`);
+      return;
+    }
+    if (this.renderer.kind === "tui") return;
+    const key = (taskId: string): string => this.workerDirectory?.list().find((worker) => worker.taskId === taskId)?.key ?? taskId;
+    if (recorded.type === "task/user_message") {
+      this.note("info", `${g.name === "rich" ? "↳" : "->"} you ${arrow} ${key(recorded.data.task_id)}: ${snippet(recorded.data.text, 120)}`);
+    } else if (recorded.type === "attempt/user_control") {
+      const verb = recorded.data.action === "pause" ? "paused" : recorded.data.action === "resume" ? "resumed" : "cancelled";
+      this.note(recorded.data.action === "cancel" ? "warning" : "info", `${g.bullet} ${key(recorded.data.task_id)} ${verb} by you`);
+    }
+  }
+
+  /**
+   * Plain interactive mode reads no input while a turn runs; while workers run it does, so a typed
+   * line steers the workers, answers the orchestrator, or runs a `whileBusy` command (`/worker`).
+   * The TUI reads concurrently anyway (`alongside`). Resolves the stop function.
+   */
+  private readWhileWorkersRun(): () => Promise<void> {
+    const input = this.renderer.input;
+    if (this.renderer.kind === "tui" || !this.io.stdinIsTTY || input === undefined || this.readingDuringWorkers) return async () => undefined;
+    const stop = new AbortController();
+    this.readingDuringWorkers = true;
+    const reader = (async () => {
+      for (;;) {
+        let next;
+        try {
+          next = await input.next(AbortSignal.any([stop.signal, this.outer.signal]));
+        } catch {
+          return;
+        }
+        if (next.kind === "exit") {
+          this.exiting = true;
+          this.orchestration?.controller.abort();
+          this.active?.abort();
+          this.outer.abort();
+          return;
+        }
+        if (!("text" in next)) continue;
+        const text = next.text.trim();
+        if (text === "") continue;
+        if (next.kind === "command" || text.startsWith("/")) {
+          const command = findConversationCommand(text.split(/\s+/)[0] ?? "");
+          if (command?.whileBusy === true) await this.command(text);
+          else {
+            this.enqueue(text);
+            this.note("info", `queued > ${text} (runs when Synorch is done)`);
+          }
+          continue;
+        }
+        if (this.desk.answer(text)) continue;
+        this.steer(text, []);
+      }
+    })();
+    return async () => {
+      stop.abort();
+      await reader;
+      this.readingDuringWorkers = false;
+    };
+  }
+
+  /** `/worker [key] [message | --pause | --resume | --cancel]`. */
+  public async worker(argument: string): Promise<void> {
+    const directory = this.workerDirectory;
+    const [key = "", ...rest] = argument.split(/\s+/).filter((part) => part !== "");
+    if (directory === undefined || directory.list().length === 0) {
+      this.print([`No workers yet in this conversation ${this.glyphs.sep} /workers <goal> runs a goal with workers`]);
+      return;
+    }
+    if (key === "") {
+      this.print(this.workerList(directory));
+      return;
+    }
+    const worker = directory.list().find((candidate) => candidate.key === key || candidate.taskId === key);
+    if (worker === undefined) {
+      this.print([`No worker ${key} ${this.glyphs.sep} known: ${directory.list().map((candidate) => candidate.key).join(", ")}`]);
+      return;
+    }
+    const message = rest.join(" ").trim();
+    const flag = /^--(pause|resume|cancel)$/i.exec(message)?.[1]?.toLowerCase();
+    if (flag !== undefined || message !== "") {
+      const result = flag === "pause" ? await directory.pause(worker.key) : flag === "resume" ? await directory.resume(worker.key) : flag === "cancel" ? await directory.cancel(worker.key) : await directory.message(worker.key, message);
+      this.note(result.ok ? "info" : "warning", result.message);
+      return;
+    }
+    const views = this.renderer.views;
+    if (this.renderer.kind === "tui" && views?.openWorkerView?.(worker.key) === true) return;
+    if (views === undefined) {
+      this.print(this.workerDetail(directory, worker.key));
+      return;
+    }
+    const task: OrchestrationTaskView = this.lastTracker?.view().tasks.find((candidate) => candidate.key === worker.key) ?? { key: worker.key, role: worker.role, model: worker.model, state: worker.state as OrchestrationTaskView["state"] };
+    const assignment = directory.assignment(worker.key);
+    const events = this.hub.snapshot(worker.key).filter((event) => event.kind !== "assignment");
+    views.showView({ kind: "worker", task: worker.paused ? { ...task, paused: true } : task, ...(assignment === undefined ? {} : { assignment }), events });
+  }
+
+  private workerList(directory: WorkerDirectory): string[] {
+    const g = this.glyphs;
+    const rows = directory.list();
+    const width = Math.max(4, ...rows.map((row) => row.key.length));
+    return [
+      `${g.bullet} Workers ${g.sep} ${rows.filter((row) => row.live).length} running`,
+      ...rows.map((row) => {
+        const status = row.live ? (row.paused ? "paused" : "running") : row.state.replaceAll("_", " ");
+        return `  ${row.key.padEnd(width + 2)}${row.role.padEnd(12)}${status.padEnd(18)}${row.model ?? ""}${row.attempt > 1 ? ` ${g.sep} attempt ${row.attempt}` : ""}`;
+      }),
+      `  /worker <key> shows one ${g.sep} /worker <key> <message> messages it ${g.sep} --pause / --resume / --cancel`,
+    ];
+  }
+
+  /** Text fallback of `/worker <key>` when the renderer hosts no views. */
+  private workerDetail(directory: WorkerDirectory, key: string): string[] {
+    const g = this.glyphs;
+    const assignment = directory.assignment(key);
+    const lines: string[] = [];
+    if (assignment !== undefined) {
+      lines.push(`${g.bullet} ${assignment.taskKey} ${g.sep} ${assignment.objective}`);
+      lines.push(`  Owns        ${assignment.owned_paths.join(", ") || "nothing (read-only)"}`);
+      for (const [index, criterion] of assignment.acceptance_criteria.entries()) lines.push(`  ${index === 0 ? "Criteria    " : "            "}${criterion}`);
+      lines.push(`  Checks      ${assignment.verification_commands.join("; ") || "none"}`);
+      for (const note of assignment.steering) lines.push(`  ${note.from === "user" ? "You said    " : "Orchestrator"} ${snippet(note.text, 160)}`);
+    }
+    const activity = this.hub
+      .recent(key, 200)
+      .filter((event) => event.type !== "session/opened" && event.type !== "tool/execution_started")
+      .map((event) => describeEvent(event))
+      .filter((line): line is NonNullable<typeof line> => line !== undefined)
+      .slice(-12);
+    lines.push(activity.length === 0 ? "  (no activity recorded yet)" : "  Recent activity:");
+    for (const line of activity) lines.push(`    ${snippet(line.text, 160)}`);
+    return lines;
   }
 
   // ---- slash commands ---------------------------------------------------------------------------
@@ -1202,11 +1381,16 @@ class Conversation implements ConversationCommandHost {
 
   public async workers(goal: string): Promise<void> {
     if (goal === "") {
+      if (this.workerDirectory !== undefined && this.workerDirectory.list().length > 0) {
+        this.print(this.workerList(this.workerDirectory));
+        return;
+      }
       this.print(["Usage: /workers <goal>  ·  plans the goal, runs parallel workers in their own worktrees and has an independent reviewer check the result"]);
       return;
     }
     this.setPlanMode(false);
     this.enqueue(`Use workers for this (call the orchestrate tool): ${goal}`);
+    if (this.turnRunning || this.orchestration !== undefined) this.note("info", `queued > /workers ${snippet(goal, 80)} (runs when Synorch is done)`);
   }
 
   public async undo(): Promise<void> {

@@ -30,6 +30,7 @@ export {
   scopeLimitedReview,
   type CoordinatorDependencies,
   type CoordinatorLimits,
+  type OrchestrationCoordinator,
   type WorkerFactory,
 } from "./coordinator.ts";
 export {
@@ -110,6 +111,7 @@ export {
 export {
   createModelPlanner,
   renderConsultPrompt,
+  renderWorkerMessages,
   renderPlanningPrompt,
   renderTriagePrompt,
   type ConsultInput,
@@ -150,5 +152,6 @@ export {
   type RunScope,
   type WorkerManagerDependencies,
 } from "./worker-manager.ts";
+export { WorkerStreamHub, type WorkerControlResult, type WorkerDirectory, type WorkerSummary } from "./worker-control.ts";
 export { formatVerificationRefusal, preflightVerification, type VerificationPreflight, type VerificationPreflightContext, type VerificationRefusal } from "./verification-preflight.ts";
 export { contentIdentities, contentIdentity, createWorkspaceDigestReader, resolveOnDiskPath, type ContentIdentityOptions, type WorkspaceDigestOptions } from "./workspace-digest.ts";

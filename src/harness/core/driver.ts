@@ -79,8 +79,20 @@ export interface AgentDriverOptions {
 }
 
 /** Creates the fixed agent loop (ADR-02) over the given seams. */
-export function createAgentDriver(deps: AgentDriverDependencies & AgentDriverOptions): AgentDriver {
+export function createAgentDriver(deps: AgentDriverDependencies & AgentDriverOptions): PausableAgentDriver {
   return new FixedAgentDriver(deps);
+}
+
+/** K1.7: a driver whose next model step can be held (per-worker pause) and released. */
+export interface PausableAgentDriver extends AgentDriver {
+  readonly paused: boolean;
+  pause(): void;
+  resume(): void;
+}
+
+export function isPausableDriver(driver: AgentDriver): driver is PausableAgentDriver {
+  const candidate = driver as Partial<PausableAgentDriver>;
+  return typeof candidate.pause === "function" && typeof candidate.resume === "function";
 }
 
 type StepResult = "continue" | "completed" | "cancelled" | "failed" | "budget_exceeded";
@@ -107,9 +119,11 @@ function refusedStepState(kind: Exclude<Prepared["kind"], "ok">): "aborted" | "e
   return kind === "failed" ? "errored" : "aborted";
 }
 
-class FixedAgentDriver implements AgentDriver {
+class FixedAgentDriver implements PausableAgentDriver {
   readonly #deps: AgentDriverDependencies & AgentDriverOptions;
   readonly #steers: string[] = [];
+  readonly #wakers: (() => void)[] = [];
+  #paused = false;
   readonly #backendSessions = new Map<string, string>();
 
   public constructor(deps: AgentDriverDependencies & AgentDriverOptions) {
@@ -123,6 +137,33 @@ class FixedAgentDriver implements AgentDriver {
 
   public drainSteers(): readonly string[] {
     return this.#steers.splice(0);
+  }
+
+  public get paused(): boolean {
+    return this.#paused;
+  }
+
+  public pause(): void {
+    this.#paused = true;
+  }
+
+  public resume(): void {
+    this.#paused = false;
+    for (const wake of this.#wakers.splice(0)) wake();
+  }
+
+  /** K1.7: a paused driver starts no new step; the step in flight finishes first. Abort ends the wait. */
+  async #whilePaused(signal: AbortSignal): Promise<void> {
+    while (this.#paused && !signal.aborted) {
+      await new Promise<void>((resolve) => {
+        const wake = (): void => {
+          signal.removeEventListener("abort", wake);
+          resolve();
+        };
+        this.#wakers.push(wake);
+        signal.addEventListener("abort", wake, { once: true });
+      });
+    }
   }
 
   public async runTurn(input: TurnInput, signal: AbortSignal): Promise<TurnOutcome> {
@@ -141,6 +182,7 @@ class FixedAgentDriver implements AgentDriver {
       const adapter = this.#deps.router.adapterFor(input.route);
       let outcome: TurnOutcome["outcome"] = "max_steps";
       while (steps < input.maxSteps) {
+        await this.#whilePaused(signal);
         if (signal.aborted) {
           outcome = "cancelled";
           break;

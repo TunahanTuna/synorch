@@ -81,6 +81,8 @@ import {
 } from "./recorder.ts";
 import { createDagScheduler, DEFAULT_CONCURRENCY, type ConcurrencyLimits, type DagScheduler } from "./scheduler.ts";
 import type { IntegratedDependency, IntegrationReviewOutcome, OrchestrationWorkerManager, RunScope } from "./worker-manager.ts";
+import type { WorkerAssignmentView, WorkerSteeringView } from "../contracts/views.ts";
+import type { WorkerControlResult, WorkerDirectory, WorkerSummary } from "./worker-control.ts";
 
 /**
  * The coordinator drives one run: plan -> approval -> task DAG -> worker attempts -> orchestrator
@@ -91,6 +93,21 @@ import type { IntegratedDependency, IntegrationReviewOutcome, OrchestrationWorke
  */
 
 export type WorkerFactory = (scope: RunScope, budget: BudgetTracker) => OrchestrationWorkerManager;
+
+/** The coordinator plus K1.7's worker directory (list, assignments, per-worker control) of its active or last run. */
+export interface OrchestrationCoordinator extends Coordinator {
+  readonly workers: WorkerDirectory;
+}
+
+type WorkerAction = "message" | "pause" | "resume" | "cancel";
+
+/** The per-run side of the worker directory; set while a run's workers exist, kept (read-only) after it ends. */
+interface RunWorkers {
+  list(): readonly WorkerSummary[];
+  assignment(task: string): WorkerAssignmentView | undefined;
+  control(action: WorkerAction, task: string, text: string): Promise<WorkerControlResult>;
+  ended: boolean;
+}
 
 export interface CoordinatorLimits {
   readonly concurrency: ConcurrencyLimits;
@@ -179,6 +196,8 @@ interface TaskEntry {
   notes: string[];
   /** The last delta's notes, handed to the next attempt in its task message (never copied into packet decisions, F19). */
   nextNotes: readonly string[];
+  /** K1.7: messages the user sent this task's workers directly. */
+  readonly userMessages: WorkerSteeringView[];
   /** A settled attempt whose worktree the next attempt of this task reuses (ADR-19); disposed with the task. */
   reuseFrom: AttemptId | undefined;
 }
@@ -337,7 +356,7 @@ export function resolveBudgets(limits: CoordinatorDependencies["limits"]): Orche
   });
 }
 
-export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
+export function createCoordinator(deps: CoordinatorDependencies): OrchestrationCoordinator {
   const now = deps.now ?? (() => new Date());
   const platform = deps.platform ?? process.platform;
   const budgets = resolveBudgets(deps.limits);
@@ -352,6 +371,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
   const listeners = new Set<(event: RenderEvent) => void>();
   const steering: string[] = [];
   let activeRecorder: RunRecorder | undefined;
+  let runWorkers: RunWorkers | undefined;
 
   const fanOut = (event: RenderEvent): void => {
     for (const listener of listeners) {
@@ -392,6 +412,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
       runState = to;
     };
     const finish = async (status: RunOutcome["status"], exitCode: ExitCode, summary: string, to: RunState): Promise<RunOutcome> => {
+      if (runWorkers !== undefined) runWorkers.ended = true;
       if (!isTerminalState("run", runState)) await moveRun(to, summary.slice(0, 500));
       deps.budgetGate?.set(undefined);
       if (deps.delegation?.current()?.runId === runId) deps.delegation.set(undefined);
@@ -640,6 +661,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         failure: undefined,
         notes: [],
         nextNotes: [],
+        userMessages: [],
         reuseFrom: undefined,
       });
       const createTask = async (entry: TaskEntry): Promise<void> => {
@@ -666,6 +688,28 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         if (!check.ok) throw new HarnessError({ code: "internal", message: check.message, workspace_effect: "unknown", retry_safe: false });
         await recorder.record("task/state_changed", { task_id: entry.taskId, from: entry.state, to, reason: reason.slice(0, 1000) }, { taskId: entry.taskId });
         entry.state = to;
+      };
+
+      /** K1.7: the main chat's delegation line (task handed to a worker or reviewer attempt). */
+      const delegated = async (entry: TaskEntry, attemptId: AttemptId): Promise<void> => {
+        const record = workers.attempt(attemptId);
+        if (record === undefined) return;
+        await recorder
+          .record(
+            "task/delegated",
+            {
+              task_id: entry.taskId,
+              attempt_id: attemptId,
+              key: entry.key,
+              role: record.packet.role,
+              provider_id: record.route.provider_id,
+              model_id: record.route.model_id,
+              objective: record.packet.objective.slice(0, 4000),
+              attempt: Math.max(1, entry.attempts.length),
+            },
+            { taskId: entry.taskId, attemptId, actor: { kind: "orchestrator", role: "orchestrator" } },
+          )
+          .catch(() => undefined);
       };
 
       const packetSources = async (entry: TaskEntry): Promise<PacketSource[]> => {
@@ -805,6 +849,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
                 ...(review === undefined ? {} : { reviewOverride: review.override, reviewNote: review.note }),
                 ownedPaths: packet.scope.owned_paths,
                 harnessChecks: (completion.harness_evidence?.verification ?? []).map((check) => `${check.command}: ${check.status}${check.exit_code === null ? "" : ` (exit ${check.exit_code})`}`),
+                workerMessages: workerMessages.splice(0),
                 summary: completion.summary,
                 skippedChecks: completion.skipped_checks.map((check) => `${check.check}: ${check.reason}`),
                 unresolvedRisks: completion.unresolved_risks,
@@ -867,6 +912,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             for (let review = 1; review <= limits.maxReviewAttempts; review += 1) {
               const handle = await workers.dispatchIntegrationReview(packet, dependencies, signal, { route });
               entry.attempts.push(handle.attemptId);
+              await delegated(entry, handle.attemptId);
               if (entry.state === "ready") await move(entry, "running", `integration review attempt ${handle.attemptId} of ${covered} dispatched`);
               outcome = await handle.result;
               if (outcome.decision !== "invalid") break;
@@ -990,6 +1036,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             return "failed";
           }
           entry.attempts.push(handle.attemptId);
+          await delegated(entry, handle.attemptId);
           entry.nextNotes = [];
           entry.reuseFrom = undefined;
           await move(entry, "running", `attempt ${handle.attemptId} dispatched`);
@@ -1178,6 +1225,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
             const reviewerRoute = await deps.router.resolve({ tier: reviewerPacket.model_tier, role: "reviewer", ...(record?.route === undefined ? {} : { implementer: record.route }) }, signal);
             const reviewHandle = await workers.dispatchReview(reviewerPacket, handle.attemptId, signal, { route: reviewerRoute });
             entry.attempts.push(reviewHandle.attemptId);
+            await delegated(entry, reviewHandle.attemptId);
             const result = await reviewHandle.result;
             outcome = result.verification.decision;
             problems = result.verification.problems;
@@ -1282,6 +1330,8 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
         created_at: now().toISOString(),
       });
       const spawned: PlanTask[] = [];
+      /** K1.7: what the user told workers directly since the orchestrator's last turn; included in its next consultation or triage. */
+      const workerMessages: string[] = [];
       let consulting = false;
       let triaging: PendingTriage | undefined;
       // Orchestrator turns (steering consultation, triage) share the run session: one at a time.
@@ -1358,6 +1408,79 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
           return { ok: true, text: `decision for ${pending.key} recorded: ${input.decision}${waive.length > 0 ? ` (waived ${waive.join(", ")})` : ""}. End your turn now.` };
         },
       });
+
+      // ---- K1.7: the workers of this run, for the renderer and `/workers` ---------------------------
+      const entryOf = (task: string): TaskEntry | undefined => entries.get(task) ?? [...entries.values()].find((entry) => entry.taskId === task);
+      const liveAttempt = (entry: TaskEntry): AttemptId | undefined => {
+        const latest = entry.attempts.at(-1);
+        return latest !== undefined && workers.live(latest) !== undefined ? latest : undefined;
+      };
+      const thisRun: RunWorkers = {
+        ended: false,
+        list: () =>
+          [...entries.values()].map((entry) => {
+            const latest = entry.attempts.at(-1);
+            const record = latest === undefined ? undefined : workers.attempt(latest);
+            const live = latest === undefined || thisRun.ended ? undefined : workers.live(latest);
+            return {
+              key: entry.key,
+              taskId: entry.taskId,
+              role: record?.packet.role ?? entry.plan.role,
+              state: entry.state,
+              model: record?.route.model_id ?? entry.route?.route.model_id,
+              attempt: entry.attempts.length,
+              live: live !== undefined,
+              paused: live?.paused === true,
+              objective: record?.packet.objective ?? entry.plan.objective,
+            };
+          }),
+        assignment(task) {
+          const entry = entryOf(task);
+          if (entry === undefined) return undefined;
+          const latest = entry.attempts.at(-1);
+          const record = latest === undefined ? undefined : workers.attempt(latest);
+          const packet = record?.packet;
+          const orchestratorNotes = (record?.notes ?? entry.nextNotes).map((text): WorkerSteeringView => ({ from: "orchestrator", text }));
+          return {
+            taskKey: entry.key,
+            objective: packet?.objective ?? entry.plan.objective,
+            owned_paths: packet?.scope.owned_paths ?? entry.plan.owned_paths,
+            acceptance_criteria: packet !== undefined ? packet.acceptance_criteria.map((criterion) => `${criterion.id}: ${criterion.statement}`) : entry.plan.acceptance_criteria.map((criterion, index) => `AC-${index + 1}: ${criterion.statement}`),
+            verification_commands: packet?.verification.commands ?? entry.plan.verification,
+            steering: [...orchestratorNotes, ...entry.userMessages],
+          };
+        },
+        async control(action, task, text) {
+          const entry = entryOf(task);
+          if (entry === undefined) return { ok: false, message: `no worker ${task} in this run (/workers lists them)` };
+          const attemptId = thisRun.ended ? undefined : liveAttempt(entry);
+          if (attemptId === undefined) return { ok: false, message: `${entry.key} is not running (${entry.state.replaceAll("_", " ")}); nothing was sent` };
+          const scope = { taskId: entry.taskId, attemptId, actor: { kind: "user" as const } };
+          if (action === "message") {
+            const trimmed = text.trim().slice(0, 8000);
+            if (trimmed === "") return { ok: false, message: "the message is empty" };
+            if (!workers.steer(attemptId, trimmed)) return { ok: false, message: `${entry.key} finished before the message could be delivered` };
+            entry.userMessages.push({ from: "user", text: trimmed, atMs: now().getTime() });
+            workerMessages.push(`to ${entry.key}: ${trimmed}`.slice(0, NOTE_LIMIT));
+            await recorder.record("task/user_message", { task_id: entry.taskId, attempt_id: attemptId, text: trimmed }, scope);
+            return { ok: true, message: `sent to ${entry.key}; it reads it at its next step (the orchestrator is told too)` };
+          }
+          const applied = action === "pause" ? workers.pause(attemptId) : action === "resume" ? workers.resume(attemptId) : workers.cancel(attemptId, "cancelled by the user");
+          if (!applied) return { ok: false, message: `${entry.key} finished before it could be ${action === "pause" ? "paused" : action === "resume" ? "resumed" : "cancelled"}` };
+          if (action === "cancel") workerMessages.push(`the user cancelled the running attempt of ${entry.key}`);
+          await recorder.record("attempt/user_control", { attempt_id: attemptId, task_id: entry.taskId, action }, scope);
+          return {
+            ok: true,
+            message:
+              action === "pause"
+                ? `${entry.key} pauses after its current step (resume with /worker ${entry.key} --resume)`
+                : action === "resume"
+                  ? `${entry.key} resumed`
+                  : `${entry.key} cancelled; the orchestrator handles it like any cancelled attempt`,
+          };
+        },
+      };
+      runWorkers = thisRun;
 
       /**
        * Re-versions the plan with `notes` (user steering) and `extra` follow-up tasks and re-approves
@@ -1471,6 +1594,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
                   goal: request.goal,
                   planVersion: approvedPlan.version,
                   steering: notes,
+                  workerMessages: workerMessages.splice(0),
                   tasks: [...entries.values()].map(taskLine),
                   route: orchestratorRoute.route,
                   policy: orchestratorPolicy,
@@ -1571,8 +1695,19 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
     }
   };
 
+  const control = (action: WorkerAction) => async (task: string, text = ""): Promise<WorkerControlResult> =>
+    runWorkers === undefined ? { ok: false, message: "no workers have run in this session" } : runWorkers.control(action, task, text);
+
   return {
     run,
+    workers: {
+      list: () => runWorkers?.list() ?? [],
+      assignment: (task) => runWorkers?.assignment(task),
+      message: (task, text) => control("message")(task, text),
+      pause: (task) => control("pause")(task),
+      resume: (task) => control("resume")(task),
+      cancel: (task) => control("cancel")(task),
+    },
     steer(text) {
       const trimmed = text.trim();
       if (trimmed === "") return;

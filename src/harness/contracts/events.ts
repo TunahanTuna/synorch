@@ -179,6 +179,27 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
     }),
   ),
   eventOf("task/state_changed", z.strictObject({ task_id: taskIdSchema, ...transition(TASK_STATES) })),
+  /**
+   * K1.7: the orchestrator handed a task to a worker (or reviewer) attempt; the main chat shows it
+   * as a delegation line. `attempt` is the task's 1-based attempt ordinal (reviews included).
+   */
+  eventOf(
+    "task/delegated",
+    z.strictObject({
+      task_id: taskIdSchema,
+      attempt_id: attemptIdSchema,
+      key: z.string().min(1),
+      role: workerRoleSchema,
+      provider_id: z.string().min(1),
+      model_id: z.string().min(1),
+      objective: z.string().min(1).max(4000),
+      attempt: z.int().min(1),
+    }),
+  ),
+  /** K1.7: the user messaged a running worker directly; delivered to that attempt at its next step boundary. */
+  eventOf("task/user_message", z.strictObject({ task_id: taskIdSchema, attempt_id: attemptIdSchema, text: z.string().trim().min(1).max(8000) })),
+  /** K1.7: the user paused, resumed or cancelled one worker attempt. */
+  eventOf("attempt/user_control", z.strictObject({ attempt_id: attemptIdSchema, task_id: taskIdSchema, action: z.enum(["pause", "resume", "cancel"]) })),
   eventOf(
     "task/packet_issued",
     z.strictObject({ task_id: taskIdSchema, kind: z.enum(["full", "delta"]), packet_digest: digestSchema, blob: blobRefSchema }),

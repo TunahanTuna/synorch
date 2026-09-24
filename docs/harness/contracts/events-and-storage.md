@@ -82,6 +82,9 @@ Yazıcı `SessionEventDraft` verir (`schema_version`, `event_id`, `session_id`, 
 | `checkpoint/recorded` | `turn_id?`, `tool_call_id`, `files[]` (`path`, `before`: blob ref \| null, `after`: digest \| null) | Hayır | cli (konuşma günlüğü, ADR-21 D6) |
 | `checkpoint/restored` | `checkpoint_seq`, `restored[]`, `skipped[]` (`path`, `reason`) | Hayır | cli (konuşma günlüğü, `/undo`) |
 | `command/allowed` | `workspace_root` (kanonik kök), `prefix` | Hayır | cli (konuşma günlüğü, `/allow`) |
+| `task/delegated` | `task_id`, `attempt_id`, `key`, `role`, `provider_id`, `model_id`, `objective`, `attempt` (görevin 1 tabanlı attempt sırası, review'lar dahil) | Hayır | orchestration (run günlüğü, K1.7) |
+| `task/user_message` | `task_id`, `attempt_id`, `text` | Hayır (worker'a `steer/queued` olarak gider; orchestrator'a sonraki danışma/triage'da) | orchestration (run günlüğü, K1.7) |
+| `attempt/user_control` | `attempt_id`, `task_id`, `action` (`pause`\|`resume`\|`cancel`) | Hayır | orchestration (run günlüğü, K1.7) |
 
 Eşleşme invariant'ları: her `tool/call_proposed` bir `tool/result_recorded` veya `tool/interrupted` ile; her `approval/requested` bir `approval/decided` ile; her `step/started` bir `step/ended` ile kapanır. Kapanmamış olanlar recovery'de [identity-and-state.md](./identity-and-state.md#3-crash-recovery-eşlemesi) tablosuyla kapatılır. Kayıtlı assistant mesajındaki her `tool_call` parçası runtime `tool_call_id` taşır.
 
@@ -689,4 +692,59 @@ expires_at: "2026-09-22T10:00:50Z"
   actor: { kind: user }
   type: command/allowed
   data: { workspace_root: /home/dev/syn-smoke, prefix: node check.mjs }
+```
+
+## Worker'lara girme (K1.7)
+
+Coordinator, çalışan worker'lara giriş için run günlüğüne üç yeni tip yazar (hepsi v1):
+
+- `task/delegated`: orchestrator bir görevi worker (veya reviewer) attempt'ine verdi. Ana sohbet bunu katlanabilir "→ worker'a gönderildi" satırı olarak gösterir (`key`, rol, model, hedef). `attempt` görevin 1 tabanlı attempt sırasıdır (retry, revizyon ve review attempt'leri dahil).
+- `task/user_message`: kullanıcı çalışan bir worker'a doğrudan yazdı (`/worker <key> <mesaj>` veya worker görünümü). Metin o attempt'in sürücüsüne steer olarak verilir ve bir sonraki güvenli adım sınırında attempt günlüğüne `steer/queued` olarak düşer; orchestrator'ın bir sonraki danışma veya triage turunda "kullanıcı worker'lara doğrudan yazdı" bölümüyle görünür. Attempt bitmişse hiçbir şey yazılmaz, kullanıcıya açık bir hata döner.
+- `attempt/user_control`: kullanıcı bir attempt'i duraklattı (`pause`: sürücü mevcut adımı bitirir, yenisini başlatmaz), sürdürdü (`resume`) veya iptal etti (`cancel`: mevcut iptal yolu; coordinator bunu diğer iptal edilmiş attempt'ler gibi ele alır ve ardından `attempt/state_changed … cancelled` gelir).
+
+```yaml example=session-event
+- schema_version: 1
+  event_id: evt_01K5W0A8Z4X9V2M6N7P0R1S2B1
+  session_id: ses_01K5W0A8Z4X9V2M6N7P0R1S2B0
+  seq: 41
+  event_version: 1
+  timestamp: "2026-09-24T10:00:05.000Z"
+  run_id: run_01K5W0A8Z4X9V2M6N7P0R1S2B2
+  task_id: task_01K5W0A8Z4X9V2M6N7P0R1S2B3
+  attempt_id: att_01K5W0A8Z4X9V2M6N7P0R1S2B4
+  actor: { kind: orchestrator, role: orchestrator }
+  type: task/delegated
+  data:
+    task_id: task_01K5W0A8Z4X9V2M6N7P0R1S2B3
+    attempt_id: att_01K5W0A8Z4X9V2M6N7P0R1S2B4
+    key: edit-a
+    role: implementer
+    provider_id: openai
+    model_id: gpt-6-luna
+    objective: Fix the typo in docs/a.md
+    attempt: 1
+- schema_version: 1
+  event_id: evt_01K5W0A8Z4X9V2M6N7P0R1S2B5
+  session_id: ses_01K5W0A8Z4X9V2M6N7P0R1S2B0
+  seq: 52
+  event_version: 1
+  timestamp: "2026-09-24T10:00:40.000Z"
+  run_id: run_01K5W0A8Z4X9V2M6N7P0R1S2B2
+  task_id: task_01K5W0A8Z4X9V2M6N7P0R1S2B3
+  attempt_id: att_01K5W0A8Z4X9V2M6N7P0R1S2B4
+  actor: { kind: user }
+  type: task/user_message
+  data: { task_id: task_01K5W0A8Z4X9V2M6N7P0R1S2B3, attempt_id: att_01K5W0A8Z4X9V2M6N7P0R1S2B4, text: keep the heading unchanged }
+- schema_version: 1
+  event_id: evt_01K5W0A8Z4X9V2M6N7P0R1S2B6
+  session_id: ses_01K5W0A8Z4X9V2M6N7P0R1S2B0
+  seq: 53
+  event_version: 1
+  timestamp: "2026-09-24T10:00:45.000Z"
+  run_id: run_01K5W0A8Z4X9V2M6N7P0R1S2B2
+  task_id: task_01K5W0A8Z4X9V2M6N7P0R1S2B3
+  attempt_id: att_01K5W0A8Z4X9V2M6N7P0R1S2B4
+  actor: { kind: user }
+  type: attempt/user_control
+  data: { attempt_id: att_01K5W0A8Z4X9V2M6N7P0R1S2B4, task_id: task_01K5W0A8Z4X9V2M6N7P0R1S2B3, action: pause }
 ```

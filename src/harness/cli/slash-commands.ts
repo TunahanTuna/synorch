@@ -189,6 +189,8 @@ export interface ConversationCommandHost {
   planMode(goal: string): Promise<void>;
   go(mode: string): Promise<void>;
   workers(goal: string): Promise<void>;
+  /** K1.7 `/worker [key] [message | --pause | --resume | --cancel]`. */
+  worker(argument: string): Promise<void>;
   undo(): Promise<void>;
   allow(argument: string): Promise<void>;
   trust(): Promise<void>;
@@ -228,7 +230,8 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/help", description: "commands and keys", whileBusy: true, run: async (host) => host.print(conversationHelp()) },
   { name: "/plan", argsHint: "[goal]", description: "plan mode: read-only, discuss and plan before changing anything (Shift+Tab cycles modes)", whileBusy: true, run: (host, argument) => host.planMode(argument) },
   { name: "/go", argsHint: "[workers]", description: "leave plan mode and carry out the plan here, or with workers", run: (host, argument) => host.go(argument) },
-  { name: "/workers", argsHint: "<goal>", description: "run a large goal with parallel workers and an independent reviewer", run: (host, argument) => host.workers(argument) },
+  { name: "/workers", argsHint: "<goal>", description: "run a large goal with parallel workers and an independent reviewer; alone: list the workers", whileBusy: true, run: (host, argument) => host.workers(argument) },
+  { name: "/worker", argsHint: "[key] [message | --pause | --resume | --cancel]", description: "one worker: its assignment and recent activity, or message / pause / resume / cancel it", whileBusy: true, run: (host, argument) => host.worker(argument) },
   { name: "/model", argsHint: "[tier] [provider/model] [--save]", description: "every logged-in provider's models; set a tier's model for this session (--save keeps it)", run: (host, argument) => host.model(argument) },
   { name: "/review", argsHint: "[focus]", description: "independent review of the uncommitted changes (fresh context)", run: (host, argument) => host.review(argument) },
   { name: "/commit", argsHint: "[message]", description: "diff summary and a proposed message; commits only after you confirm", run: (host, argument) => host.commit(argument) },

@@ -57,6 +57,12 @@
 - Karar masası + Obsidian hafıza defteri (kararlar/varsayımlar oturumlar arası, düzeltme kontrolü) — sahip belgesi [obsidian/README.md](../obsidian/README.md).
 - Kaldığın yerden devam paketi (UX-06), "bu bağlam neden?" (UX-07).
 
+### Ürün ilkesi (ürün sahibi, 2026-09-24)
+Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetkin bir araç olmak ve kendi ayrıştırıcılarımızla öne çıkmak. Diğer harness'ların hantal olmayan iyi özelliklerini içer, gerekirse doğrudan paylaş/kullan (ör. Claude Code native araçları, OpenAI hosted web_search). Her zaman önce kullanıcı deneyimi.
+
+### K2 eki — Hafıza grafı (ürün sahibi isteği, 2026-09-24)
+`/memory graph`: Obsidian graph view benzeri, hafıza notlarının (karar, varsayım, soru, kanıt, kavram, tercih) ilişki yumağını terminalde göster; ilişki türleri + not bağlantıları, filtreler, odakla-genişlet gezinme (ajan grafıyla aynı etkileşim), çelişki vurgusu, `o` ile notu Obsidian'da aç, `--obsidian` ile Obsidian'ın kendi graph view'unu aç. K2 ajanına eklendi.
+
 ### K3 — Güç kullanıcısı
 - Worker'lar arka planda çalışırken sohbet (UX-GATE-02).
 - Çapraz sağlayıcılı review (K1.5 ile birleşir).

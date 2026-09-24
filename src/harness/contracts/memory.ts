@@ -120,7 +120,8 @@ export const memoryProposalSchema = z
     new_status: z.string().min(1).optional(),
     rationale: nonEmptyTextSchema,
     evidence: z.array(evidenceRefSchema).min(1),
-    created_by: z.strictObject({ run_id: runIdSchema, task_id: taskIdSchema.optional() }),
+    /** The run (orchestration) or, for a conversation turn outside any run, just the role (`session`) that proposed it. */
+    created_by: z.strictObject({ run_id: runIdSchema.optional(), task_id: taskIdSchema.optional(), role: z.enum(["orchestrator", "session", "worker", "reviewer"]).optional() }),
     created_at: timestampSchema,
     state: z.enum(["pending", "accepted", "rejected", "deferred"]),
     decision: z
@@ -147,6 +148,9 @@ export const memoryProposalSchema = z
     }
     if ((proposal.state === "pending") !== (proposal.decision === undefined)) {
       context.addIssue({ code: "custom", path: ["decision"], message: "a decision is present exactly when the proposal is no longer pending" });
+    }
+    if (proposal.created_by.run_id === undefined && proposal.created_by.role === undefined) {
+      context.addIssue({ code: "custom", path: ["created_by"], message: "a proposal records the run or the role that created it" });
     }
     if (proposal.decision?.by === "orchestrator" && proposal.decision.run_id === undefined) {
       context.addIssue({ code: "custom", path: ["decision", "run_id"], message: "an orchestrator decision records the run that made it" });

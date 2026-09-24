@@ -199,7 +199,8 @@ export interface ConversationCommandHost {
   commit(argument: string): Promise<void>;
   usage(): Promise<void>;
   cost(): Promise<void>;
-  evidence(): Promise<void>;
+  /** K2 `/evidence [turn | <n>]`. */
+  evidence(argument: string): Promise<void>;
   why(argument: string): Promise<void>;
   compact(focus: string): Promise<void>;
   report(name: "context" | "permissions" | "tasks" | "memory" | "diff" | "log", argument: string): Promise<void>;
@@ -240,13 +241,13 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/trust", description: "trust this folder so build/test commands may run", run: (host) => host.trust() },
   { name: "/usage", description: "requests, tokens, quota and estimated cost (session and today)", whileBusy: true, run: (host) => host.usage() },
   { name: "/cost", description: "this session's estimated cost and tokens", whileBusy: true, run: (host) => host.cost() },
-  { name: "/evidence", description: "checks, criteria and reviews of this conversation's worker runs", whileBusy: true, run: (host) => host.evidence() },
-  { name: "/why", argsHint: "[tool]", description: "why the last action was allowed or refused, and what would change it", whileBusy: true, run: (host, argument) => host.why(argument) },
+  { name: "/evidence", argsHint: "[turn | n]", description: "proof for the last turn or worker run: criteria, checks Synorch ran, review verdict and findings", whileBusy: true, run: (host, argument) => host.evidence(argument) },
+  { name: "/why", argsHint: "[last | n | tool | model]", description: "why an action was allowed, asked or refused (mode, rule, layer) and what would change it; /why model: why this route", whileBusy: true, run: (host, argument) => host.why(argument) },
   { name: "/compact", argsHint: "[focus]", description: "summarize older messages to free context", run: (host, argument) => host.compact(argument) },
-  { name: "/context", description: "what the model saw in its last request", whileBusy: true, run: (host, argument) => host.report("context", argument) },
+  { name: "/context", description: "why this context: instructions, skills, memory, files and history the model received, with token estimates", whileBusy: true, run: (host, argument) => host.report("context", argument) },
   { name: "/clear", description: "start a fresh conversation (this one stays resumable)", run: (host) => host.clear() },
   { name: "/resume", argsHint: "[n | session id]", description: "list recent conversations or switch to one", run: (host, argument) => host.resume(argument) },
-  { name: "/memory", description: "memory vault and pending proposals", whileBusy: true, run: (host, argument) => host.report("memory", argument) },
+  { name: "/memory", argsHint: "[review | edit <id> | retire <id> | open [id] | graph]", description: "memory ledger and decision desk: what Synorch remembers, proposals to accept / edit / reject / defer", whileBusy: true, run: (host, argument) => host.report("memory", argument) },
   { name: "/mouse", argsHint: "[on|off]", description: "toggle mouse capture (scroll / select)", whileBusy: true, rendererLocal: true, run: (host, argument) => host.mouse(argument) },
   { name: "/diff", description: "files changed by Synorch in this conversation", whileBusy: true, run: (host, argument) => host.report("diff", argument) },
   { name: "/graph", description: "the plan graph of the current or last worker run", whileBusy: true, run: (host) => host.graph() },

@@ -120,6 +120,8 @@ export type ProofView =
       readonly durationMs?: number | undefined;
       /** `42 passed`, `3 failed`. */
       readonly detail?: string | undefined;
+      /** K2: the last lines of the command's output (redacted), so the proof is readable in place. */
+      readonly excerpt?: string | undefined;
     }
   | { readonly kind: "review"; readonly verdict: ReviewVerdictView; readonly reviewer: string; readonly independent: boolean }
   | { readonly kind: "file"; readonly path: string; readonly note?: string | undefined }
@@ -136,7 +138,19 @@ export interface EvidenceView {
   /** e.g. the task or turn the evidence belongs to. */
   readonly title?: string | undefined;
   readonly criteria: readonly CriterionView[];
-  readonly review?: { readonly independent: boolean; readonly reviewer?: string | undefined; readonly verdict?: ReviewVerdictView | undefined } | undefined;
+  readonly review?:
+    | {
+        readonly independent: boolean;
+        readonly reviewer?: string | undefined;
+        readonly verdict?: ReviewVerdictView | undefined;
+        /** K2: the reviewer's findings, one line each (`major src/a.ts:12 missing null check`). */
+        readonly findings?: readonly string[] | undefined;
+      }
+    | undefined;
+  /** K2: the size of the change the evidence covers. */
+  readonly diffstat?: { readonly files: number; readonly added: number; readonly removed: number } | undefined;
+  /** K2: other runs or turns `/evidence <n>` can show, newest first (`1. fix the typo · 2m ago`). */
+  readonly others?: readonly string[] | undefined;
   readonly changedPaths?: readonly string[] | undefined;
   readonly risk?: string | undefined;
   readonly next?: string | undefined;
@@ -174,6 +188,80 @@ export interface WhyView {
   readonly reasons: readonly { readonly layer: PolicyLayerView; readonly code: string; readonly message: string; readonly source?: string | undefined }[];
   /** Commands that would change the outcome (`/allow rm -rf`, `/trust`) and what each does. */
   readonly howToChange: readonly { readonly command: string; readonly effect: string }[];
+  /** K2: the circumstances of the decision (permission mode, trust, sandbox, who answered the prompt, route). */
+  readonly facts?: readonly { readonly label: string; readonly text: string }[] | undefined;
+  /** K2: replaces the headline question (`Why this model?`). */
+  readonly question?: string | undefined;
+  /** K2: other recent decisions `/why <n>` explains, newest first. */
+  readonly recent?: readonly string[] | undefined;
+}
+
+// ---------------------------------------------------------------------------------------------
+// K2 "Why this context?" (`/context`, UX-07): what the model received in its last request.
+
+export interface ContextItemView {
+  readonly label: string;
+  /** Why it is there / where it came from (`matched "auth" in title; project scope`). */
+  readonly detail?: string | undefined;
+  readonly tokens: number;
+  readonly trust?: string | undefined;
+  readonly truncated?: boolean | undefined;
+  readonly stale?: boolean | undefined;
+}
+
+export interface ContextGroupView {
+  readonly title: string;
+  readonly items: readonly ContextItemView[];
+}
+
+export interface ContextView {
+  readonly kind: "context";
+  /** `openai/gpt-6` */
+  readonly model?: string | undefined;
+  readonly totalTokens: number;
+  readonly windowTokens?: number | undefined;
+  readonly groups: readonly ContextGroupView[];
+  readonly notes?: readonly string[] | undefined;
+}
+
+// ---------------------------------------------------------------------------------------------
+// K2 memory ledger (`/memory`, UX-08) and decision desk (`/memory review`, obsidian/README §6.3).
+
+export interface MemoryEntryView {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+  /** `you`, `reviewed 2026-09-24`, `Synorch (unreviewed)`. */
+  readonly decider?: string | undefined;
+  readonly scope?: string | undefined;
+  readonly stale?: boolean | undefined;
+}
+
+export interface MemoryLedgerView {
+  readonly kind: "memory";
+  readonly vault: string;
+  /** `memory: 3 decisions, 1 open assumption` */
+  readonly summary: string;
+  readonly sections: readonly { readonly title: string; readonly entries: readonly MemoryEntryView[] }[];
+  readonly contradictions: readonly string[];
+  readonly pending: number;
+  readonly hints: readonly string[];
+}
+
+export interface MemoryProposalView {
+  readonly kind: "memory-proposal";
+  readonly position: number;
+  readonly total: number;
+  /** `decision`, `preference`, `status change`… */
+  readonly noteKind: string;
+  readonly title: string;
+  readonly body?: string | undefined;
+  readonly rationale: string;
+  /** Where it came from: `proposed by the conversation (tool call) · 2026-09-24 14:02`. */
+  readonly source: string;
+  readonly scope?: string | undefined;
+  readonly conflicts: readonly string[];
+  readonly deferred?: boolean | undefined;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -310,7 +398,51 @@ export interface DiffView {
   readonly integrated?: readonly { readonly path: string; readonly reviewed: boolean }[] | undefined;
 }
 
-export type HarnessView = OrchestrationView | UsageView | EvidenceView | ActionView | WhyView | WorkerDelegationView | WorkerSnapshotView | DiffView;
+/** `/memory graph`: the vault as a graph of notes (relations and Markdown links as edges). */
+export interface MemoryGraphNodeView {
+  readonly id: string;
+  /** `decision`, `assumption`, `question`, `evidence`, `concept`, `preference`, `project`. */
+  readonly kind: string;
+  readonly status: string;
+  readonly title: string;
+  readonly stale?: boolean | undefined;
+  /** Part of a `contradicts` relation or a contradiction candidate: highlighted. */
+  readonly contradicted?: boolean | undefined;
+  /** The `--around` note. */
+  readonly focus?: boolean | undefined;
+}
+
+export interface MemoryGraphEdgeView {
+  readonly from: string;
+  readonly to: string;
+  /** A relation type (`supports`, `contradicts`, …) or `link` for a Markdown link. */
+  readonly type: string;
+}
+
+export interface MemoryGraphView {
+  readonly kind: "memory-graph";
+  readonly nodes: readonly MemoryGraphNodeView[];
+  readonly edges: readonly MemoryGraphEdgeView[];
+  /** `project synorch · branch harness · around dec-x (depth 2)`. */
+  readonly scope: string;
+  /** Notes left out by the filters or the size cap. */
+  readonly hidden?: number | undefined;
+  readonly hints?: readonly string[] | undefined;
+}
+
+export type HarnessView =
+  | MemoryGraphView
+  | OrchestrationView
+  | UsageView
+  | EvidenceView
+  | ActionView
+  | WhyView
+  | WorkerDelegationView
+  | WorkerSnapshotView
+  | DiffView
+  | ContextView
+  | MemoryLedgerView
+  | MemoryProposalView;
 export type HarnessViewKind = HarnessView["kind"];
 
 /**

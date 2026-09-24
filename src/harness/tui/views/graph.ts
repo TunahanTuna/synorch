@@ -361,6 +361,10 @@ export interface GraphOptions {
   readonly selected?: string | undefined;
   /** Replaces the header hint on the right. */
   readonly hint?: string | undefined;
+  /** K2 memory graph: replaces the `Plan graph · n tasks` header parts. */
+  readonly header?: readonly string[] | undefined;
+  /** K2 memory graph: no running-activity lines or plan legend. */
+  readonly bare?: boolean | undefined;
 }
 
 /** Task keys per graph level, top to bottom within a level: the order ←/→ and ↑/↓ move in. */
@@ -376,8 +380,8 @@ export function renderGraph(view: OrchestrationView, ctx: ViewContext, options: 
   const layout = layoutGraph(view);
   const levelCount = layout.levels.filter((entries) => entries.length > 0).length;
   const running = view.tasks.filter(isActive).length;
-  const left = [`${g.base.bullet} Plan graph`, `${view.tasks.length} task${view.tasks.length === 1 ? "" : "s"}`, `${levelCount} level${levelCount === 1 ? "" : "s"}`];
-  if (running > 0) left.push(`${running} running`);
+  const left = options.header !== undefined ? [...options.header] : [`${g.base.bullet} Plan graph`, `${view.tasks.length} task${view.tasks.length === 1 ? "" : "s"}`, `${levelCount} level${levelCount === 1 ? "" : "s"}`];
+  if (running > 0 && options.header === undefined) left.push(`${running} running`);
   const head = spread(left.join(` ${g.base.sep} `), options.hint ?? (options.fromBoard === true ? boardHint(ctx, "graph") : ""), ctx.width);
   const lines = [`${t.accent(head.left)}${head.gap}${t.muted(head.right)}`];
   if (view.tasks.length === 0) {
@@ -386,6 +390,7 @@ export function renderGraph(view: OrchestrationView, ctx: ViewContext, options: 
   }
   const body = options.stacked === true ? undefined : renderWide(view, layout, ctx, options.selected);
   lines.push(...(body ?? renderStacked(view, layout, ctx, options.selected)));
+  if (options.bare === true) return finish(lines, ctx);
   // Activity of what is running now, and the legend.
   for (const task of view.tasks.filter(isActive)) {
     const shown = presentTask(task, view.tasks, ctx);

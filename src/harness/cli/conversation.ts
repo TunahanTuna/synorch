@@ -2,7 +2,6 @@ import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import {
-  completionPacketSchema,
   createId,
   digestOf,
   effectivePolicySchema,
@@ -21,7 +20,6 @@ import {
   type ApprovalRequest,
   type Attachment,
   type BlobRef,
-  type CompletionPacket,
   type Digest,
   type EffectivePolicy,
   type EventStore,
@@ -44,7 +42,7 @@ import {
   type ToolResult,
   type TurnId,
 } from "../contracts/index.ts";
-import type { CriterionView, DiffFileView, DiffView, EvidenceView, OrchestrationTaskView, WhyView, WorkerControl, WorkerSeam } from "../contracts/views.ts";
+import type { DiffFileView, DiffView, OrchestrationTaskView, WorkerControl, WorkerSeam } from "../contracts/views.ts";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageTokens, reconstructHistory } from "../context/index.ts";
 import { WorkerStreamHub, type OrchestrationCoordinator, type WorkerControlResult, type WorkerDirectory } from "../orchestration/index.ts";
@@ -70,14 +68,15 @@ import { commitAll, commitsSince, uncommittedChanges, uncommittedDiff } from "./
 import {
   contextReport,
   conversationPaletteEntries,
-  evidenceReport,
   findConversationCommand,
   unknownConversationCommand,
-  memoryReport,
   tasksReport,
   type ConversationCommandHost,
 } from "./slash-commands.ts";
 import { resolveTerminalSettings, streamHasColors } from "./terminal.ts";
+import { buildContextView, buildEvidence, buildWhy } from "./transparency.ts";
+import { runMemoryDesk, type MemoryDeskHost } from "./memory-desk.ts";
+import { createSystemObsidianLauncher, ledgerSummary, readLedger, type MarkdownMemoryStore } from "../memory/index.ts";
 import { promptTrustForCommand } from "./trust.ts";
 import { UsageLedger } from "./usage-stats.ts";
 
@@ -393,6 +392,7 @@ class Conversation implements ConversationCommandHost {
       unbindControls = controls?.onPermissionModeChange((mode) => this.setMode(mode)) ?? (() => undefined);
       if (runtime.permissionMode() === "full") this.note("error", this.fullAccessNotice());
       if (resumed !== undefined) await this.showResumed(resumed);
+      else await this.memoryStartLine();
       if (this.debug) this.note("info", `harness: runtime ready in ${runtimeMs} ms`);
       // Credential pre-resolution (keychain, token refresh) happens in the background, never before the editor.
       void this.routePromise.then((decision) => runtime.credentials(decision.route, this.outer.signal)).catch(() => undefined);
@@ -565,14 +565,30 @@ class Conversation implements ConversationCommandHost {
       const commits = await commitsSince(this.runtime.workspaceRoot, lastAt).catch(() => []);
       if (commits.length > 0) changes.push(`${commits.length} commit${commits.length === 1 ? "" : "s"} (latest: ${snippet(commits[0] ?? "", 50)})`);
     }
+    // K2 (UX-06): what changed in memory since, and the todo list the agent kept, if any.
+    const since = lastAt ?? "";
+    const pending = await this.runtime.memory.pending().catch(() => []);
+    const ledger = await readLedger(this.runtime.memory as MarkdownMemoryStore, this.runtime.projectId, this.runtime.gitBranch).catch(() => undefined);
+    const index = await (this.runtime.memory as MarkdownMemoryStore).index().catch(() => undefined);
+    const lastMs = Date.parse(since);
+    const freshNotes = index === undefined || !Number.isFinite(lastMs) ? 0 : index.notes.filter((note) => note.mtimeMs > lastMs && (note.project_id === this.runtime.projectId || note.scope === "user")).length;
+    if (freshNotes > 0 || pending.length > 0) changes.push(`memory: ${freshNotes > 0 ? `${freshNotes} note${freshNotes === 1 ? "" : "s"} changed` : ""}${freshNotes > 0 && pending.length > 0 ? ", " : ""}${pending.length > 0 ? `${pending.length} proposal${pending.length === 1 ? "" : "s"} waiting` : ""}`);
+    const todo = lastTodo(events);
     const lastTurn = [...events].reverse().find((event): event is SessionEventOf<"turn/ended"> => event.type === "turn/ended");
     const next =
-      lastTurn === undefined || lastTurn.data.outcome === "completed"
-        ? "continue where we left off, or ask something new"
-        : `the last turn ended ${lastTurn.data.outcome.replaceAll("_", " ")}; say "continue" to pick it up`;
+      lastTurn !== undefined && lastTurn.data.outcome !== "completed"
+        ? `the last turn ended ${lastTurn.data.outcome.replaceAll("_", " ")}; say "continue" to pick it up`
+        : todo?.next !== undefined
+          ? `continue with "${snippet(todo.next, 60)}"`
+          : pending.length > 0
+            ? `/memory review (${pending.length} waiting), then continue where we left off`
+            : "continue where we left off, or ask something new";
+    const summary = ledger === undefined ? undefined : ledgerSummary(ledger);
+    const extra = [...(todo === undefined ? [] : [`  Todo            ${todo.done}/${todo.total} done${todo.next === undefined ? "" : ` · next: ${snippet(todo.next, 60)}`}`]), ...(summary === undefined ? [] : [`  Memory          ${summary.replace(/^memory: /, "")}`])];
+    if (todo !== undefined && todo.next !== undefined) this.pendingNotes.push(`your todo list from before the resume: ${todo.done}/${todo.total} done; next open item: ${snippet(todo.next, 200)}.`);
     if (lastTurn !== undefined && lastTurn.data.outcome !== "completed") this.pendingNotes.push(`the previous turn ended ${lastTurn.data.outcome}; the conversation was resumed.`);
     if (touched.length > 0) this.pendingNotes.push(`since the last turn, ${touched.join(", ")} changed outside Synorch (re-read before editing).`);
-    return [`  Where we were   ${where}`, `  Since then      ${changes.length === 0 ? "no changes to files Synorch edited, no new commits" : changes.join(" · ")}`, `  Next            ${next}`];
+    return [`  Where we were   ${where}`, `  Since then      ${changes.length === 0 ? "no changes to files Synorch edited, no new commits" : changes.join(" · ")}`, ...extra, `  Next            ${next}`];
   }
 
   private async ensureLog(firstMessage: string): Promise<EventStore> {
@@ -999,7 +1015,48 @@ class Conversation implements ConversationCommandHost {
     if (this.planOn && outcome?.outcome === "completed" && leftover.length === 0) {
       this.note("info", `${this.glyphs.bullet} Plan mode ${this.glyphs.sep} /go carries it out here ${this.glyphs.sep} /go workers runs it with workers ${this.glyphs.sep} or keep refining`);
     }
+    await this.memoryNudge();
     return false;
+  }
+
+  // ---- K2 memory: start summary, proposal nudge, the desk --------------------------------------
+
+  private memoryNudged = 0;
+
+  /** `memory: 3 decisions, 1 open assumption` at session start (nothing for an empty vault). */
+  private async memoryStartLine(): Promise<void> {
+    const store = this.runtime.memory as MarkdownMemoryStore;
+    const summary = await readLedger(store, this.runtime.projectId, this.runtime.gitBranch).then(ledgerSummary, () => undefined);
+    if (summary !== undefined) this.note("info", `${this.glyphs.bullet} ${summary}`);
+  }
+
+  /** After a turn: `📌 2 memory proposals · /memory review` when the agent proposed something new this session. */
+  private async memoryNudge(): Promise<void> {
+    const since = new Date(this.startedAt).toISOString();
+    const fresh = await this.runtime.memory.pending().then((pending) => pending.filter((proposal) => proposal.state === "pending" && proposal.created_at >= since).length, () => 0);
+    if (fresh <= this.memoryNudged) return;
+    this.memoryNudged = fresh;
+    this.note("info", `${this.glyphs.name === "rich" ? "📌" : "*"} ${fresh} memory proposal${fresh === 1 ? "" : "s"} ${this.glyphs.sep} /memory review`);
+  }
+
+  private memoryDesk(): MemoryDeskHost {
+    const views = this.renderer.views;
+    return {
+      store: this.runtime.memory as MarkdownMemoryStore,
+      projectId: this.runtime.projectId,
+      branch: this.runtime.gitBranch,
+      obsidian: createSystemObsidianLauncher(this.io.env, this.io.platform),
+      print: (lines) => this.print(lines),
+      show: (view) => {
+        if (views === undefined) return false;
+        views.showView(view);
+        return true;
+      },
+      ask: (question, options) => this.askUser(question, options, this.outer.signal),
+      append: async (type, data) => {
+        await this.append(type, data, "user");
+      },
+    };
   }
 
   /**
@@ -1829,71 +1886,33 @@ class Conversation implements ConversationCommandHost {
     return events;
   }
 
-  /** `/evidence` as U3's `EvidenceView`: checks run by Synorch, worker-cited criteria, independent reviews, changed paths. */
-  private async evidenceView(): Promise<EvidenceView> {
-    const events = await this.orchestrationEvents();
-    const conversation = await this.readEvents();
-    const restored = new Set(conversation.flatMap((event) => (event.type === "checkpoint/restored" ? [event.data.checkpoint_seq] : [])));
-    const direct = [...new Set(conversation.flatMap((event) => (event.type === "checkpoint/recorded" && !restored.has(event.seq) ? event.data.files.map((file) => file.path) : [])))];
-    if (events.length === 0) {
-      return {
-        kind: "evidence",
-        title: "This conversation",
-        criteria: [],
-        review: { independent: false },
-        ...(direct.length === 0 ? {} : { changedPaths: direct }),
-        next: direct.length === 0 ? "nothing changed yet" : "direct edits are not independently reviewed: /review runs a reviewer on the uncommitted diff",
-      };
-    }
-    const keys = new Map<string, string>();
-    const states = new Map<string, string>();
-    for (const event of events) {
-      if (event.type === "task/created") keys.set(event.data.task_id, event.data.key);
-      if (event.type === "task/state_changed") states.set(event.data.task_id, event.data.to);
-    }
-    const criteria: CriterionView[] = [];
-    for (const event of events) {
-      if (event.type === "attempt/verification_ran") {
-        criteria.push({
-          text: `${keys.get(event.data.task_id) ?? "task"}: ${event.data.command}`,
-          status: event.data.status === "passed" ? "passed" : event.data.status === "failed" ? "failed" : "not_run",
-          proofs: [{ kind: "command", command: event.data.command, ...(event.data.exit_code === null ? {} : { exitCode: event.data.exit_code }), runBy: "harness", durationMs: event.data.duration_ms }],
-        });
-      }
-      if (event.type === "attempt/completion_recorded") {
-        let completion: CompletionPacket | undefined;
-        try {
-          completion = completionPacketSchema.parse(JSON.parse(new TextDecoder().decode(await this.runtime.blobs.get(event.data.blob.digest))));
-        } catch {
-          completion = undefined;
-        }
-        const task = completion === undefined ? undefined : [...keys.entries()].find(([id]) => events.some((candidate) => candidate.type === "attempt/started" && candidate.data.attempt_id === event.data.attempt_id && candidate.data.task_id === id));
-        for (const entry of completion?.acceptance_evidence ?? []) {
-          criteria.push({
-            text: `${task?.[1] ?? "task"}: ${entry.criterion_id}`,
-            status: task !== undefined && states.get(task[0]) === "completed" ? "passed" : "unverifiable",
-            proofs: entry.evidence.map((ref) => ({ kind: "note" as const, text: `${ref.kind} ${ref.ref} (cited by the ${ref.produced_by})` })),
-          });
-        }
+  /** The conversation's worker runs (this process, or recorded in orchestrate results when resumed), oldest first. */
+  private async orchestrationRuns(): Promise<{ readonly sessionId: string; readonly events: readonly SessionEvent[] }[]> {
+    const ids = new Set<string>(this.orchestratedSessions);
+    for (const event of await this.readEvents()) {
+      if (event.type !== "message/recorded" || event.data.role !== "tool" || event.data.message === undefined) continue;
+      for (const part of event.data.message.content) {
+        if (part.type !== "tool_result") continue;
+        for (const match of part.text.matchAll(ORCHESTRATION_SESSION)) if (match[1] !== undefined) ids.add(match[1]);
       }
     }
-    const reviews = events.filter((event): event is SessionEventOf<"review/recorded"> => event.type === "review/recorded");
-    const lastReview = reviews.at(-1);
-    const integrated = [...new Set(events.flatMap((event) => (event.type === "task/integrated" ? event.data.paths : [])))];
-    return {
-      kind: "evidence",
-      title: "Worker runs in this conversation",
-      criteria,
-      ...(lastReview === undefined
-        ? { review: { independent: false } }
-        : { review: { independent: true, verdict: lastReview.data.decision === "accept" ? "accepted" : lastReview.data.decision === "revise" ? "changes_requested" : "rejected" } }),
-      changedPaths: [...integrated, ...direct.filter((file) => !integrated.includes(file))],
-      ...(direct.length === 0 ? {} : { next: `${direct.length} direct edit${direct.length === 1 ? " is" : "s are"} not independently reviewed: /review` }),
-    };
+    const runs: { sessionId: string; events: SessionEvent[] }[] = [];
+    for (const id of ids) {
+      try {
+        const reader = await this.runtime.sessions.openForRead(id as SessionId);
+        const events: SessionEvent[] = [];
+        for await (const item of reader.read()) if (item.status === "ok") events.push(item.event);
+        runs.push({ sessionId: id, events });
+      } catch {
+        continue;
+      }
+    }
+    return runs.sort((left, right) => (left.events[0]?.timestamp ?? "").localeCompare(right.events[0]?.timestamp ?? ""));
   }
 
-  public async evidence(): Promise<void> {
-    const view = await this.evidenceView();
+  /** K2 `/evidence [turn | <n>]` (UX-04): the last turn or worker run, criterion by criterion, from the log only. */
+  public async evidence(argument = ""): Promise<void> {
+    const view = await buildEvidence({ blobs: this.runtime.blobs, conversation: await this.readEvents(), runs: await this.orchestrationRuns(), diff: await this.diffView() }, argument);
     const views = this.renderer.views;
     if (views !== undefined) {
       views.showView(view);
@@ -1906,49 +1925,33 @@ class Conversation implements ConversationCommandHost {
     this.print(view.criteria.map((criterion) => `${criterion.status}: ${criterion.text}`));
   }
 
-  /** `/why` as U3's `WhyView`: the latest (or the named tool's latest) policy decision, its reasons and what would change it. */
+  /** K2 `/why [last | <n> | <tool> | model]` (X6): mode, layer, rule, who answered, and what would change it. */
   public async why(argument: string): Promise<void> {
-    const events = await this.readEvents();
-    const filter = argument.trim().toLowerCase();
-    const decided = [...events].reverse().find((event): event is SessionEventOf<"tool/policy_decided"> => event.type === "tool/policy_decided" && (filter === "" || event.data.action.tool_name.toLowerCase().includes(filter)));
-    if (decided === undefined) {
-      this.print([filter === "" ? "No action recorded yet in this conversation." : `No ${filter} action recorded in this conversation.`]);
+    const runtime = this.runtime;
+    const mode = runtime.permissionMode();
+    const recorded = runtime.trust.recorded();
+    const trusted = runtime.sandbox.enforcement === "full" ? "not needed (full sandbox)" : recorded.trusted ? "trusted" : runtime.trust.state().trusted ? "trusted for this session" : "not trusted (build/test commands ask first; /trust)";
+    const result = buildWhy(await this.readEvents(), argument, {
+      mode: mode === undefined ? "default-deny (no prompts; headless)" : `${mode}: ${MODE_MEANINGS[mode]}`,
+      trust: trusted,
+      sandbox: `${runtime.sandbox.backend} (${runtime.sandbox.enforcement})`,
+      grants: this.grantList,
+      planOn: this.planOn,
+      noPermissionMode: mode === undefined,
+    });
+    if (typeof result === "string") {
+      this.print([result]);
       return;
     }
-    const action = decided.data.action;
-    const decision = decided.data.decision;
-    const result = events.find((event): event is SessionEventOf<"tool/result_recorded"> => event.type === "tool/result_recorded" && event.data.tool_call_id === decided.data.tool_call_id);
-    const target = action.command !== undefined ? action.command.argv.join(" ") : action.paths.map((entry) => entry.path).join(", ") || "(no path)";
-    const howToChange: { command: string; effect: string }[] = [];
-    const add = (command: string, effect: string): void => {
-      if (!howToChange.some((entry) => entry.command === command)) howToChange.push({ command, effect });
-    };
-    const planDenied = this.planOn && decision.decision === "deny" && decision.reasons.some((reason) => reason.code === "workspace-write-denied" || reason.code === "exec-denied");
-    for (const reason of decision.reasons) {
-      if (reason.code === "exec-not-allowlisted" && action.command !== undefined) add(`/allow ${action.command.argv.slice(0, 2).join(" ")}`, "lets Synorch run commands starting with this prefix here");
-      if (reason.code === WORKSPACE_UNTRUSTED_CODE) add("/trust", "lets build and test commands run in this folder");
-      if (reason.code === "approval-required" || reason.code === "permission-prompt") add("Shift+Tab (auto or full)", "fewer questions: auto asks only for risky commands, full asks nothing (hard rails still apply)");
-      if (reason.code === "exec-not-allowlisted" && this.runtime.permissionMode() === undefined) add("--permission-mode auto", "asks you instead of refusing commands outside the allowlist");
-      if (reason.code === "sandbox-insufficient") add("syn doctor --runtime", "shows why a full sandbox is required and missing");
-    }
-    if (planDenied) add("/plan (or Shift+Tab)", "leaves plan mode so edits and commands are allowed");
-    const subject = `${action.tool_name} ${snippet(target, 100)}${result === undefined ? "" : ` (${result.data.state})`}`;
-    const view: WhyView = {
-      kind: "why",
-      subject,
-      decision: decision.decision,
-      reasons: decision.reasons.map((reason) => ({ layer: reason.layer, code: reason.code, message: reason.message })),
-      howToChange,
-    };
     const views = this.renderer.views;
     if (views !== undefined) {
-      views.showView(view);
-      if (result?.data.result.error !== undefined && decision.decision === "allow") this.print([`  result: ${snippet(result.data.result.error.message, 200)}`]);
+      views.showView(result);
       return;
     }
-    const lines = [`${subject} ${this.glyphs.sep} ${decision.decision}`];
-    for (const reason of view.reasons) lines.push(`  ${reason.layer}: ${reason.message} (${reason.code})`);
-    for (const entry of howToChange) lines.push(`  ${this.glyphs.name === "rich" ? "→" : "->"} ${entry.command}: ${entry.effect}`);
+    const lines = [`${result.subject} ${this.glyphs.sep} ${result.decision}`];
+    for (const reason of result.reasons) lines.push(`  ${reason.layer}: ${reason.message} (${reason.code})`);
+    for (const fact of result.facts ?? []) lines.push(`  ${fact.label}: ${fact.text}`);
+    for (const entry of result.howToChange) lines.push(`  ${this.glyphs.name === "rich" ? "→" : "->"} ${entry.command}: ${entry.effect}`);
     this.print(lines);
   }
 
@@ -1981,9 +1984,16 @@ class Conversation implements ConversationCommandHost {
 
   public async report(name: "context" | "permissions" | "tasks" | "memory" | "diff" | "log", argument: string): Promise<void> {
     switch (name) {
-      case "context":
-        this.print(contextReport(await this.readEvents()));
+      case "context": {
+        // K2 "Why this context?" (UX-07): provenance and token estimate of every block of the last request.
+        const events = await this.readEvents();
+        const view = await buildContextView(events, this.runtime.blobs, DEFAULT_CONTEXT_WINDOW).catch(() => undefined);
+        const views = this.renderer.views;
+        if (view !== undefined && views !== undefined) views.showView(view);
+        else if (view !== undefined) this.print(view.groups.flatMap((group) => [`${group.title}:`, ...group.items.map((item) => `  ${item.label} ~${item.tokens}${item.detail === undefined ? "" : ` (${item.detail})`}`)]));
+        else this.print(contextReport(events));
         return;
+      }
       case "permissions":
         await this.permissions(argument);
         return;
@@ -1993,7 +2003,7 @@ class Conversation implements ConversationCommandHost {
         return;
       }
       case "memory":
-        this.print(await memoryReport(this.runtime));
+        await runMemoryDesk(this.memoryDesk(), argument);
         return;
       case "diff": {
         const view = await this.diffView();
@@ -2245,6 +2255,31 @@ const MODE_MEANINGS: Readonly<Record<PermissionMode, string>> = {
   full: "no prompts except destructive commands (force push, publish, recursive delete…); hard rails stay",
   plan: "read-only: reads and plans, no edits or commands",
 };
+
+/**
+ * The last todo list the agent wrote with a todo tool (any tool whose name contains `todo`, with a
+ * `todos`/`items` array of `{ content | text | title, status }`), for the resume card (UX-06).
+ */
+function lastTodo(events: readonly SessionEvent[]): { readonly done: number; readonly total: number; readonly next: string | undefined } | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== "message/recorded" || event.data.role !== "assistant" || event.data.message === undefined) continue;
+    for (const part of [...event.data.message.content].reverse()) {
+      if (part.type !== "tool_call" || !/todo/i.test(part.name)) continue;
+      const list = Array.isArray(part.arguments.todos) ? part.arguments.todos : Array.isArray(part.arguments.items) ? part.arguments.items : undefined;
+      if (list === undefined) continue;
+      const items = list.flatMap((item: unknown) => {
+        if (typeof item !== "object" || item === null) return [];
+        const record = item as Record<string, unknown>;
+        const text = [record.content, record.text, record.title].find((value): value is string => typeof value === "string");
+        return text === undefined ? [] : [{ text, done: /^(done|completed|complete)$/i.test(String(record.status ?? "")) }];
+      });
+      if (items.length === 0) continue;
+      return { done: items.filter((item) => item.done).length, total: items.length, next: items.find((item) => !item.done)?.text };
+    }
+  }
+  return undefined;
+}
 
 function relativeTime(then: number): string {
   if (!Number.isFinite(then)) return "earlier";

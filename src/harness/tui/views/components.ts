@@ -6,6 +6,7 @@ import { renderAction, renderEvidence, renderWhy } from "./cards.ts";
 import { renderDiff } from "./diff.ts";
 import { renderGraph } from "./graph.ts";
 import { createViewTheme, viewGlyphs, type ViewContext, type ViewGlyphs, type ViewTheme } from "./kit.ts";
+import { renderContext, renderMemoryGraph, renderMemoryLedger, renderMemoryProposal } from "./trust-cards.ts";
 import { renderUsage } from "./usage.ts";
 import { renderDelegation, renderUserToWorker, renderWorkerSnapshot } from "./worker.ts";
 
@@ -45,6 +46,14 @@ export function renderView(view: HarnessView, ctx: ViewContext): string[] {
       return renderWorkerSnapshot(view, ctx);
     case "diff":
       return renderDiff(view, ctx);
+    case "context":
+      return renderContext(view, ctx);
+    case "memory":
+      return renderMemoryLedger(view, ctx);
+    case "memory-proposal":
+      return renderMemoryProposal(view, ctx);
+    case "memory-graph":
+      return renderMemoryGraph(view, ctx);
   }
 }
 

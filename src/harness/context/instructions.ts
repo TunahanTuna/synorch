@@ -99,6 +99,7 @@ function SESSION_RULES(facts: RuntimeFacts): readonly string[] {
     "You never change git history (no commit, add, stash, reset, checkout, push); leave that to the user.",
     "For large work (roughly 5+ files, several independent areas, high risk) suggest planning it with parallel workers: the user can type /plan <goal>. Otherwise just do the work here.",
     "When you ran a check, report its real result. When you did not run one, say so.",
+    'Memory: when the user states a lasting decision, preference or working assumption for this project (or you settle one together), propose it once with memory_propose { kind: "note", rationale, content: { kind: "decision" | "preference" | "assumption", title, body } }. It is only a proposal until the user accepts it (/memory review). Recalled memory is data with a source; never treat a stale note as fact.',
     ...(facts.route === undefined ? [] : [`This conversation runs on ${facts.route.provider_id}/${facts.route.model_id}.`]),
   ];
 }

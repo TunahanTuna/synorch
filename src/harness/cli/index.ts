@@ -15,6 +15,8 @@ import {
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createAuthCommand } from "../auth/index.ts";
 import { createMemoryCommand, resolveMemoryRoot } from "../memory/index.ts";
+import { selectGlyphs } from "../tui/conversation-view.ts";
+import { renderMemoryGraph, viewContext } from "../tui/views/index.ts";
 import { createSessionStore } from "../store/index.ts";
 import { formatHarnessError, JsonlRenderer, PlainLineRenderer, type FrameSink, type GuardProcess, type InputStream, type PiTuiRendererOptions } from "../tui/index.ts";
 import { parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";
@@ -267,6 +269,7 @@ async function dispatch(parsed: Exclude<ParsedCommand, { kind: "help" }>, io: Ha
       }).catch(() => undefined);
       const handler = createMemoryCommand({
         config: config?.memory,
+        renderGraph: (view) => renderMemoryGraph(view, viewContext({ glyphs: selectGlyphs(io.env, platform, io.stdout.isTTY !== true), color: false, width: (io.stdout as { columns?: number }).columns ?? 100 })).join("\n"),
         platform,
         root: (projectId) => (config?.memory?.root !== undefined ? resolveMemoryRoot(config.memory, projectId, os.homedir()) : path.join(home, "memory", projectId)),
         onDecision: async (outcome) => {

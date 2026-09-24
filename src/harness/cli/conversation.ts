@@ -44,12 +44,12 @@ import {
   type ToolResult,
   type TurnId,
 } from "../contracts/index.ts";
-import type { CriterionView, EvidenceView, OrchestrationTaskView, WhyView, WorkerControl, WorkerSeam } from "../contracts/views.ts";
+import type { CriterionView, DiffFileView, DiffView, EvidenceView, OrchestrationTaskView, WhyView, WorkerControl, WorkerSeam } from "../contracts/views.ts";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageTokens, reconstructHistory } from "../context/index.ts";
 import { WorkerStreamHub, type OrchestrationCoordinator, type WorkerControlResult, type WorkerDirectory } from "../orchestration/index.ts";
 import { createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/index.ts";
-import { describeEvent, formatHarnessError, GLYPH_SETS, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
+import { describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
 import type { ParsedCommand } from "./args.ts";
 import { mayContainImage, resolveAttachments } from "./attachments.ts";
 
@@ -123,6 +123,15 @@ async function readOptional(file: string): Promise<Buffer | undefined> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
+}
+
+/** `/diff` as text lines when no view host is attached. */
+function diffLines(view: DiffView): string[] {
+  if (view.files.length === 0 && (view.integrated === undefined || view.integrated.length === 0)) return ["Synorch has not changed any file in this conversation."];
+  const lines: string[] = [];
+  if (view.files.length > 0) lines.push("Changed by Synorch (not independently reviewed):", ...view.files.map((file) => `  ${file.path} +${file.added} -${file.removed}${file.change === "modified" ? "" : ` (${file.change})`}`));
+  if (view.integrated !== undefined && view.integrated.length > 0) lines.push("Integrated by workers (checked by Synorch):", ...view.integrated.map((entry) => `  ${entry.path}${entry.reviewed ? " · independently reviewed" : ""}`));
+  return lines;
 }
 
 function strings(value: unknown): string[] | undefined {
@@ -1986,9 +1995,13 @@ class Conversation implements ConversationCommandHost {
       case "memory":
         this.print(await memoryReport(this.runtime));
         return;
-      case "diff":
-        this.print(await this.diff());
+      case "diff": {
+        const view = await this.diffView();
+        const views = this.renderer.views;
+        if (views !== undefined) views.showView(view);
+        else this.print(diffLines(view));
         return;
+      }
       case "log": {
         const count = Number(argument.split(/\s+/)[0] || "20");
         const events = await this.readEvents();
@@ -2005,23 +2018,41 @@ class Conversation implements ConversationCommandHost {
     }
   }
 
-  private async diff(): Promise<string[]> {
+  /**
+   * `/diff`: every file Synorch changed in this conversation (undone edits excluded), diffed from
+   * the content before Synorch's first edit to the content on disk now, plus files workers integrated.
+   */
+  private async diffView(): Promise<DiffView> {
     const events = await this.readEvents();
     const restored = new Set(events.flatMap((event) => (event.type === "checkpoint/restored" ? [event.data.checkpoint_seq] : [])));
-    const paths = new Map<string, number>();
+    const firstBefore = new Map<string, SessionEventOf<"checkpoint/recorded">["data"]["files"][number]["before"]>();
     for (const event of events) {
       if (event.type !== "checkpoint/recorded" || restored.has(event.seq)) continue;
-      for (const file of event.data.files) paths.set(file.path, (paths.get(file.path) ?? 0) + 1);
+      for (const file of event.data.files) if (!firstBefore.has(file.path)) firstBefore.set(file.path, file.before);
+    }
+    const files: DiffFileView[] = [];
+    for (const [file, before] of firstBefore) {
+      const place = this.inside(file);
+      const current = place === undefined ? undefined : await readOptional(place.absolute).catch(() => undefined);
+      const original = before === null ? undefined : await this.runtime.blobs.get(before.digest).then((bytes) => Buffer.from(bytes)).catch(() => undefined);
+      const change = before === null ? "added" : current === undefined ? "deleted" : "modified";
+      if ((original !== undefined && original.includes(0)) || (current !== undefined && current.includes(0))) {
+        files.push({ path: file, change, added: 0, removed: 0, lines: [], note: "binary file" });
+        continue;
+      }
+      if (before !== null && original === undefined) {
+        files.push({ path: file, change, added: 0, removed: 0, lines: [], note: "the content before Synorch's edit is no longer available" });
+        continue;
+      }
+      const diff = lineDiff(original?.toString("utf8") ?? "", current?.toString("utf8") ?? "");
+      if (diff.added === 0 && diff.removed === 0) continue;
+      files.push({ path: file, change, added: diff.added, removed: diff.removed, lines: diff.lines, ...(diff.tooLarge ? { note: "large change: shown as removed and added lines" } : {}) });
     }
     const runEvents = await this.orchestrationEvents();
     const reviewed = new Set(runEvents.flatMap((event) => (event.type === "review/recorded" && event.data.decision === "accept" ? [event.data.task_id] : [])));
     const integrated = new Map<string, boolean>();
     for (const event of runEvents) if (event.type === "task/integrated") for (const file of event.data.paths) integrated.set(file, (integrated.get(file) ?? false) || reviewed.has(event.data.task_id));
-    if (paths.size === 0 && integrated.size === 0) return ["Synorch has not changed any file in this conversation."];
-    const lines: string[] = [];
-    if (paths.size > 0) lines.push(`Changed by Synorch (not independently reviewed):`, ...[...paths].map(([file, edits]) => `  ${file}${edits > 1 ? ` (${edits} edits)` : ""}`));
-    if (integrated.size > 0) lines.push("Integrated by workers (checked by Synorch):", ...[...integrated].map(([file, accepted]) => `  ${file}${accepted ? " · independently reviewed" : ""}`));
-    return lines;
+    return { kind: "diff", files, ...(integrated.size === 0 ? {} : { integrated: [...integrated].map(([file, accepted]) => ({ path: file, reviewed: accepted })) }) };
   }
 
   public async clear(): Promise<void> {

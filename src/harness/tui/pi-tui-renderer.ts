@@ -17,7 +17,6 @@ import {
   type Component,
   type Focusable,
   type MarkdownTheme,
-  type OverlayHandle,
   type SelectListTheme,
   type Terminal,
 } from "@earendil-works/pi-tui";
@@ -48,11 +47,9 @@ import { actionChoices, actionTitle, withApprovalDeadline, type ApprovalAnswer, 
 import {
   activityText,
   ConversationPresenter,
-  footerText,
   GLYPH_SETS,
   headerLines,
   type ConversationItem,
-  type DiffLine,
   type GlyphSet,
   type ViewOp,
 } from "./conversation-view.ts";
@@ -73,6 +70,7 @@ import {
   type TerminalGuard,
 } from "./terminal-lifecycle.ts";
 import { TOOL_STATUS_LABEL, ToolCardTracker, type ToolCard } from "./tool-cards.ts";
+import { diffLine, renderToolRow, type ToolRowPaint } from "./tool-row.ts";
 import { AttachmentTray } from "./input/attachments.ts";
 import { InputCompletionProvider } from "./input/autocomplete.ts";
 import { imagePathFromPaste, readClipboardImage, type ClipboardImage } from "./input/clipboard.ts";
@@ -232,20 +230,37 @@ function errorText(error: unknown): string {
 class ChatEditor extends Editor {
   public placeholder: string | undefined;
   public placeholderStyle: (text: string) => string = (text) => text;
+  /** Conversation view: a `> ` prompt in front of the first line makes the input the obvious place to type. */
+  public prompt: ((text: string) => string) | undefined;
+  /** ASCII glyph set: the rules are drawn with `-`. */
+  public ascii = false;
+  /** Separator glyph substituted for `{sep}` in the placeholder. */
+  public sep = "·";
 
   public override render(width: number): string[] {
-    const lines = super.render(width);
-    if (this.placeholder === undefined || this.getText().length > 0 || lines.length < 3) return lines;
-    const line = lines[1] ?? "";
-    const reset = "\x1b[0m";
-    const cursorEnd = line.indexOf(reset);
-    if (cursorEnd === -1) return lines;
-    const head = line.slice(0, cursorEnd + reset.length);
-    const room = width - visibleWidth(head) - 1;
-    if (room < 4) return lines;
-    const drawn = head + this.placeholderStyle(truncateToWidth(this.placeholder, room));
-    lines[1] = drawn + " ".repeat(Math.max(0, width - visibleWidth(drawn)));
-    return lines;
+    const gutter = this.prompt === undefined || width < 12 ? 0 : 2;
+    const inner = width - gutter;
+    const lines = super.render(inner);
+    if (this.placeholder !== undefined && this.getText().length === 0 && lines.length >= 3) {
+      const line = lines[1] ?? "";
+      const reset = "\x1b[0m";
+      const cursorEnd = line.indexOf(reset);
+      const head = cursorEnd === -1 ? "" : line.slice(0, cursorEnd + reset.length);
+      const room = inner - visibleWidth(head) - 1;
+      if (cursorEnd !== -1 && room >= 4) {
+        const drawn = head + this.placeholderStyle(truncateToWidth(this.placeholder.replaceAll("{sep}", this.sep), room, this.ascii ? "..." : "…"));
+        lines[1] = drawn + " ".repeat(Math.max(0, inner - visibleWidth(drawn)));
+      }
+    }
+    const visible = (this as unknown as { renderedVisibleLineCount?: number }).renderedVisibleLineCount ?? 1;
+    const border = (line: string): string => (this.ascii ? line.replaceAll("─", "-") : line);
+    if (gutter === 0 || this.prompt === undefined) return lines.map((line, index) => (index === 0 || index === visible + 1 ? border(line) : line));
+    const rule = this.borderColor((this.ascii ? "-" : "─").repeat(gutter));
+    return lines.map((line, index) => {
+      if (index === 0 || index === visible + 1) return rule + border(line);
+      if (index === 1) return (this.prompt ?? ((text: string) => text))(">") + " " + line;
+      return " ".repeat(gutter) + line;
+    });
   }
 }
 
@@ -257,8 +272,10 @@ interface ItemViewDeps {
 }
 
 /** One conversation item as a component; shared by the main transcript and the worker view. */
-function conversationItemView(item: ConversationItem, deps: ItemViewDeps): Component {
+function conversationItemView(item: ConversationItem, deps: ItemViewDeps, previous?: Component): Component {
   switch (item.kind) {
+    case "result":
+      return new ResultLineView(item, deps.style, deps.glyphs);
     case "user":
       return new UserMessageView(item.text, deps.style);
     case "assistant": {
@@ -267,7 +284,7 @@ function conversationItemView(item: ConversationItem, deps: ItemViewDeps): Compo
       return view;
     }
     case "tool":
-      return new ToolLineView(item, deps.style, deps.glyphs, () => deps.expanded(item.id));
+      return new ToolLineView(item, deps.style, deps.glyphs, () => deps.expanded(item.id), !(previous instanceof ToolLineView));
     case "note": {
       const text = item.level === "error" ? deps.style.red(item.text) : item.level === "warning" ? deps.style.yellow(item.text) : deps.style.dim(item.text);
       return new Text(text, 0, 0);
@@ -352,7 +369,7 @@ class WorkerPane implements Component {
       updateItemView(existing, op.item);
       return;
     }
-    const view = conversationItemView(op.item, this.deps);
+    const view = conversationItemView(op.item, this.deps, this.items.at(-1));
     this.itemViews.set(op.item.id, view);
     this.items.push(view);
   }
@@ -516,18 +533,24 @@ class AssistantMessageView implements Component {
   }
 }
 
-/** `● Verb target` + `  ⎿ summary` + an edit diff of at most 8 lines (Ctrl+O shows the detail). */
+function toolPaint(style: Styler): ToolRowPaint {
+  return { ok: style.green, fail: style.red, warn: style.yellow, running: style.cyan, dim: style.dim, bold: style.bold };
+}
+
+/** `✓ Verb target  stat` (+ `⎿ reason` on trouble) + an edit diff of at most 8 lines (Ctrl+O shows the detail). */
 class ToolLineView implements Component {
   private item: Extract<ConversationItem, { kind: "tool" }>;
   private readonly style: Styler;
   private readonly glyphs: GlyphSet;
   private readonly expanded: () => boolean;
+  private readonly gap: boolean;
 
-  public constructor(item: Extract<ConversationItem, { kind: "tool" }>, style: Styler, glyphs: GlyphSet, expanded: () => boolean) {
+  public constructor(item: Extract<ConversationItem, { kind: "tool" }>, style: Styler, glyphs: GlyphSet, expanded: () => boolean, gap = true) {
     this.item = item;
     this.style = style;
     this.glyphs = glyphs;
     this.expanded = expanded;
+    this.gap = gap;
   }
 
   public update(item: Extract<ConversationItem, { kind: "tool" }>): void {
@@ -541,26 +564,49 @@ class ToolLineView implements Component {
   public invalidate(): void {}
 
   public render(width: number): string[] {
-    const item = this.item;
-    const g = this.glyphs;
-    const bullet =
-      item.status === "ok" ? this.style.green(g.bullet) : item.status === "running" ? this.style.cyan(g.bullet) : item.status === "cancelled" ? this.style.yellow(g.bullet) : this.style.red(item.status === "denied" ? g.fail : g.bullet);
-    const lines = ["", fit(`${bullet} ${this.style.bold(item.title)}`, width)];
-    if (item.summary !== undefined) {
-      const summary = item.status === "denied" || item.status === "failed" ? this.style.red(item.summary) : this.style.dim(item.summary);
-      lines.push(fit(`  ${this.style.dim(g.result)} ${summary}`, width));
-    }
-    const body = this.expanded() && item.detail.length > 0 ? item.detail : item.preview;
-    for (const line of body) lines.push(fit(`     ${this.diffLine(line)}`, width));
-    return lines;
+    return renderToolRow(this.item, { width, glyphs: this.glyphs, paint: toolPaint(this.style), expanded: this.expanded(), gap: this.gap, measure: visibleWidth, fit });
+  }
+}
+
+/** The turn-end result line: `Changed src/a.ts (+8 −3) · Tests: 12 passed · /diff for details`. */
+class ResultLineView implements Component {
+  private readonly item: Extract<ConversationItem, { kind: "result" }>;
+  private readonly style: Styler;
+  private readonly glyphs: GlyphSet;
+
+  public constructor(item: Extract<ConversationItem, { kind: "result" }>, style: Styler, glyphs: GlyphSet) {
+    this.item = item;
+    this.style = style;
+    this.glyphs = glyphs;
   }
 
-  private diffLine(line: DiffLine): string {
-    if (line.op === "+") return this.style.green(`+ ${line.text}`);
-    if (line.op === "-") return this.style.red(`${this.glyphs.minus} ${line.text}`);
-    if (line.op === "…") return this.style.dim(`${this.glyphs.ellipsis} ${line.text}`);
-    return this.style.dim(line.text);
+  public invalidate(): void {}
+
+  public render(width: number): string[] {
+    const g = this.glyphs;
+    const glyph = this.item.tone === "ok" ? this.style.green(g.ok) : this.item.tone === "error" ? this.style.red(g.fail) : this.style.yellow(g.warn);
+    const [head = "", ...rest] = this.item.text.split(` ${g.sep} `);
+    const tail = rest.map((part) => (/^Tests: not run/.test(part) ? this.style.yellow(part) : /failed/.test(part) ? this.style.red(part) : this.style.dim(part)));
+    const text = [this.style.bold(head), ...tail].join(this.style.dim(` ${g.sep} `));
+    return ["", ...wrapSegments(`${glyph} ${text}`, width)];
   }
+}
+
+/** Soft-wraps an ANSI-painted line at spaces, continuation indented by two columns. */
+function wrapSegments(line: string, width: number): string[] {
+  if (visibleWidth(line) <= width) return [line];
+  const words = line.split(" ");
+  const out: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current === "" ? word : `${current} ${word}`;
+    if (visibleWidth(candidate) > width && current !== "") {
+      out.push(current);
+      current = `  ${word}`;
+    } else current = candidate;
+  }
+  if (current !== "") out.push(current);
+  return out.map((entry) => fit(entry, width));
 }
 
 /** The single activity line (TUI §10.1); height 0 while idle. */
@@ -587,20 +633,91 @@ class ActivityLineView implements Component {
   }
 }
 
-/** One dim line under the editor: folder · branch · model · ctx% · quota% (TUI §10.2). */
-class FooterView implements Component {
-  private readonly text: () => string;
-  private readonly style: Styler;
+/** A footer field: its painted text and when it gives way on a narrow screen (0 never). */
+interface FooterPart {
+  readonly text: string;
+  readonly drop: number;
+}
 
-  public constructor(text: () => string, style: Styler) {
-    this.text = text;
+/**
+ * One line under the editor (TUI §10.2): `folder · branch · model · mode · ctx% · $` on the left,
+ * `? shortcuts` on the right. On a narrow screen fields give way in order (hint, cost, branch,
+ * folder, model); the permission mode and ctx% never do, so nothing important is cut mid-word.
+ */
+class FooterView implements Component {
+  private readonly parts: () => { readonly left: readonly FooterPart[]; readonly right: FooterPart | undefined };
+  private readonly style: Styler;
+  private readonly sep: string;
+
+  public constructor(parts: () => { readonly left: readonly FooterPart[]; readonly right: FooterPart | undefined }, style: Styler, sep: string) {
+    this.parts = parts;
     this.style = style;
+    this.sep = sep;
   }
 
   public invalidate(): void {}
 
   public render(width: number): string[] {
-    return [fit(this.style.dim(`  ${this.text()}`), width)];
+    const { left, right } = this.parts();
+    let shown = left.filter((part) => part.text !== "");
+    let hint = right;
+    const joiner = this.style.dim(` ${this.sep} `);
+    const measure = (): number => 2 + visibleWidth(shown.map((part) => part.text).join(` ${this.sep} `)) + (hint === undefined ? 0 : 3 + visibleWidth(hint.text));
+    while (measure() > width) {
+      const candidates = [...shown, ...(hint === undefined ? [] : [hint])].filter((part) => part.drop > 0);
+      if (candidates.length === 0) break;
+      const first = candidates.reduce((low, part) => (part.drop < low.drop ? part : low));
+      if (first === hint) hint = undefined;
+      else shown = shown.filter((part) => part !== first);
+    }
+    const body = `  ${shown.map((part) => part.text).join(joiner)}`;
+    if (hint === undefined) return [fit(body, width)];
+    const gap = Math.max(3, width - visibleWidth(body) - visibleWidth(hint.text));
+    return [fit(`${body}${" ".repeat(gap)}${hint.text}`, width)];
+  }
+}
+
+const MAIN_PLACEHOLDER = "Ask anything or describe a change {sep} / commands {sep} @ files";
+const BUSY_PLACEHOLDER = "Type to steer Synorch {sep} it reads your message at its next step";
+
+/** The editor's place in the tree; hidden while an inline dialog takes the input (the draft is kept). */
+class EditorSlot implements Component {
+  public hidden = false;
+  private readonly editor: Component;
+
+  public constructor(editor: Component) {
+    this.editor = editor;
+  }
+
+  public invalidate(): void {
+    this.editor.invalidate();
+  }
+
+  public render(width: number): string[] {
+    return this.hidden ? [] : this.editor.render(width);
+  }
+}
+
+/**
+ * An inline dialog (conversation view): drawn where the editor was, between two rules, so it
+ * wraps with the terminal width instead of being composited over the transcript.
+ */
+class DialogFrame implements Component {
+  private readonly inner: Component;
+  private readonly rule: (text: string) => string;
+
+  public constructor(inner: Component, rule: (text: string) => string) {
+    this.inner = inner;
+    this.rule = rule;
+  }
+
+  public invalidate(): void {
+    this.inner.invalidate();
+  }
+
+  public render(width: number): string[] {
+    const line = this.rule("─".repeat(Math.max(1, width)));
+    return ["", line, ...this.inner.render(width).map((entry) => fit(entry, width)), line];
   }
 }
 
@@ -638,7 +755,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private readonly interrupts = new InterruptController();
   private readonly pendingInputs: InputResult[] = [];
   private readonly inputWaiters: ((result: InputResult) => void)[] = [];
-  private dialog: { readonly handle: OverlayHandle; readonly cancel: () => void } | undefined;
+  private dialog: { readonly handle: { hide(): void }; readonly cancel: () => void } | undefined;
   private guard: TerminalGuard | undefined;
   private removeInputListener: (() => void) | undefined;
   private turnActive = false;
@@ -666,6 +783,9 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private mousePress: MouseInput | undefined;
   /** K1-U3 views: the live orchestration board sits between the transcript and the activity line. */
   private readonly boardSlot = new Container();
+  /** Conversation view: approval, picker and secret prompts render inline here, in place of the editor. */
+  private readonly dialogSlot = new Container();
+  private editorSlot!: EditorSlot;
   private board: LiveBoardComponent | undefined;
   /** K1.7 worker drill-in: the seam, the board selection, the open worker view and its input chrome. */
   private workerSeam: WorkerSeam | undefined;
@@ -719,6 +839,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         : undefined;
     this.editor = new ChatEditor(this.tui, { borderColor: (text) => style.dim(text), selectList: this.selectTheme });
     this.editor.placeholderStyle = (text) => style.dim(text);
+    this.editorSlot = new EditorSlot(this.editor);
     this.editor.onSubmit = (text) => this.submit(text);
     this.completions = new InputCompletionProvider(mergeCommands(DEFAULT_COMMAND_PALETTE), options.fileIndex);
     this.editor.setAutocompleteProvider(this.completions);
@@ -728,6 +849,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       rows: () => this.terminal.rows,
       hint: (text, width) => fit(style.dim(text), width),
       up: (options.glyphs ?? GLYPH_SETS.rich).name === "ascii" ? "^" : "↑",
+      down: (options.glyphs ?? GLYPH_SETS.rich).name === "ascii" ? "v" : "↓",
     });
     const self = this;
     this.controls = {
@@ -841,24 +963,56 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       this.permissionShown = true;
       this.editor.borderColor = this.borderFor(this.permission);
     }
-    const { title, warning } = headerLines({
+    const { warning } = headerLines({
       version: header.version ?? "",
       folder,
       branch: header.gitBranch,
       model: header.model,
-      mode: header.policyMode,
+      mode: "",
       sandboxEnforcement: header.sandboxEnforcement,
       warnings: header.notices,
       glyphs: presenter.glyphs,
     });
-    this.header.setText([this.style.cyan(title), ...(warning === undefined ? [] : [this.style.yellow(warning)])].join("\n"));
+    // The header is the first line of the main screen and is never redrawn (a change above the
+    // viewport forces a full repaint), so it holds only what cannot change: product and folder.
+    // Model and permission mode live in the footer, which updates in place.
+    const g = presenter.glyphs;
+    const title = `${this.style.bold(this.style.cyan("Synorch"))}${header.version === undefined || header.version === "" ? "" : this.style.dim(` ${header.version}`)} ${this.style.dim(g.sep)} ${this.style.bold(folder)}${header.gitBranch === undefined ? "" : this.style.dim(` (${header.gitBranch})`)}`;
+    this.header.setText([title, ...(warning === undefined ? [] : [this.style.yellow(warning)])].join("\n"));
+    this.editor.prompt = (text) => this.style.bold(this.style.cyan(text));
+    this.editor.ascii = g.name === "ascii";
+    this.editor.sep = g.sep;
+    this.editor.placeholder = MAIN_PLACEHOLDER;
     this.tui.addChild(this.header);
     this.tui.addChild(this.viewport);
     this.tui.addChild(this.boardSlot);
     this.tui.addChild(new ActivityLineView(presenter, this.style, () => this.now()));
     this.tui.addChild(this.inputHint);
-    this.tui.addChild(this.editor);
-    this.tui.addChild(new FooterView(() => footerText(presenter.footer(), { ...this.footerLabel, glyphs: presenter.glyphs, mode: this.modeLabel(presenter.glyphs.sep) }), this.style));
+    this.tui.addChild(this.dialogSlot);
+    this.tui.addChild(this.editorSlot);
+    this.tui.addChild(new FooterView(() => this.footerParts(presenter), this.style, g.sep));
+  }
+
+  /** Footer fields in display order with their drop priority (TUI §10.2). */
+  private footerParts(presenter: ConversationPresenter): { readonly left: readonly FooterPart[]; readonly right: FooterPart | undefined } {
+    const footer = presenter.footer();
+    const dim = this.style.dim;
+    const left: FooterPart[] = [
+      { text: dim(this.footerLabel.folder), drop: 4 },
+      { text: this.footerLabel.branch === undefined ? "" : dim(this.footerLabel.branch), drop: 3 },
+      { text: footer.model === undefined ? "" : dim(footer.model), drop: 5 },
+    ];
+    const mode = this.modeLabel(presenter.glyphs.sep);
+    if (mode !== undefined) left.push({ text: mode, drop: 0 });
+    if (this.dialog !== undefined && presenter.activity()?.waiting === true) left.push({ text: this.style.yellow("approval waiting"), drop: 0 });
+    if (footer.contextPercent !== undefined) {
+      const text = `ctx ${footer.contextPercent}%`;
+      left.push({ text: footer.contextPercent >= 90 ? this.style.red(text) : footer.contextPercent >= 70 ? this.style.yellow(text) : dim(text), drop: 0 });
+    }
+    if (footer.quotaPercent !== undefined) left.push({ text: dim(`quota ${footer.quotaPercent}%`), drop: 2 });
+    else if (footer.costUsd !== undefined) left.push({ text: dim(`$${footer.costUsd.toFixed(2)}`), drop: 2 });
+    const right = this.editor.getText().length === 0 && this.workerPane === undefined ? { text: dim("? shortcuts"), drop: 1 } : undefined;
+    return { left, right };
   }
 
   private applyOp(op: ViewOp): void {
@@ -869,13 +1023,9 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       else if (existing instanceof ToolLineView && item.kind === "tool") existing.update(item);
       return;
     }
-    const view = this.viewFor(item);
+    const view = conversationItemView(item, this.itemDeps(), this.transcript.children.at(-1));
     this.itemViews.set(item.id, view);
     this.transcript.addChild(view);
-  }
-
-  private viewFor(item: ConversationItem): Component {
-    return conversationItemView(item, this.itemDeps());
   }
 
   private itemDeps(): ItemViewDeps {
@@ -894,6 +1044,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   /** Pins a card (usage, evidence, action, why, or a board summary) once to the transcript. */
   public showView(view: HarnessView): void {
     if (this.stopped) return;
+    // Queued lines first, so a card lands after the output that came before it.
+    this.queue.flush();
     if (view.kind === "delegation") {
       const id = `delegation-${(this.delegationCount += 1)}`;
       const line = new DelegationComponent(view, this.viewStyle(), () => this.expanded || this.expandedItems.has(id));
@@ -1052,7 +1204,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     const pane = this.workerPane;
     const sep = ` ${(this.presenter?.glyphs ?? this.options.glyphs ?? GLYPH_SETS.rich).sep} `;
     if (pane === undefined) {
-      this.editor.placeholder = undefined;
+      this.editor.placeholder = this.presenter === undefined ? undefined : MAIN_PLACEHOLDER;
       this.editor.borderColor = this.borderFor(this.permission);
       this.inputHint.setText(this.selecting && this.cancelArmed !== undefined ? this.style.yellow(`  press x again to cancel ${this.cancelArmed.key}`) : "");
       return;
@@ -1216,6 +1368,10 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   }
 
   private updateSpinner(): void {
+    if (this.presenter !== undefined && this.workerPane === undefined) {
+      // While Synorch works, a typed message steers it at its next step; the placeholder says so.
+      this.editor.placeholder = this.presenter.activity() !== undefined || this.board !== undefined ? BUSY_PLACEHOLDER : MAIN_PLACEHOLDER;
+    }
     const active = this.presenter?.activity() !== undefined || this.board !== undefined || this.workerPane !== undefined;
     if (active && this.spinner === undefined && this.started && !this.stopped) {
       const interval = this.presenter?.glyphs.spinnerMs ?? 80;
@@ -1299,11 +1455,50 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       this.tui.requestRender(true);
       return { consume: true };
     }
+    if (data === "?" && this.presenter !== undefined && this.dialog === undefined && this.workerPane === undefined && this.editor.getText().length === 0) {
+      this.showShortcuts(this.presenter.glyphs);
+      return { consume: true };
+    }
     if (matchesKey(data, "ctrl+d") && this.dialog === undefined && this.editor.getText().length === 0) {
       this.deliver({ kind: "exit" });
       return { consume: true };
     }
     return undefined;
+  }
+
+  /** `?` on an empty editor: the keys, as one short dim block (commands are behind `/`). */
+  private showShortcuts(glyphs: GlyphSet): void {
+    const up = glyphs.name === "ascii" ? "up" : "↑";
+    const items: readonly (readonly [string, string])[] = [
+      ["enter", "send"],
+      ["shift+enter", "new line"],
+      [up, "history"],
+      ["esc", "interrupt"],
+      ["ctrl+c", "clear / exit"],
+      ["shift+tab", "ask/auto/full/plan"],
+      ["ctrl+o", "tool details"],
+      ["/diff", "what changed"],
+      ["/", "commands"],
+      ["@", "attach a file"],
+      ["alt+v", "paste image"],
+      ["/mouse", "scroll mode"],
+    ];
+    const style = this.style;
+    this.transcript.addChild({
+      invalidate: () => undefined,
+      render: (width: number): string[] => {
+        const keyWidth = Math.max(...items.map(([key]) => key.length));
+        const cellWidth = Math.max(...items.map(([key, text]) => keyWidth + 1 + text.length)) + 3;
+        const perRow = Math.max(1, Math.floor((width - 2) / cellWidth));
+        const lines = ["", style.bold("Shortcuts")];
+        for (let index = 0; index < items.length; index += perRow) {
+          const row = items.slice(index, index + perRow).map(([key, text]) => `${style.cyan(key.padEnd(keyWidth))} ${style.dim(text.padEnd(cellWidth - keyWidth - 1))}`);
+          lines.push(fit(`  ${row.join("")}`, width));
+        }
+        return lines;
+      },
+    });
+    this.tui.requestRender();
   }
 
   // ---- K1-U1 input: palette, @files, images, plan mode, mouse, model picker ------------------------
@@ -1614,6 +1809,11 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     this.transcript.addChild(
       this.presenter !== undefined ? new UserMessageView(sanitizeTerminalText(trimmed), this.style) : new Text(`${this.style.cyan(">")} ${sanitizeTerminalText(trimmed)}`, 0, 0),
     );
+    if (this.presenter !== undefined && !trimmed.startsWith("/")) {
+      // The activity line appears with the user line, not when the session reports the turn.
+      this.presenter.markSubmitted();
+      this.updateSpinner();
+    }
     this.tui.requestRender();
     this.deliver({ kind: trimmed.startsWith("/") ? "command" : "message", text: trimmed, ...(attachments.length === 0 ? {} : { attachments }) });
   }
@@ -1780,9 +1980,23 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     if (this.started && !this.stopped) this.tui.requestRender();
   }
 
-  private openDialog(component: Component, focus: Component, cancel: () => void): void {
+  private openDialog(component: Component, focus: Component, cancel: () => void, tone: "attention" | "neutral" = "neutral"): void {
     this.dialog?.cancel();
-    const handle = this.tui.showOverlay(component, { anchor: "bottom-center", width: "90%", margin: 1 });
+    let handle: { hide(): void };
+    if (this.presenter !== undefined) {
+      // Conversation view: the prompt replaces the editor in the flow of the screen (the draft is kept).
+      this.dialogSlot.clear();
+      this.dialogSlot.addChild(new DialogFrame(component, tone === "attention" ? (text) => this.style.yellow(text) : (text) => this.style.dim(text)));
+      this.editorSlot.hidden = true;
+      handle = {
+        hide: () => {
+          this.dialogSlot.clear();
+          this.editorSlot.hidden = false;
+        },
+      };
+    } else {
+      handle = this.tui.showOverlay(component, { anchor: "bottom-center", width: "90%", margin: 1 });
+    }
     this.tui.setFocus(focus);
     this.dialog = { handle, cancel };
     this.tui.requestRender();
@@ -1796,7 +2010,35 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     this.tui.requestRender();
   }
 
+  /**
+   * The body of an action prompt in plain words: the action as the transcript names it (`Edit
+   * src/a.ts  +1 −1`, `$ npm install left-pad`), the edit preview, and what allowing it means. The
+   * policy's generic reason (`workspace-write needs your approval`) is left out; a specific one stays.
+   */
+  private approvalLines(request: ApprovalRequest): string[] {
+    const glyphs = this.presenter?.glyphs ?? GLYPH_SETS.rich;
+    const paint = toolPaint(this.style);
+    const lines = [this.style.yellow(this.style.bold(actionTitle(request)))];
+    const pending = request.command === undefined ? this.presenter?.pendingTool() : undefined;
+    if (request.command !== undefined) lines.push(`  ${this.style.dim("$")} ${this.style.bold(sanitizeInline(request.command.join(" "), 2000))}`);
+    else if (pending !== undefined) lines.push(`  ${this.style.bold(sanitizeInline(pending.title, 500))}${pending.stat === undefined ? "" : `  ${this.style.dim(pending.stat)}`}`);
+    else lines.push(`  ${sanitizeInline(request.summary, 2000)}`);
+    if (pending !== undefined && pending.preview.length > 0) {
+      const shown = pending.preview.slice(0, 8);
+      for (const line of shown) lines.push(`    ${diffLine(line, glyphs, paint)}`);
+      if (pending.preview.length > shown.length) lines.push(this.style.dim(`    ${glyphs.ellipsis} +${pending.preview.length - shown.length} more lines`));
+    }
+    if (request.command !== undefined && this.inputRoot !== "") lines.push(this.style.dim(`  in ${this.footerLabel.folder === "" ? this.inputRoot : this.footerLabel.folder}`));
+    const why = request.details?.why;
+    if (why !== undefined && !/^[\w-]+ needs your approval$/.test(why)) lines.push(this.style.dim(`  why: ${sanitizeInline(why, 1000)}`));
+    if (request.details !== undefined) lines.push(this.style.dim(`  ${sanitizeInline(request.details.consequence, 1000)}`));
+    else if (request.effect !== undefined) lines.push(this.style.dim(`  effect ${request.effect} ${glyphs.sep} scope ${request.scope}`));
+    return lines;
+  }
+
   private requestApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
+    // The prompt names the pending tool, so the events queued before the request must be applied first.
+    this.queue.flush();
     this.presenter?.setWaiting(true);
     const decided = this.promptApproval(request, signal);
     void decided.finally(() => {
@@ -1823,17 +2065,12 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
           box.addChild(new Text(this.style.yellow(this.presenter !== undefined ? "Trust this folder?" : "Trust this workspace?"), 0, 0));
           box.addChild(new Text(sanitizeInline(request.summary, 2000), 0, 0));
         } else {
-          // UX-03 action card: what, why, consequence, then the choices.
-          box.addChild(new Text(this.style.yellow(this.style.bold(actionTitle(request))), 0, 0));
-          const what = request.command !== undefined ? request.command.join(" ") : request.summary;
-          box.addChild(new Text(`  ${sanitizeInline(what, 2000)}`, 0, 0));
-          if (request.details !== undefined) {
-            box.addChild(new Text(this.style.dim(`  why          ${sanitizeInline(request.details.why, 1000)}`), 0, 0));
-            box.addChild(new Text(this.style.dim(`  consequence  ${sanitizeInline(request.details.consequence, 1000)}`), 0, 0));
-          } else if (request.effect !== undefined) box.addChild(new Text(this.style.dim(`  effect ${request.effect} · scope ${request.scope}`), 0, 0));
+          // UX-03 action card: what (and the edit itself), where, what allowing means, then the choices.
+          for (const line of this.approvalLines(request)) box.addChild(new Text(line, 0, 0));
         }
         box.addChild(list);
-        if (!trust) box.addChild(new Text(this.style.dim("  1-9 or arrows + Enter · Esc denies"), 0, 0));
+        const sep = (this.presenter?.glyphs ?? GLYPH_SETS.rich).sep;
+        box.addChild(new Text(this.style.dim(trust ? `  ↑↓ choose ${sep} Enter confirm ${sep} Esc not now` : `  1-${items.length} or ↑↓ + Enter ${sep} Esc denies`), 0, 0));
         let settled = false;
         const finish = (outcome: ApprovalAnswer | undefined): void => {
           if (settled) return;
@@ -1869,7 +2106,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         };
         list.onSelect = (item) => pick(item.value);
         list.onCancel = () => finish("rejected");
-        this.openDialog(box, list, () => finish(undefined));
+        this.openDialog(box, list, () => finish(undefined), "attention");
       }),
     );
   }

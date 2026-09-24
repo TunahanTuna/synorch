@@ -72,6 +72,7 @@ export interface TranscriptViewportOptions {
   /** Paints the "more above" line and fits it into `width` columns. */
   readonly hint: (text: string, width: number) => string;
   readonly up: string;
+  readonly down?: string;
 }
 
 export class TranscriptViewport implements ViewComponent {
@@ -86,6 +87,8 @@ export class TranscriptViewport implements ViewComponent {
   private windowStart = 0;
   private shown = 0;
   private visibleRows = 10;
+  /** New lines arrived below while the reader was scrolled back. */
+  private unseen = 0;
 
   public constructor(inner: ViewContainer, options: TranscriptViewportOptions) {
     this.inner = inner;
@@ -113,6 +116,7 @@ export class TranscriptViewport implements ViewComponent {
 
   public toBottom(): void {
     this.offset = 0;
+    this.unseen = 0;
   }
 
   public render(width: number): string[] {
@@ -137,7 +141,10 @@ export class TranscriptViewport implements ViewComponent {
     }
     const total = lines.length;
     // Keep the reader's place while new output arrives below.
-    if (this.offset > 0 && total > this.lastTotal) this.offset += total - this.lastTotal;
+    if (this.offset > 0 && total > this.lastTotal) {
+      this.offset += total - this.lastTotal;
+      this.unseen += total - this.lastTotal;
+    }
     this.lastTotal = total;
     this.visibleRows = available;
     const scrolled = total > available && this.offset > 0;
@@ -147,7 +154,11 @@ export class TranscriptViewport implements ViewComponent {
     const start = Math.max(0, end - capacity);
     const window = lines.slice(start, end);
     const out: string[] = [];
-    if (this.offset > 0) out.push(this.options.hint(`${this.options.up} ${start} more line(s) above · wheel scrolls · Enter or Ctrl+End jumps to the latest`, width));
+    if (this.offset === 0) this.unseen = 0;
+    if (this.offset > 0) {
+      const fresh = this.unseen > 0 ? `${this.options.down ?? "v"} new output below · ` : "";
+      out.push(this.options.hint(`${fresh}${this.options.up} ${start} more line(s) above · wheel scrolls · Enter or Ctrl+End jumps to the latest`, width));
+    }
     const indicatorRows = out.length;
     const pad = Math.max(0, available - indicatorRows - window.length);
     for (let index = 0; index < pad; index += 1) out.push("");

@@ -1,0 +1,21 @@
+01-startup 80x24: enter->user -ms, enter->activity -ms, redraws 0
+01-startup 120x40: enter->user -ms, enter->activity -ms, redraws 0
+01-startup 40x20: enter->user -ms, enter->activity -ms, redraws 0
+02-short-question 80x24: enter->user 4ms, enter->activity 44ms, redraws 0
+02-short-question 120x40: enter->user 1ms, enter->activity 17ms, redraws 0
+02-short-question 40x20: enter->user 1ms, enter->activity 33ms, redraws 0
+03-direct-edit 80x24: enter->user 1ms, enter->activity 34ms, redraws 0
+03-direct-edit 120x40: enter->user 2ms, enter->activity 36ms, redraws 0
+03-direct-edit 40x20: enter->user 1ms, enter->activity 21ms, redraws 0
+04-tool-heavy 80x24: enter->user 1ms, enter->activity 18ms, redraws 2
+04-tool-heavy 120x40: enter->user 1ms, enter->activity 34ms, redraws 2
+04-tool-heavy 40x20: enter->user 1ms, enter->activity 32ms, redraws 2
+05-approval 80x24: enter->user 1ms, enter->activity 32ms, redraws 0
+05-approval 120x40: enter->user 1ms, enter->activity 21ms, redraws 0
+05-approval 40x20: enter->user 1ms, enter->activity 22ms, redraws 0
+06-esc-interrupt 80x24: enter->user 1ms, enter->activity 20ms, redraws 0
+06-esc-interrupt 120x40: enter->user 1ms, enter->activity 38ms, redraws 0
+06-esc-interrupt 40x20: enter->user 1ms, enter->activity 17ms, redraws 0
+07-scrolled-up-stream 80x24: enter->user 1ms, enter->activity 17ms, redraws 0 | viewportY before=42 after=42 (base 92); full redraws while scrolled up: 0
+07-scrolled-up-stream 120x40: enter->user 1ms, enter->activity 50ms, redraws 0 | viewportY before=0 after=0 (base 31); full redraws while scrolled up: 0
+07-scrolled-up-stream 40x20: enter->user 1ms, enter->activity 49ms, redraws 0 | viewportY before=75 after=75 (base 143); full redraws while scrolled up: 0

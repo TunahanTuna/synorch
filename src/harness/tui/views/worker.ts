@@ -6,7 +6,8 @@ import type {
   WorkerSnapshotView,
   WorkerStreamEvent,
 } from "../../contracts/views.ts";
-import { ConversationPresenter, type ConversationItem, type DiffLine } from "../conversation-view.ts";
+import { ConversationPresenter, type ConversationItem } from "../conversation-view.ts";
+import { renderToolRow } from "../tool-row.ts";
 import { isActive, isWaiting, paint, presentTask, taskElapsedMs } from "./board.ts";
 import { graphLevels } from "./graph.ts";
 import { clean, displayWidth, finish, formatElapsed, padEnd, spread, truncate, wrap, type ViewContext } from "./kit.ts";
@@ -188,14 +189,6 @@ export function renderUserToWorker(taskKey: string, text: string, ctx: ViewConte
   return finish([t.muted(`${g.hook} you ${g.rightArrow} ${clean(taskKey, 40)}: `) + clean(text, 1000)], ctx);
 }
 
-function diffText(line: DiffLine, ctx: ViewContext): string {
-  const t = ctx.theme;
-  if (line.op === "+") return t.success(`+ ${line.text}`);
-  if (line.op === "-") return t.error(`${ctx.glyphs.base.minus} ${line.text}`);
-  if (line.op === "…") return t.muted(`${ctx.glyphs.base.ellipsis} ${line.text}`);
-  return t.muted(line.text);
-}
-
 /** A conversation item as plain lines (the worker snapshot; the TUI uses its own components). */
 export function renderItem(item: ConversationItem, ctx: ViewContext, expanded = false): string[] {
   const t = ctx.theme;
@@ -205,13 +198,18 @@ export function renderItem(item: ConversationItem, ctx: ViewContext, expanded = 
       return ["", ...item.text.split("\n").map((line, index) => (index === 0 ? `${t.bold(g.user)} ${t.bold(line)}` : `  ${t.bold(line)}`))];
     case "assistant":
       return ["", ...item.text.trim().split("\n").map((line, index) => `${index === 0 ? g.bullet : " "} ${line}`)];
-    case "tool": {
-      const bullet = item.status === "ok" ? t.success(g.bullet) : item.status === "running" ? t.running(g.bullet) : t.error(item.status === "denied" ? g.fail : g.bullet);
-      const lines = ["", `${bullet} ${t.bold(item.title)}`];
-      if (item.summary !== undefined) lines.push(`  ${t.muted(g.result)} ${item.status === "failed" || item.status === "denied" ? t.error(item.summary) : t.muted(item.summary)}`);
-      for (const line of expanded && item.detail.length > 0 ? item.detail : item.preview) lines.push(`     ${diffText(line, ctx)}`);
-      return lines;
-    }
+    case "tool":
+      return renderToolRow(item, {
+        width: ctx.width,
+        glyphs: g,
+        paint: { ok: t.success, fail: t.error, warn: t.warning, running: t.running, dim: t.muted, bold: t.bold },
+        expanded,
+        gap: true,
+        measure: displayWidth,
+        fit: (line) => line,
+      });
+    case "result":
+      return ["", `${item.tone === "ok" ? t.success(g.ok) : item.tone === "error" ? t.error(g.fail) : t.warning(g.warn)} ${item.text}`];
     case "note":
       return [item.level === "error" ? t.error(item.text) : item.level === "warning" ? t.warning(item.text) : t.muted(item.text)];
   }

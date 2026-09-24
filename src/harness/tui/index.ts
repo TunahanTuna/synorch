@@ -48,6 +48,7 @@ export {
   type TerminalGuard,
 } from "./terminal-lifecycle.ts";
 export { ToolCardTracker, type ToolCard, type ToolCardStatus } from "./tool-cards.ts";
+export { lineDiff } from "./views/diff.ts";
 export {
   AttachmentTray,
   DEFAULT_COMMAND_PALETTE,

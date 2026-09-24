@@ -72,7 +72,14 @@ export type ConversationItem =
       readonly preview: readonly DiffLine[];
       /** L1 detail (Ctrl+O): output head, full diff. */
       readonly detail: readonly DiffLine[];
+      /**
+       * The compact stat the interactive view prints beside the title (`+8 −3`, `12 passed · 6.1s`);
+       * the status glyph carries success or failure, so it repeats neither. Plain mode keeps `summary`.
+       */
+      readonly stat?: string | undefined;
     }
+  /** The turn-end result line: what changed and whether tests ran (never claims an unrun test). */
+  | { readonly kind: "result"; readonly id: string; readonly text: string; readonly tone: "ok" | "warning" | "error" }
   | { readonly kind: "note"; readonly id: string; readonly level: "info" | "warning" | "error" | "debug"; readonly text: string };
 
 export type ViewOp = { readonly op: "append" | "update"; readonly item: ConversationItem };
@@ -115,8 +122,17 @@ interface ToolState {
   summary: string | undefined;
   preview: DiffLine[];
   detail: DiffLine[];
+  stat: string | undefined;
   /** Read grouping: several read_file calls share one item. */
   group: string[] | undefined;
+  /** Edit preview shown in an approval prompt before the tool runs. */
+  pending: DiffLine[];
+}
+
+/** What this turn changed and tested, for the result line (terminal polish brief §5). */
+interface TurnLedger {
+  readonly files: Map<string, { added: number; removed: number; created: boolean }>;
+  tests: { passed: number | undefined; failed: number | undefined; ok: boolean; exit: number | undefined } | undefined;
 }
 
 type ToolCallPart = Extract<ContentPart, { type: "tool_call" }>;
@@ -142,6 +158,9 @@ export class ConversationPresenter {
   private cost: number | undefined;
   private model: string | undefined;
   private contextWindow: number | undefined;
+  private ledger: TurnLedger = { files: new Map(), tests: undefined };
+  /** Enter was pressed and no turn has started yet: the activity line shows at once. */
+  private submittedAt: number | undefined;
 
   public constructor(options: ConversationPresenterOptions) {
     this.options = options;
@@ -176,7 +195,30 @@ export class ConversationPresenter {
     this.waiting = waiting;
   }
 
+  /** The user just sent a message: show the activity line now, before the session reports the turn. */
+  public markSubmitted(): void {
+    if (this.turnStartedAt === undefined) this.submittedAt = this.now();
+  }
+
+  /** Drops a pending (not yet started) activity, e.g. when the session answered with an error. */
+  public clearSubmitted(): void {
+    this.submittedAt = undefined;
+  }
+
+  /** The tool an approval prompt is about: its title and the edit it would make. */
+  public pendingTool(): { readonly title: string; readonly stat: string | undefined; readonly preview: readonly DiffLine[] } | undefined {
+    const running = [...this.tools.values()].reverse().find((state) => state.status === "running");
+    if (running === undefined) return undefined;
+    const added = running.pending.filter((line) => line.op === "+").length;
+    const removed = running.pending.filter((line) => line.op === "-").length;
+    return { title: running.title, stat: running.pending.length === 0 ? undefined : `+${added} ${this.options.glyphs.minus}${removed}`, preview: running.pending };
+  }
+
   public activity(): ActivityState | undefined {
+    if (this.turnStartedAt === undefined && this.submittedAt !== undefined) {
+      if (this.now() - this.submittedAt > 15_000) this.submittedAt = undefined;
+      else return { verb: "Thinking", detail: undefined, startedAt: this.submittedAt, tokens: 0, waiting: false };
+    }
     if (this.turnStartedAt === undefined) return undefined;
     const verb = this.waiting ? { verb: "Waiting for you", detail: undefined } : (this.activityVerb ?? { verb: "Thinking", detail: undefined });
     return { verb: verb.verb, detail: verb.detail, startedAt: this.turnStartedAt, tokens: this.turnTokens + Math.round(this.streamChars / 4), waiting: this.waiting };
@@ -199,6 +241,7 @@ export class ConversationPresenter {
       case "stream":
         return this.onStream(event.requestId, event.event);
       case "notice":
+        if (event.level !== "info") this.submittedAt = undefined;
         return [this.note(event.level, event.message)];
       case "status":
         return [];
@@ -221,7 +264,7 @@ export class ConversationPresenter {
     if (event.type === "text_delta") {
       this.streamed.add(requestId);
       this.streamChars += event.text.length;
-      this.activityVerb = undefined;
+      this.activityVerb = { verb: "Responding", detail: undefined };
       const key = `${requestId}:${event.index}`;
       const known = this.assistant.get(key);
       if (known === undefined) {
@@ -243,6 +286,7 @@ export class ConversationPresenter {
         ops.push({ op: "update", item: { kind: "assistant", id: known.id, text: sanitizeTerminalText(known.text), done: true } });
       });
       this.streamChars = 0;
+      if (this.activityVerb?.verb === "Responding") this.activityVerb = undefined;
       return ops;
     }
     if (event.type === "quota") this.quota = maxQuota(event.quota.windows);
@@ -262,8 +306,10 @@ export class ConversationPresenter {
   private present(event: SessionEvent): ViewOp[] {
     switch (event.type) {
       case "turn/started":
+        this.ledger = { files: new Map(), tests: undefined };
         if (!this.replaying) {
-          this.turnStartedAt = this.now();
+          this.turnStartedAt = this.submittedAt ?? this.now();
+          this.submittedAt = undefined;
           this.turnTokens = 0;
           this.streamChars = 0;
           this.activityVerb = undefined;
@@ -300,7 +346,8 @@ export class ConversationPresenter {
         return [];
       case "approval/decided":
         this.waiting = false;
-        return event.data.decision.decided_by === "user" ? [this.note("info", `${event.data.decision.outcome.startsWith("allowed") ? this.options.glyphs.ok : this.options.glyphs.fail} ${event.data.decision.outcome.startsWith("allowed") ? "Allowed" : "Not allowed"}`)] : [];
+        // The tool row already shows a one-off answer (it runs, or turns ✗ denied); only a lasting grant gets its own line.
+        return event.data.decision.decided_by === "user" && event.data.decision.outcome === "allowed-for-scope" ? [this.note("info", `${this.options.glyphs.ok} Allowed for the rest of this session`)] : [];
       case "context/compacted":
         return [this.note("info", `${this.options.glyphs.bullet} Context compacted ${this.options.glyphs.sep} ${formatTokens(event.data.tokens_before)} → ${formatTokens(event.data.tokens_after)} tokens`)];
       case "checkpoint/restored":
@@ -315,6 +362,7 @@ export class ConversationPresenter {
   private turnEnded(event: SessionEventOf<"turn/ended">): ViewOp[] {
     const started = this.turnStartedAt;
     this.turnStartedAt = undefined;
+    this.submittedAt = undefined;
     this.activityVerb = undefined;
     this.waiting = false;
     const ops: ViewOp[] = [];
@@ -337,16 +385,48 @@ export class ConversationPresenter {
         ops.push(this.note("warning", `${g.warn} Stopped: the budget admits no further model request`));
         break;
       case "failed":
-        if (!this.replaying) ops.push(this.note("error", `${g.fail} The turn failed ${g.sep} workspace unchanged unless a tool line above says otherwise`));
+        if (!this.replaying) ops.push(this.note("error", `${g.fail} The turn stopped on an error ${g.sep} files are unchanged unless a tool line above says otherwise ${g.sep} say "try again", or /diff to check`));
         break;
       default:
         break;
     }
+    const result = this.resultLine(event.data.outcome);
+    if (result !== undefined) ops.push(result);
     if (started !== undefined && !this.replaying) {
       const elapsed = this.now() - started;
       if (elapsed >= 10_000) ops.push(this.note("info", `  worked ${formatElapsed(elapsed)} ${g.sep} ${formatTokens(this.turnTokens)} tokens`));
     }
     return ops;
+  }
+
+  /** `Changed src/a.ts (+8 −3) · Tests: 12 passed · /diff for details`; undefined when nothing changed or ran. */
+  private resultLine(outcome: string): ViewOp | undefined {
+    const g = this.options.glyphs;
+    const files = [...this.ledger.files.entries()];
+    const tests = this.ledger.tests;
+    if (files.length === 0 && tests === undefined) return undefined;
+    const parts: string[] = [];
+    let tone: "ok" | "warning" | "error" = "ok";
+    if (files.length > 0) {
+      const added = files.reduce((sum, [, file]) => sum + file.added, 0);
+      const removed = files.reduce((sum, [, file]) => sum + file.removed, 0);
+      const names = files.length === 1 ? (files[0]?.[0] ?? "") : `${files.length} files`;
+      parts.push(`Changed ${names} (+${added} ${g.minus}${removed})`);
+    }
+    if (tests === undefined) {
+      parts.push("Tests: not run");
+      tone = "warning";
+    } else if (tests.ok) {
+      parts.push(`Tests: ${tests.passed === undefined ? "passed" : `${tests.passed} passed`}`);
+    } else {
+      parts.push(`Tests: ${tests.failed === undefined ? `failed (exit ${tests.exit ?? "?"})` : `${tests.failed} failed`}`);
+      tone = "error";
+    }
+    if ((outcome === "cancelled" || outcome === "failed") && tone === "ok") tone = "warning";
+    if (files.length > 0) parts.push("/diff for details");
+    const item: ConversationItem = { kind: "result", id: this.nextId(), text: parts.join(` ${g.sep} `), tone };
+    this.lastItem = item.id;
+    return { op: "append", item };
   }
 
   private user(text: string): ViewOp {
@@ -401,7 +481,9 @@ export class ConversationPresenter {
       summary: undefined,
       preview: [],
       detail: [],
+      stat: undefined,
       group: part.name === "read_file" ? [stringArg(args, "path") ?? "?"] : undefined,
+      pending: pendingPreview(part.name, args),
     };
     this.tools.set(state.id, state);
     this.toolItem.set(part.tool_call_id, state.id);
@@ -462,13 +544,43 @@ export class ConversationPresenter {
     state.status = failed ? "failed" : "ok";
     const outcome = summarizeResult(state.name, state.args, result, event.data.duration_ms, g);
     state.summary = outcome.summary;
+    state.stat = outcome.stat;
     state.preview = outcome.preview;
     state.detail = outcome.detail;
+    this.record(state, result, failed);
     return [{ op: "update", item: this.toolView(state) }];
   }
 
+  /** Feeds the turn's result line: edited files with their line counts, and test commands. */
+  private record(state: ToolState, result: SessionEventOf<"tool/result_recorded">["data"]["result"], failed: boolean): void {
+    if (state.name === "apply_patch" && !failed) {
+      const patch = stringArg(state.args, "patch") ?? "";
+      const diff = patchDiff(patch);
+      const created = /^\*\*\* Add File: /m.test(patch);
+      patchPaths(patch).forEach((file, index) => {
+        const entry = this.ledger.files.get(file) ?? { added: 0, removed: 0, created };
+        // Line counts belong to the whole patch; the first file carries them so the totals stay exact.
+        if (index === 0) {
+          entry.added += diff.filter((line) => line.op === "+").length;
+          entry.removed += diff.filter((line) => line.op === "-").length;
+        }
+        this.ledger.files.set(file, entry);
+      });
+    } else if (state.name === "write_file" && !failed) {
+      const file = stringArg(state.args, "path") ?? "?";
+      const content = stringArg(state.args, "content") ?? "";
+      const entry = this.ledger.files.get(file) ?? { added: 0, removed: 0, created: result.text.startsWith("created") };
+      entry.added += content === "" ? 0 : content.replace(/\r?\n$/, "").split(/\r?\n/).length;
+      this.ledger.files.set(file, entry);
+    } else if (state.name === "exec" && isTestCommand(argvOf(state.args))) {
+      const body = outputLines(result.text).join("\n");
+      const failures = testCount(body, "fail");
+      this.ledger.tests = { passed: testCount(body, "pass"), failed: failures === 0 ? undefined : failures, ok: !failed && result.exit_code === 0, exit: result.exit_code };
+    }
+  }
+
   private toolView(state: ToolState): ConversationItem {
-    return { kind: "tool", id: state.id, status: state.status, title: state.title, summary: state.summary, preview: [...state.preview], detail: [...state.detail] };
+    return { kind: "tool", id: state.id, status: state.status, title: state.title, summary: state.summary, preview: [...state.preview], detail: [...state.detail], stat: state.stat };
   }
 }
 
@@ -505,6 +617,32 @@ function stringArg(args: Readonly<Record<string, unknown>>, key: string): string
 function argvOf(args: Readonly<Record<string, unknown>>): string[] {
   const argv = args.argv;
   return Array.isArray(argv) ? argv.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+const TEST_WORDS = /^(test|tests|vitest|jest|pytest|mocha|ava|tap|ctest|rspec|phpunit|--test)$/;
+
+/** `npm test`, `pnpm run test`, `node --test`, `pytest -q`, `go test ./...`, `cargo test`. */
+export function isTestCommand(argv: readonly string[]): boolean {
+  return argv.some((word, index) => {
+    const base = word.toLowerCase().replace(/\.(cmd|exe)$/, "").split(/[\\/]/).pop() ?? "";
+    return TEST_WORDS.test(base) || (index > 0 && /^test:[\w:-]+$/.test(base));
+  });
+}
+
+/** `12 passed`, `pass 12`, `ℹ pass 12`, `3 failed`; undefined when the output does not say. */
+function testCount(body: string, kind: "pass" | "fail"): number | undefined {
+  const word = kind === "pass" ? "pass(?:ed|ing)?" : "fail(?:ed|ing|ures?)?";
+  const after = new RegExp(`(?:^|\\s)(?:ℹ\\s+)?${word}\\s+(\\d+)`, "im").exec(body)?.[1];
+  const before = new RegExp(`(\\d+)\\s+${word}\\b`, "i").exec(body)?.[1];
+  const found = after ?? before;
+  return found === undefined ? undefined : Number(found);
+}
+
+/** The edit a pending apply_patch / write_file would make, for the approval prompt (≤ 12 lines). */
+function pendingPreview(name: string, args: Readonly<Record<string, unknown>>): DiffLine[] {
+  if (name === "apply_patch") return patchDiff(stringArg(args, "patch") ?? "").slice(0, 12);
+  if (name === "write_file") return (stringArg(args, "content") ?? "").split(/\r?\n/).slice(0, 12).map((text) => ({ op: "+", text: diffText(text) }));
+  return [];
 }
 
 function shortList(names: readonly string[]): string {
@@ -588,6 +726,7 @@ function outputLines(text: string): string[] {
 
 interface ResultSummary {
   readonly summary: string;
+  readonly stat?: string;
   readonly preview: DiffLine[];
   readonly detail: DiffLine[];
 }
@@ -603,7 +742,7 @@ function summarizeResult(
   durationMs: number,
   g: GlyphSet,
 ): ResultSummary {
-  const failedText = sanitizeInline(result.error?.message ?? "failed", 200);
+  const failedText = friendlyError(result.error?.message ?? "failed");
   const text = result.text;
   switch (name) {
     case "read_file": {
@@ -611,12 +750,12 @@ function summarizeResult(
       const header = text.split("\n", 1)[0] ?? "";
       const total = /of (\d+)\+?$/.exec(header.replace(/\s*\(.*\)$/, ""))?.[1];
       const lines = text.split("\n").slice(1);
-      return { summary: header.includes("empty file") ? "empty file" : total === undefined ? "read" : `${total} lines`, preview: [], detail: textLines(lines.slice(0, DETAIL_LINES)) };
+      return { summary: header.includes("empty file") ? "empty file" : total === undefined ? "read" : plural(Number(total), "line"), preview: [], detail: textLines(lines.slice(0, DETAIL_LINES)) };
     }
     case "list_dir": {
       if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
       const entries = text === "(empty)" ? [] : text.split("\n").filter((line) => line.trim() !== "");
-      return { summary: `${entries.length} entries`, preview: [], detail: textLines(entries.slice(0, DETAIL_LINES)) };
+      return { summary: plural(entries.length, "entry", "entries"), preview: [], detail: textLines(entries.slice(0, DETAIL_LINES)) };
     }
     case "search": {
       if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
@@ -638,17 +777,28 @@ function summarizeResult(
       const content = stringArg(args, "content") ?? "";
       const lines = content === "" ? 0 : content.replace(/\r?\n$/, "").split(/\r?\n/).length;
       const created = text.startsWith("created");
-      return { summary: `${created ? "new file" : "rewritten"} ${g.sep} ${lines} lines`, preview: [], detail: textLines(content.split(/\r?\n/).slice(0, DETAIL_LINES)) };
+      return { summary: `${created ? "new file" : "rewritten"} ${g.sep} ${plural(lines, "line")}`, preview: [], detail: textLines(content.split(/\r?\n/).slice(0, DETAIL_LINES)) };
     }
     case "exec": {
       const body = outputLines(text);
       const seconds = `${(durationMs / 1000).toFixed(1)}s`;
-      if (result.exit_code === undefined) return { summary: `${g.fail} ${failedText}`, preview: textLines(body.slice(-5)), detail: textLines(body.slice(-DETAIL_LINES)) };
+      if (result.exit_code === undefined) return { summary: `${g.fail} ${failedText}`, stat: failedText, preview: textLines(body.slice(-5)), detail: textLines(body.slice(-DETAIL_LINES)) };
       if (result.exit_code === 0) {
         const tests = /(?:^|\s)(?:ℹ\s+)?pass(?:ed)?\s+(\d+)/im.exec(body.join("\n"))?.[1] ?? /(\d+) passed/i.exec(body.join("\n"))?.[1];
-        return { summary: `${g.ok} exit 0${tests === undefined ? "" : ` ${g.sep} ${tests} passed`} ${g.sep} ${seconds}`, preview: [], detail: textLines(body.slice(-DETAIL_LINES)) };
+        return {
+          summary: `${g.ok} exit 0${tests === undefined ? "" : ` ${g.sep} ${tests} passed`} ${g.sep} ${seconds}`,
+          stat: `${tests === undefined ? "" : `${tests} passed ${g.sep} `}${seconds}`,
+          preview: [],
+          detail: textLines(body.slice(-DETAIL_LINES)),
+        };
       }
-      return { summary: `${g.fail} exit ${result.exit_code} ${g.sep} ${seconds}`, preview: textLines(body.slice(-5)), detail: textLines(body.slice(-DETAIL_LINES)) };
+      const failures = testCount(body.join("\n"), "fail");
+      return {
+        summary: `${g.fail} exit ${result.exit_code} ${g.sep} ${seconds}`,
+        stat: `exit ${result.exit_code}${failures === undefined || failures === 0 ? "" : ` ${g.sep} ${failures} failed`} ${g.sep} ${seconds}`,
+        preview: textLines(body.slice(-5)),
+        detail: textLines(body.slice(-DETAIL_LINES)),
+      };
     }
     case "git_status": {
       if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
@@ -661,6 +811,31 @@ function summarizeResult(
       return { summary: sanitizeInline(lines[0] ?? "done", 80) || "done", preview: [], detail: textLines(lines.slice(0, 20)) };
     }
   }
+}
+
+function plural(count: number, word: string, many = `${word}s`): string {
+  return `${count} ${count === 1 ? word : many}`;
+}
+
+const ERROR_WORDS: Readonly<Record<string, string>> = {
+  ENOENT: "file not found",
+  EACCES: "permission denied",
+  EPERM: "not permitted",
+  EISDIR: "is a folder, not a file",
+  ENOTDIR: "not a folder",
+  EEXIST: "already exists",
+  ETIMEDOUT: "timed out",
+  EBUSY: "file is busy (locked by another program)",
+};
+
+/**
+ * Tool errors in plain words: `ENOENT … stat 'C:\\…\\missing.mjs'` becomes `file not found`;
+ * absolute paths shrink to their file name (the tool line already names the file).
+ */
+export function friendlyError(message: string): string {
+  const code = /\b(ENOENT|EACCES|EPERM|EISDIR|ENOTDIR|EEXIST|ETIMEDOUT|EBUSY)\b/.exec(message)?.[1];
+  if (code !== undefined) return ERROR_WORDS[code] ?? code;
+  return sanitizeInline(message.replace(/(?:[A-Za-z]:)?[\\/](?:[^\s'",:\\/]+[\\/])+([^\s'",:\\/]+)/g, "$1"), 200);
 }
 
 /** A diff line with its indentation kept (tabs as two spaces), control characters removed. */

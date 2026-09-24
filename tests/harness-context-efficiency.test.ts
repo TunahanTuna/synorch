@@ -235,7 +235,9 @@ test("AC-d4 protocols and tools are cut to the role and the task shape", async (
   const { sessions, blobs, sessionId } = await newSession();
   const all: ToolDescriptor[] = [...fixture.tools.orchestrator, ...fixture.tools.implementer.filter((tool) => !fixture.tools.orchestrator.some((other) => other.name === tool.name))];
   const builder = createContextBuilder({ readSession: (id) => sessions.openForRead(id), blobs, tools: createStaticToolRegistry(all), instructions: fixture.instructions, skills: liveCatalog(fixture) });
-  const worker = await builder.build(input(sessionId, "implementer", packetFor({ owned: ["src-add.mjs"], read: ["src-add.mjs", "check.mjs"] })), signal);
+  // Compiled packets read the whole workspace (`**`); a hand-scoped packet of named files still needs no discovery tools.
+  const named = packetFor({ owned: ["src-add.mjs"], read: ["src-add.mjs", "check.mjs"] });
+  const worker = await builder.build(input(sessionId, "implementer", { ...named, scope: { ...named.scope, read_paths: ["src-add.mjs", "check.mjs"] } }), signal);
   const globbed = await builder.build(input(sessionId, "implementer", packetFor()), signal);
   const orchestrator = await builder.build(input(sessionId, "orchestrator", undefined), signal);
   assert.ok(worker.ok && globbed.ok && orchestrator.ok);

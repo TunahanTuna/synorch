@@ -456,6 +456,13 @@ export interface CompletionVerificationOptions {
    * plan-caused reason (`planCaused`); they are not required. Every other check still applies.
    */
   readonly waivedCommands?: readonly string[];
+  /**
+   * A writing task reported `partial` (or the orchestrator sent its `needs_context` artifact to
+   * review) but changed its owned paths (live run 01M3ABTS): the status is accepted and criteria
+   * without the worker's own evidence do not block, because the independent reviewer checks every
+   * criterion itself. Scope, diff and the harness-run verification still apply.
+   */
+  readonly partialArtifact?: boolean;
 }
 
 /** Orchestrator-side verification of a completed attempt against the real diff, the log and the harness records. */
@@ -475,7 +482,9 @@ export async function verifyCompletion(
   const scoped: EvidenceIndex = { ...index, harness };
   if (completion.task_id !== packet.task_id) rejections.push("completion belongs to another task");
   if (completion.packet_digest !== packetDigest(packet)) rejections.push("completion answers another packet version");
-  const accepted = completion.status === "completed" || (triaged && packet.write_mode !== "owned-paths" && (completion.status === "partial" || completion.status === "needs_context"));
+  const unfinished = completion.status === "partial" || completion.status === "needs_context";
+  const partialArtifact = options.partialArtifact === true && packet.write_mode === "owned-paths" && unfinished && index.changedPaths.length > 0;
+  const accepted = completion.status === "completed" || partialArtifact || (triaged && packet.write_mode !== "owned-paths" && unfinished);
   if (!accepted) rejections.push(`status is ${completion.status}`);
 
   const changed = index.changedPaths;
@@ -513,11 +522,11 @@ export async function verifyCompletion(
     }
     if (!found) {
       unevidenced.push(criterion.id);
-      revisions.push(`${criterion.id} has no resolvable evidence${failures.length > 0 ? ` (${failures.join("; ")})` : ""}`);
+      if (!partialArtifact) revisions.push(`${criterion.id} has no resolvable evidence${failures.length > 0 ? ` (${failures.join("; ")})` : ""}`);
     }
   }
   for (const entry of completion.acceptance_evidence) {
-    if (!known.has(entry.criterion_id)) revisions.push(`evidence for unknown criterion ${entry.criterion_id}`);
+    if (!known.has(entry.criterion_id) && !partialArtifact) revisions.push(`evidence for unknown criterion ${entry.criterion_id}`);
   }
 
   const planCaused: string[] = [];

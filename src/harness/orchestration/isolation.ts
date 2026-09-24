@@ -941,7 +941,8 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
         // reads: its change is a source change the freshness check attributes to the user, and the
         // re-packaged attempt must see it.
         const sources = packet.context.sources.map((source) => source.path);
-        const inputs = [...packet.scope.read_paths, ...sources];
+        // The workspace-wide read pattern (`**`) is a read grant, not a declared input: it never exempts a change.
+        const inputs = [...packet.scope.read_paths.filter((pattern) => pattern !== "**"), ...sources];
         const paths = set.changes
           .map((change) => change.path)
           .filter((relative) => matchesAny(relative, packet.scope.owned_paths, platform) || !matchesAny(relative, inputs, platform));

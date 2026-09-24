@@ -230,7 +230,7 @@ test("orchestrator triage: accept is refused for a writing task, fail stops the 
       planner,
       delegation: slot,
       script: async (context) => {
-        await context.write("src/a.js", "changed\n");
+        // No change produced: a partial report with an artifact would go to review instead of triage.
         const call = await context.toolCall("exec", { exitCode: 0 });
         await context.reply(workerClaim(context, call, { status: "partial", summary: "could not finish" }));
       },

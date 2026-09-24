@@ -28,7 +28,24 @@ export interface ResponsesAdapterOptions {
   /** Statically configured models; capability discovery never sends a paid request. */
   readonly models?: readonly ModelCapability[];
   readonly now?: () => Date;
+  /**
+   * K4.1 native search: whether this request carries the provider's hosted `web_search` tool (live)
+   * in place of Synorch's `web_search` function tool. Asked only for requests that offer
+   * `web_search` (roles that may search); undefined or false keeps Synorch's tool.
+   */
+  readonly hostedWebSearch?: (request: ModelRequest, signal: AbortSignal) => Promise<boolean>;
+  /** K4.1: the model ran hosted web searches in this response (queries and cited sources). */
+  readonly onHostedSearch?: (observed: HostedSearchObserved) => void;
 }
+
+export interface HostedSearchObserved {
+  readonly requestId: string;
+  readonly queries: readonly string[];
+  readonly sources: readonly { readonly title: string; readonly url: string }[];
+}
+
+/** Synorch's own search tool; a request with hosted search replaces it with the provider's. */
+const WEB_SEARCH_TOOL = "web_search";
 
 interface Variant {
   readonly adapterId: "openai-chatgpt" | "openai-responses";
@@ -66,6 +83,7 @@ function createResponsesAdapter(variant: Variant, options: ResponsesAdapterOptio
   const baseUrl = (options.baseUrl ?? variant.defaultBaseUrl).replace(/\/+$/, "");
   const now = options.now ?? (() => new Date());
   const providerId = providerIdSchema.parse("openai");
+  const hosted: HostedSearchHooks = { gate: options.hostedWebSearch, observe: options.onHostedSearch, disabled: false };
 
   function capabilities(): ProviderCapabilities {
     return {
@@ -98,7 +116,7 @@ function createResponsesAdapter(variant: Variant, options: ResponsesAdapterOptio
       return prepareResponses(variant, request, caps);
     },
     stream(request, credential, signal) {
-      return streamResponses(variant, fetchImpl, baseUrl, request, credential, signal, capabilities());
+      return streamResponses(variant, fetchImpl, baseUrl, request, credential, signal, capabilities(), hosted);
     },
     async health(): Promise<ProviderHealth> {
       return { state: "unknown", checked_at: now().toISOString(), detail: "health is not probed without a request; no paid call is made" };
@@ -112,7 +130,19 @@ interface PreparedBody {
   readonly warnings: readonly string[];
 }
 
-function buildBody(variant: Variant, request: ModelRequest): PreparedBody | { readonly error: string } {
+interface HostedSearchHooks {
+  readonly gate: ResponsesAdapterOptions["hostedWebSearch"];
+  readonly observe: ResponsesAdapterOptions["onHostedSearch"];
+  /** Set when the endpoint refused the hosted tool once; later requests keep Synorch's tool. */
+  disabled: boolean;
+}
+
+/** The hosted `web_search` tool as Codex CLI sends it: live web access on the subscription endpoint. */
+function hostedSearchTool(variant: Variant): Record<string, unknown> {
+  return variant.subscription ? { type: "web_search", external_web_access: true } : { type: "web_search" };
+}
+
+function buildBody(variant: Variant, request: ModelRequest, hostedSearch = false): PreparedBody | { readonly error: string } {
   const warnings: string[] = [];
   const { instructions, untrusted } = splitSystemBlocks(request.system);
   const input: Record<string, unknown>[] = [];
@@ -168,13 +198,18 @@ function buildBody(variant: Variant, request: ModelRequest): PreparedBody | { re
     model: request.route.model_id,
     instructions,
     input,
-    tools: request.tools.map((tool) => ({
-      type: "function",
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.input_schema,
-      strict: false,
-    })),
+    tools: [
+      ...request.tools
+        .filter((tool) => !hostedSearch || tool.name !== WEB_SEARCH_TOOL)
+        .map((tool) => ({
+          type: "function",
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.input_schema,
+          strict: false,
+        })),
+      ...(hostedSearch ? [hostedSearchTool(variant)] : []),
+    ],
     tool_choice: "auto",
     parallel_tool_calls: true,
     store: false,
@@ -215,11 +250,16 @@ async function* streamResponses(
   credential: ResolvedCredential,
   signal: AbortSignal,
   caps: ProviderCapabilities,
+  hosted?: HostedSearchHooks,
 ): AsyncGenerator<ModelStreamEvent> {
-  const mapper = new ResponsesMapper();
+  let mapper = new ResponsesMapper(hosted?.observe === undefined ? undefined : { requestId: request.request_id, observe: hosted.observe });
   try {
     const prepared = prepareResponses(variant, request, caps);
-    const built = buildBody(variant, request);
+    let hostedSearch = false;
+    if (hosted?.gate !== undefined && !hosted.disabled && request.tools.some((tool) => tool.name === WEB_SEARCH_TOOL)) {
+      hostedSearch = await hosted.gate(request, signal).catch(() => false);
+    }
+    const built = buildBody(variant, request, hostedSearch);
     if (!prepared.ok || "error" in built) {
       yield { type: "error", error: prepared.ok ? providerError("invalid_request", "request could not be prepared") : prepared.error };
       return;
@@ -234,17 +274,35 @@ async function* streamResponses(
       headers.set("OpenAI-Beta", "responses=experimental");
     }
     credential.applyTo(headers);
-    yield* streamHttp({
-      request,
-      signal,
-      fetch: fetchImpl,
-      url: `${baseUrl}/responses`,
-      headers,
-      body: built.body,
-      subscription: variant.subscription,
-      mapper,
-      ...(variant.subscription ? { headerEvents: quotaEvents } : {}),
-    });
+    const send = (body: unknown) =>
+      streamHttp({
+        request,
+        signal,
+        fetch: fetchImpl,
+        url: `${baseUrl}/responses`,
+        headers,
+        body,
+        subscription: variant.subscription,
+        mapper,
+        ...(variant.subscription ? { headerEvents: quotaEvents } : {}),
+      });
+    let first = true;
+    for await (const event of send(built.body)) {
+      // The endpoint refused the hosted tool before streaming anything: keep Synorch's web_search from now on and resend once.
+      if (first && hostedSearch && hosted !== undefined && event.type === "error" && event.error.code === "invalid_request" && /web_search|tool/i.test(event.error.message)) {
+        hosted.disabled = true;
+        mapper = new ResponsesMapper();
+        const plain = buildBody(variant, request, false);
+        if ("error" in plain) {
+          yield event;
+          return;
+        }
+        yield* send(plain.body);
+        return;
+      }
+      first = false;
+      yield event;
+    }
   } catch (error: unknown) {
     yield failure(mapper, providerError("provider_internal", error instanceof Error ? error.message : String(error)));
   }
@@ -285,6 +343,13 @@ function quotaEvents(headers: Headers): readonly ModelStreamEvent[] {
 /** Responses SSE → stream grammar (research: openai-chatgpt-oauth §7, api-keys). */
 class ResponsesMapper implements SseMapper {
   public readonly assembler = new StreamAssembler();
+  private readonly hosted: { readonly requestId: string; readonly observe: (observed: HostedSearchObserved) => void } | undefined;
+  private readonly searches: string[] = [];
+  private readonly cited = new Map<string, string>();
+
+  public constructor(hosted?: { readonly requestId: string; readonly observe: (observed: HostedSearchObserved) => void }) {
+    this.hosted = hosted;
+  }
 
   public map(message: SseMessage): readonly ModelStreamEvent[] {
     let payload: Record<string, unknown> | undefined;
@@ -359,12 +424,36 @@ class ResponsesMapper implements SseMapper {
         if (encrypted !== undefined) this.assembler.thinkingOpaque(index, encrypted, summary);
         return [];
       }
+      case "web_search_call": {
+        // K4.1: a hosted search the model ran inside this turn.
+        const action = record(item?.action);
+        const queries = Array.isArray(action?.queries) ? action.queries.filter((entry): entry is string => typeof entry === "string") : [];
+        const query = stringField(action, "query") ?? queries[0] ?? stringField(action, "url");
+        this.searches.push(query ?? "");
+        return [];
+      }
       case "message": {
         const partial = this.assembler.partial();
         const hasText = partial?.content.some((part) => part.type === "text") ?? false;
-        if (hasText || !Array.isArray(item?.content)) return [];
-        const text = item.content.map((part) => stringField(record(part), "text") ?? "").join("");
-        return text === "" ? [] : [this.assembler.text(index, text)];
+        const events: ModelStreamEvent[] = [];
+        if (!hasText && Array.isArray(item?.content)) {
+          const text = item.content.map((part) => stringField(record(part), "text") ?? "").join("");
+          if (text !== "") events.push(this.assembler.text(index, text));
+        }
+        const fresh: string[] = [];
+        for (const part of Array.isArray(item?.content) ? item.content : []) {
+          const annotations = record(part)?.annotations;
+          for (const raw of Array.isArray(annotations) ? annotations : []) {
+            const annotation = record(raw);
+            const url = stringField(annotation, "url");
+            if (stringField(annotation, "type") !== "url_citation" || url === undefined || this.cited.has(url)) continue;
+            this.cited.set(url, stringField(annotation, "title") ?? url);
+            fresh.push(url);
+          }
+        }
+        // Citations stay visible in the answer (and in history) as a source list.
+        if (fresh.length > 0) events.push(this.assembler.text(index, `\n\nSources:\n${fresh.map((url) => `- [${(this.cited.get(url) ?? url).replace(/[[\]]/g, "")}](${url})`).join("\n")}`));
+        return events;
       }
       default:
         return [];
@@ -379,6 +468,13 @@ class ResponsesMapper implements SseMapper {
       cache_read_tokens: numberField(record(raw?.input_tokens_details), "cached_tokens"),
       reasoning_tokens: numberField(record(raw?.output_tokens_details), "reasoning_tokens"),
     }, raw === undefined ? "unknown" : "provider-reported");
+    if (this.hosted !== undefined && this.searches.length > 0) {
+      try {
+        this.hosted.observe({ requestId: this.hosted.requestId, queries: [...this.searches], sources: [...this.cited].map(([url, title]) => ({ title, url })) });
+      } catch {
+        // Observation is best effort; the answer is unaffected.
+      }
+    }
     const stopReason = stop === "length" ? "length" : this.assembler.hasToolCalls() ? "tool_use" : "stop";
     const events: ModelStreamEvent[] = [];
     if (raw !== undefined) events.push({ type: "usage", usage });

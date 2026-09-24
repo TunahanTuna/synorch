@@ -31,7 +31,7 @@ tool/result_recorded    → model'e tool_result (`renderToolResultText(ref, resu
 | `name` | snake_case, ≤64; modele aynı adla gösterilir (köprüde `mcp__synorch__<name>`) |
 | `version` | semver; `NormalizedAction.tool_version` ile digest'e girer |
 | `source` | `builtin` \| `mcp` \| `extension` (v1'de yalnız builtin, ADR-12) |
-| `effect` | `read`, `workspace-write`, `exec`, `external-write`, `control` |
+| `effect` | `read`, `workspace-write`, `exec`, `external-write`, `control`, `network-read` (K4.1: internetten okur, hiçbir yere yazmaz; `network: none` olamaz. Etki matrisinde her modda `allow` — `ask` modunda `ask` — asıl karar ağ politikasındadır: alan adı allowlist'i, "bu alan adına her zaman izin ver" kuralları, izin moduna göre soru; SSRF ve sır sızdırma rayları her modda ret. Eski `policy/snapshot` kayıtlarında alan yoksa `deny` okunur) |
 | `effect_source` | `builtin` yalnız builtin araçlar için; diğerlerinde `user-config` veya `default-high-risk` (= `external-write`). Sunucunun kendi beyanı politika kaynağı değildir |
 | `idempotent` | Crash sonrası otomatik tekrar değerlendirmesinin girdisi (tek başına izin vermez) |
 | `network` | `none` \| `optional` \| `required` (`required` ise `read` olamaz) |
@@ -52,6 +52,8 @@ tool/result_recorded    → model'e tool_result (`renderToolResultText(ref, resu
 | `apply_patch` | workspace-write | implementer, debugger (owned-paths), orchestrator (`.ai/tasks/**`) | Önkoşul: `expected_digest` verilmezse bu attempt'te o yolun son okunan/yazılan digest'i (`AttemptFileLedger.lastSeen`); hiçbiri yoksa `invalid_arguments` "read the file first". Kabul edilen biçimler: unified diff (`@@ -a,b +c,d @@`), sayısız `@@` başlıkları (hunk bağlamdan bulunur) ve `*** Begin Patch` / `*** Update File:` / `*** Add File:` / `*** Delete File:` / `*** End Patch` biçimi. Satır sonu satır başına korunur (CRLF, LF, yalnız CR), BOM korunur ve eşleşmede yok sayılır; geçersiz UTF-8 dosya `invalid_arguments` ile **reddedilir** (asla bozularak yazılmaz). Hata mesajı kabul edilen biçimleri ve 3 satırlık bir örneği içerir; `stale_precondition` güncel digest'i ve "re-read and retry" der. Atomik yazma |
 | `write_file` | workspace-write | implementer, debugger (owned-paths) | Yeni dosya veya önkoşullu üzerine yazma (`expected_digest` varsayılanı `apply_patch` ile aynı). Var olan dosya tek tip EOL taşıyorsa içerik o EOL'e çevrilir, BOM korunur; geçersiz UTF-8 hedef reddedilir. Sonuç `digest` yeni içeriğin digest'idir |
 | `exec` | exec | implementer, debugger, reviewer (izole) | argv (shell string değil), cwd, env allowlist, timeout, output cap; yıkıcı komut sınıflandırması |
+| `web_search` | network-read | session, implementer, debugger, explorer, reviewer | K4.1. Backend: `web.search.provider` (`auto`: ChatGPT aboneliği hosted arama → Claude Code köprüsü → OpenAI/Anthropic API key → Brave/Tavily/Exa anahtarı); sessiz fallback yok, cevap veren backend başlıkta. Sorgu sır rayından geçer (`NormalizedAction.egress_findings` → `secret-egress`). Sonuç `<untrusted_web_content>` zarfında |
+| `web_fetch` | network-read | session, implementer, debugger, explorer, reviewer | K4.1. Yerel: yalnız http/https GET; SSRF koruması (DNS çözümü, özel/loopback/link-local/metadata/CGNAT/IPv6 engeli, bağlantı doğrulanan IP'ye sabit, yönlendirme ≤ 5 ve her atlamada yeniden doğrulama, başka host'a yönlendirme takip edilmez bildirilir), 5 MB indirme, HTML→markdown, pencere + `offset` sayfalama (tam metin blob), 15 dk önbellek; model keşfettiği URL'de robots.txt'ye uyar, kullanıcının yazdığı URL'de uymaz. `network_purpose: fetch`, `network_hosts: [host]`; approval isteği `hosts` taşır ("bu alan adına her zaman izin ver") |
 | `task_spawn`, `task_status` | control | orchestrator | Packet şeması + DAG + ownership; bkz. [task-packets.md](./task-packets.md) |
 | `ask_user` | control | orchestrator | Headless'ta `approval_unavailable` |
 | `memory_propose` | control | orchestrator, worker | Yalnız öneri; kalıcı yazım memory modülünde ([memory.md](./memory.md)) |
@@ -144,6 +146,24 @@ cancellable: true
 concurrency: sequential
 visible_to: [explorer, implementer, debugger]
 ends_turn: true
+```
+
+Ağdan okuyan araç (K4.1):
+
+```yaml example=tool-metadata
+name: web_fetch
+version: "1.0.0"
+description: Read a public web page (http/https) as markdown; private, local and metadata addresses are refused.
+source: builtin
+effect: network-read
+effect_source: builtin
+idempotent: true
+network: required
+output_limit_bytes: 65536
+timeout_ms: 45000
+cancellable: true
+concurrency: parallel
+visible_to: [session, implementer, debugger, explorer, reviewer]
 ```
 
 Reddedilenler: MCP sunucusunun kendini `read` ilan etmesi; sınıflandırılmamış aracın düşük etki alması; kontrol dışı aracın turu bitirmesi.

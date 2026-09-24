@@ -85,15 +85,25 @@ import {
   createOpenAIResponsesAdapter,
   createScriptedAdapter,
   buildModelCatalog,
+  bridgeEnvironment,
   CHATGPT_CODEX_BASE_URL,
+  createWebSearchRunner,
   fetchCodexModels,
+  findOnPath,
+  SEARCH_KEY_ENV,
   SYNORCH_ORIGINATOR,
   type CatalogIdentity,
   type CatalogModel,
   type FetchLike,
+  type KeyedSearchBackend,
+  type ResponsesAdapterOptions,
+  type WebSearchSources,
+  type ClaudeCodeMode,
 } from "../providers/index.ts";
 import { createBlobStore, createSessionStore } from "../store/index.ts";
-import { BackgroundProcessManager, createSandboxRunner, createToolGateway, createToolRegistry, probeSandbox } from "../tools/index.ts";
+import { BackgroundProcessManager, createRedactor, createSandboxRunner, createToolGateway, createToolRegistry, createWebSession, probeSandbox, type WebSession } from "../tools/index.ts";
+import { createClaudeNativeApprovals } from "./claude-native-approvals.ts";
+import { createCommandGrantStore } from "./command-grants.ts";
 import type { RouteOverride } from "./args.ts";
 import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts";
 import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
@@ -187,6 +197,8 @@ export interface Runtime {
   readonly credentials: CredentialResolver;
   /** The `orchestrate` tool's handler slot (ADR-21 D4): set by the open conversation, empty otherwise. */
   readonly orchestrate: OrchestrateSlot;
+  /** K4.1 web state: allowed domains (user grants), the prompt-injection shield, the page cache. */
+  readonly web: WebSession;
   /** Lazily opened: probing the OS keychain can spawn a helper process. */
   credentialStore(): SynorchCredentialStore;
   authProvider(providerId: string, method: AuthProvider["method"], profile: string): AuthProvider | undefined;
@@ -232,6 +244,61 @@ export interface Runtime {
 }
 
 const SCRIPTED_PROVIDER = "scripted";
+const HOSTED_ALLOW = "Allow for this session";
+
+interface WebSearchSourceDeps {
+  readonly env: Env;
+  readonly home: string;
+  readonly workspaceRoot: string;
+  readonly platform: NodeJS.Platform;
+  readonly fetch: FetchLike | undefined;
+  readonly authProvider: (providerId: string, method: AuthProvider["method"], profile: string) => AuthProvider | undefined;
+  readonly credentialStore: () => SynorchCredentialStore;
+  readonly redactionValues: Set<string>;
+}
+
+/**
+ * K4.1: what each `web_search` backend needs, from the logged-in identities (never a model request
+ * to decide): subscription / API-key headers, the Claude Code bridge, and user search keys from the
+ * credential store or the environment. Every resolved secret joins the gateway's redaction set.
+ */
+function webSearchSources(deps: WebSearchSourceDeps): WebSearchSources {
+  const headersFor = async (provider: string, method: AuthProvider["method"], signal: AbortSignal): Promise<Headers | undefined> => {
+    const auth = deps.authProvider(provider, method, "default");
+    if (auth === undefined) return undefined;
+    const status = await auth.status(signal).catch(() => undefined);
+    if (status?.state !== "connected" && status?.state !== "expired") return undefined;
+    const credential = await auth.resolve(signal);
+    for (const value of credential.redactionValues()) deps.redactionValues.add(value);
+    const headers = new Headers();
+    credential.applyTo(headers);
+    return headers;
+  };
+  return {
+    fetch: deps.fetch ?? ((input, init) => fetch(input, init)),
+    chatgpt: (signal) => headersFor("openai", "oauth-subscription", signal),
+    openaiApi: (signal) => headersFor("openai", "api-key", signal),
+    anthropicApi: (signal) => headersFor("anthropic", "api-key", signal),
+    async claudeCode() {
+      if (!(await bridgeEnabled(deps.home))) return undefined;
+      const found = await findOnPath("claude", bridgeEnvironment(deps.env, {}, deps.platform), deps.platform);
+      return found === undefined ? undefined : { executable: { command: found }, env: deps.env, cwd: deps.workspaceRoot, platform: deps.platform };
+    },
+    async searchKey(backend: KeyedSearchBackend) {
+      const fromEnv = deps.env[SEARCH_KEY_ENV[backend]]?.trim();
+      let key = fromEnv === undefined || fromEnv === "" ? undefined : fromEnv;
+      if (key === undefined) {
+        const secret = await deps
+          .credentialStore()
+          .get({ provider_id: providerIdSchema.parse(backend), method: "api-key", profile: "default" })
+          .catch(() => undefined);
+        key = secret?.method === "api-key" ? secret.api_key : undefined;
+      }
+      if (key !== undefined) deps.redactionValues.add(key);
+      return key;
+    },
+  };
+}
 
 function platformName(platform: NodeJS.Platform): "win32" | "darwin" | "linux" | "other" {
   return platform === "win32" || platform === "darwin" || platform === "linux" ? platform : "other";
@@ -246,22 +313,43 @@ async function bridgeEnabled(home: string): Promise<boolean> {
   return new ProfileStateStore(home).isAcknowledged(CLAUDE_BRIDGE_NOTICE.id, ref).catch(() => false);
 }
 
-async function buildAdapter(entry: ConfiguredAdapter, fetch: FetchLike | undefined, env: Env, home: string): Promise<AnyModelAdapter> {
+/** K4.1 native provider search hooks handed to the OpenAI adapters (the runtime fills them in once its state exists). */
+interface WebAdapterHooks {
+  readonly hostedWebSearch: NonNullable<ResponsesAdapterOptions["hostedWebSearch"]>;
+  readonly onHostedSearch: NonNullable<ResponsesAdapterOptions["onHostedSearch"]>;
+}
+
+/** Claude Code native-mode wiring (owner revision 2026-09-24): the configured mode and the session hooks. */
+interface ClaudeWiring {
+  readonly mode: ClaudeCodeMode;
+  readonly permissionMode: () => PermissionMode | undefined;
+  readonly onWebContentRead: () => void;
+}
+
+async function buildAdapter(entry: ConfiguredAdapter, fetch: FetchLike | undefined, env: Env, home: string, claude: ClaudeWiring, web?: WebAdapterHooks): Promise<AnyModelAdapter> {
   if (entry.source !== "user") throw configError(`adapter ${entry.id} comes from the ${entry.source} layer; only the user configuration declares adapters`);
   if (entry.baseUrl !== undefined && entry.kind === "openai-chatgpt") {
     const refused = checkEndpoint(entry.kind, entry.baseUrl, false);
     if (refused !== undefined) throw configError(`adapter ${entry.id}: ${refused}`);
   }
   const common = { ...(fetch === undefined ? {} : { fetch }), ...(entry.baseUrl === undefined ? {} : { baseUrl: entry.baseUrl }) };
+  const hosted = web === undefined ? {} : { hostedWebSearch: web.hostedWebSearch, onHostedSearch: web.onHostedSearch };
   switch (entry.kind) {
     case "openai-chatgpt":
-      return withId(createOpenAIChatGPTAdapter(common), entry.id);
+      return withId(createOpenAIChatGPTAdapter({ ...common, ...hosted }), entry.id);
     case "openai-responses":
-      return withId(createOpenAIResponsesAdapter(common), entry.id);
+      return withId(createOpenAIResponsesAdapter({ ...common, ...hosted }), entry.id);
     case "anthropic-messages":
       return withId(createAnthropicMessagesAdapter(common), entry.id);
     case "claude-code":
-      return createClaudeCodeAdapter({ experimental: await bridgeEnabled(home), env, allowNonSubscriptionAuth: entry.allowNonSubscriptionAuth === true });
+      return createClaudeCodeAdapter({
+        experimental: await bridgeEnabled(home),
+        env,
+        allowNonSubscriptionAuth: entry.allowNonSubscriptionAuth === true,
+        mode: claude.mode,
+        permissionMode: claude.permissionMode,
+        onWebContentRead: claude.onWebContentRead,
+      });
     case "scripted":
       return createScriptedAdapter(await loadScript(entry.script ?? ""), {
         adapterId: entry.id,
@@ -292,11 +380,11 @@ const IMPLICIT_ADAPTERS: Readonly<Record<string, ConfiguredAdapter["kind"]>> = {
   "claude-code": "claude-code",
 };
 
-async function buildAdapters(config: RuntimeConfig, overrides: RuntimeOverrides, env: Env, home: string): Promise<AnyModelAdapter[]> {
+async function buildAdapters(config: RuntimeConfig, overrides: RuntimeOverrides, env: Env, home: string, claude: ClaudeWiring, web?: WebAdapterHooks): Promise<AnyModelAdapter[]> {
   const injected = new Map((overrides.adapters ?? []).map((adapter) => [adapter.adapterId, adapter]));
   const built = new Map<string, AnyModelAdapter>();
   for (const entry of config.adapters) {
-    if (!injected.has(entry.id)) built.set(entry.id, await buildAdapter(entry, overrides.fetch, env, home));
+    if (!injected.has(entry.id)) built.set(entry.id, await buildAdapter(entry, overrides.fetch, env, home, claude, web));
   }
   for (const rule of config.router.rules) {
     const id = rule.route.adapter_id;
@@ -306,7 +394,7 @@ async function buildAdapters(config: RuntimeConfig, overrides: RuntimeOverrides,
       const hint = DEFAULT_ADAPTER_FOR_PROVIDER[rule.route.provider_id] === id ? " (declare it under adapters)" : "";
       throw configError(`route for ${rule.tier} uses adapter ${id}, which is neither built in nor configured${hint}`);
     }
-    built.set(id, await buildAdapter({ id, kind, script: undefined, provider: undefined, baseUrl: undefined, source: "user" }, overrides.fetch, env, home));
+    built.set(id, await buildAdapter({ id, kind, script: undefined, provider: undefined, baseUrl: undefined, source: "user" }, overrides.fetch, env, home, claude, web));
   }
   return [...built.values(), ...injected.values()];
 }
@@ -359,7 +447,21 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     platform,
     ...(overrides.configCeiling === undefined ? {} : { ceiling: overrides.configCeiling }),
   });
-  const adapters = await buildAdapters(config, overrides, env, home);
+  // K4.1: the OpenAI adapters ask these (filled in below, once the permission mode and logs exist).
+  const webHooksState: { gate: WebAdapterHooks["hostedWebSearch"]; observe: WebAdapterHooks["onHostedSearch"]; contentRead: () => void } = {
+    gate: async () => false,
+    observe: () => undefined,
+    contentRead: () => undefined,
+  };
+  const webHooks: WebAdapterHooks = { hostedWebSearch: (request, signal) => webHooksState.gate(request, signal), onHostedSearch: (observed) => webHooksState.observe(observed) };
+  // Read at every Claude process start, so a mode change (Shift+Tab, /permissions) applies to the next step.
+  const claude: ClaudeWiring = {
+    mode: config.claudeCodeMode ?? "native",
+    permissionMode: () => permission,
+    // K4.1: a native WebSearch/WebFetch result arrived; the prompt-injection shield applies to this turn.
+    onWebContentRead: () => webHooksState.contentRead(),
+  };
+  const adapters = await buildAdapters(config, overrides, env, home, claude, webHooks);
   const baseRouter = createModelRouter(
     { rules: config.router.rules, ...(config.preferDifferentProvider === undefined ? {} : { preferDifferentProvider: config.preferDifferentProvider }) },
     adapters,
@@ -370,7 +472,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     if (existing !== undefined) return existing;
     const kind = IMPLICIT_ADAPTERS[id];
     if (kind === undefined) return undefined;
-    return buildAdapter({ id, kind, script: undefined, provider: undefined, baseUrl: undefined, source: "user" }, overrides.fetch, env, home);
+    return buildAdapter({ id, kind, script: undefined, provider: undefined, baseUrl: undefined, source: "user" }, overrides.fetch, env, home, claude, webHooks);
   };
 
   const listeners = new Set<RuntimeListener>();
@@ -535,7 +637,23 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       return trustState;
     },
   };
-  const policy = withRoleDefinitions(createPolicyEngine({ synorchHome: home, workspaceTrusted: () => effectiveTrust().trusted, permissionMode: () => permission }), canonical.roles);
+  const webSession = createWebSession({ home });
+  webHooksState.contentRead = () => webSession.markContentRead();
+  const policy = withRoleDefinitions(
+    createPolicyEngine({
+      synorchHome: home,
+      workspaceTrusted: () => effectiveTrust().trusted,
+      permissionMode: () => permission,
+      webDomains: () => webSession.domains(),
+      webContentRead: () => webSession.contentRead(),
+    }),
+    canonical.roles,
+  );
+  const webSearch = createWebSearchRunner({
+    provider: () => config.web.searchProvider,
+    model: () => config.web.searchModel,
+    sources: webSearchSources({ env, home, workspaceRoot, platform, fetch: overrides.fetch, authProvider, credentialStore, redactionValues }),
+  });
   const sandbox = overrides.sandbox ?? (await probeSandbox({ platform }));
   const runner = createSandboxRunner(sandbox, { untrustedRoots: [workspaceRoot, home] });
   const userConfig = config.userPolicy === undefined ? undefined : { policy: config.userPolicy };
@@ -552,6 +670,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const registry = createToolRegistry({
     processes,
     classifyCommand: (argv, scope) => classifyCommand(argv, scope),
+    web: { session: webSession, search: webSearch, transport: { allowPrivate: config.web.allowPrivate } },
     control: {
       ...delegationCallbacks(delegation),
       ...reportCallbacks(reports),
@@ -590,6 +709,69 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
 
   const orchestrate = createOrchestrateSlot();
   registry.register(createOrchestrateTool(orchestrate) as never);
+
+  // K4.1 native OpenAI search: on in auto/full/plan, one question per session in ask, headless only with web.openai_hosted: true.
+  let hostedConsent: boolean | undefined;
+  webHooksState.gate = async (_request, signal) => {
+    const setting = config.web.openaiHosted;
+    if (setting === false) return false;
+    if (permission === undefined) return setting === true;
+    if (permission !== "ask") return true;
+    if (hostedConsent !== undefined) return hostedConsent;
+    const prompt = userPrompt;
+    if (prompt === undefined) return false;
+    const answer = await prompt("Let the OpenAI model search the web natively during this session? (Otherwise Synorch's web_search asks you at every search.)", [HOSTED_ALLOW, "Not now"], signal).catch(() => "");
+    hostedConsent = answer.trim() === HOSTED_ALLOW;
+    return hostedConsent;
+  };
+  const requestSessions = new Map<string, SessionId>();
+  webHooksState.observe = (observed) => {
+    webSession.markContentRead();
+    const sessionId = requestSessions.get(observed.requestId);
+    const writer = sessionId === undefined ? undefined : writers.get(sessionId);
+    if (writer === undefined) return;
+    for (const query of observed.queries.slice(0, 16)) {
+      void writer
+        .append({
+          type: "web/searched",
+          event_version: EVENT_VERSIONS["web/searched"],
+          actor: { kind: "system" },
+          data: { provider: "openai-hosted", query: query.slice(0, 500), sources: Math.min(1000, observed.sources.length), request_id: observed.requestId },
+        } as SessionEventDraft)
+        .catch(() => undefined);
+    }
+  };
+  // K4.1 bookkeeping from the session events: turn boundaries (shield), URLs the user typed (robots.txt), request → log, domain grants.
+  const approvalHosts = new Map<string, readonly string[]>();
+  listeners.add((event) => {
+    if (event.kind !== "session-event") return;
+    const recorded = event.event;
+    const conversation = recorded.run_id === undefined && recorded.attempt_id === undefined;
+    if (recorded.type === "turn/started" && conversation) webSession.startTurn();
+    else if (recorded.type === "message/recorded" && conversation && recorded.data.message?.role === "user") {
+      for (const part of recorded.data.message.content) if (part.type === "text") webSession.noteUserText(part.text);
+    } else if (recorded.type === "model/request_prepared") {
+      requestSessions.set(recorded.data.request_id, recorded.session_id);
+      if (requestSessions.size > 256) requestSessions.delete(requestSessions.keys().next().value ?? "");
+    } else if (recorded.type === "approval/requested" && recorded.data.request.hosts !== undefined) {
+      approvalHosts.set(recorded.data.request.approval_id, recorded.data.request.hosts);
+    } else if (recorded.type === "approval/decided") {
+      const hosts = approvalHosts.get(recorded.data.decision.approval_id);
+      approvalHosts.delete(recorded.data.decision.approval_id);
+      if (hosts === undefined || recorded.data.decision.decided_by !== "user" || recorded.data.decision.outcome !== "allowed-for-scope") return;
+      const writer = writers.get(recorded.session_id);
+      for (const host of hosts) {
+        void webSession
+          .allowDomain(host)
+          .then((added) =>
+            added && writer !== undefined
+              ? writer.append({ type: "network/host_allowed", event_version: EVENT_VERSIONS["network/host_allowed"], actor: { kind: "user" }, data: { host, scope: "global" } } as SessionEventDraft)
+              : undefined,
+          )
+          .catch(() => undefined);
+      }
+    }
+  });
 
   const budgetGate = createBudgetGateSlot();
   const context = createContextBuilder({
@@ -654,6 +836,18 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     }
   };
 
+  // Claude Code native mode: its permission prompts go to the same broker as the gateway's (ADR-08 revision 2026-09-24).
+  const redactText = createRedactor(() => [...redactionValues]);
+  const backendRedact = (text: string): string => redactText(text).text;
+  const backendApprovals = (broker: ApprovalBroker) =>
+    createClaudeNativeApprovals({
+      broker,
+      permissionMode: () => permission,
+      commandGrants: () => createCommandGrantStore(home, effectiveTrust().root).list(),
+      redact: backendRedact,
+      web: { domains: () => webSession.domains(), environment: env },
+    });
+
   const createDriver = (broker: ApprovalBroker) => (events: EventStore): AgentDriver =>
     createAgentDriver({
       events,
@@ -663,6 +857,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       tools: registry,
       gateway: createToolGateway({ events, blobs, registry, policy, approvals: broker, sandbox: runner, redactionValues: () => [...redactionValues] }),
       credentials,
+      backendApprovals: backendApprovals(broker),
+      backendRedact,
     });
 
   const runtime: Runtime = {
@@ -689,6 +885,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     budgetGate,
     credentials,
     orchestrate,
+    web: webSession,
     credentialStore,
     authProvider,
     subscribe(listener) {
@@ -715,6 +912,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         tools: registry,
         gateway: wrap(createToolGateway({ events, blobs, registry, policy, approvals: broker, sandbox: runner, redactionValues: () => [...redactionValues], platform })),
         credentials,
+        backendApprovals: backendApprovals(broker),
+        backendRedact,
       });
     },
     sessionPolicy(commandGrants) {

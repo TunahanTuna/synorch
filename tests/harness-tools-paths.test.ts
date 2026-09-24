@@ -116,7 +116,7 @@ test("AC-1 audit: an escaping path is still normalized, evaluated and recorded a
   const harness = harnessFor(paths.root);
   await harness.call("write_file", { path: "../outside/secret.txt", content: "pwned" });
   const write = harness.ofType("tool/policy_decided").at(-1);
-  assert.equal(write?.event_version, 2);
+  assert.equal(write?.event_version, 3);
   assert.deepEqual(write?.data.action.paths, []);
   assert.deepEqual(write?.data.action.escapes, [{ requested: "../outside/secret.txt", access: "write", reason: "outside-workspace" }]);
   assert.equal(write?.data.decision.rail, "write-outside-scope");

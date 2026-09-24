@@ -76,3 +76,15 @@ Accepted
 ## Revisit trigger
 
 Anthropic'in köprü veya üçüncü taraf abonelik kullanımı hakkında yeni politika yayımlaması ya da yazılı onay vermesi; OpenAI'nin ChatGPT OAuth endpoint'ini değiştirmesi veya kısıtlaması; `--bare`'in `-p` varsayılanı olması.
+
+## 2026-09-24 owner revision — Claude Code native mode
+
+Ürün sahibi kararı (bağlayıcı): "Claude Code'u altyapı olarak entegre et; onu devre dışı bırakma niyetimiz yok; Claude Code'un her yeteneğini kullan; pahalıya mal olacak şeyi yeniden icat etme."
+
+- `claude-code` adapter'ının iki modu vardır; seçim yalnız **kullanıcı yapılandırmasında** `claude_code.mode: native | restricted` ile yapılır (varsayılan `native`; repo katmanındaki anahtar yok sayılır ve uyarı verir; `syn config set claude_code.mode restricted`).
+- **native**: Claude kendi yerleşik araç setinin tamamıyla çalışır (Bash, Read, Edit/Write, Grep, Glob, WebSearch, WebFetch, TodoWrite, Task/alt ajanlar, ...); `--tools ""` verilmez. Synorch MCP sunucusu bağlı kalır (orkestrasyon/rapor/kontrol araçları: `task_report`, `review_report`, `plan_propose`, `ask_user`, `memory_propose`, ...); `ToolBridge` listesi değişmez ve yalnız `mcp__synorch__*` çağrıları Synorch araç çağrısıdır. Yerleşik `tool_use` blokları assembler'a iletilmez; `backend_init` içindeki yerleşik araçlar ve yerleşik `tool_use` artık `protocol_mismatch` değildir (adapter ve driver'daki `rejectForeignBackendTools` yalnız `restricted` için çalışır; adapter `nativeTools: true` bildirir).
+- `--setting-sources user`: kullanıcının kendi Claude ayarları (izin kuralları, skill'ler, eklentiler) yüklenir; repo'nun yerleştirebileceği project/local ayarları ve `.mcp.json` yüklenmez (`--strict-mcp-config` kalır). `--add-dir` yalnız oturumun çalışma köküne (worker için attempt worktree'si, oturum için workspace) verilir; `cwd` da odur.
+- Abonelik kimliği ve SEC-M2 değişmez: API anahtarı değişkenleri çocuk süreçten silinir, `system/init.apiKeySource` abonelik değilse tur reddedilir. `--bare` hâlâ kullanılmaz.
+- **restricted**: bugünkü davranışın aynısı (`--tools ""`, `--setting-sources ""`, init-tools `protocol_mismatch` denetimi). Doğrudan kurulan adapter'ın API varsayılanı `restricted`'dır; runtime yapılandırmadaki modu (varsayılan `native`) geçirir.
+- Gözlemlenebilirlik: Claude'un yerleşik `tool_use` / `tool_result` stream-json olayları oturum günlüğüne eklemeli `backend/tool_observed` olayları olarak yazılır (`source: claude-code-native`, `phase started|finished`, araç adı, girdi/sonuç özeti — redaksiyondan geçer) ve TUI'de araç satırı olarak görünür (`✓ Bash pnpm test  12 passed`, `✓ Edit src/x.ts +3 −1`, `✓ Search (Claude) "q"`, `✓ Fetch (Claude) host/path`). Bunlar model konuşma geçmişine araç sonucu olarak **girmez** (çapraz sağlayıcı geçmişi bozulmasın diye). Alt ajan (Task) mesajları (`parent_tool_use_id`) konuşma metnine karışmaz.
+- İzin yönlendirmesi ve kalan risk: [ADR-08](./ADR-08-approval-policy.md) 2026-09-24 native mode revizyonu.

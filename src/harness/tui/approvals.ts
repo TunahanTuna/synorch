@@ -49,6 +49,8 @@ export function actionTitle(request: ApprovalRequest): string {
       return "Allow Synorch to edit files?";
     case "external-write":
       return "Allow Synorch to write outside this machine?";
+    case "network-read":
+      return request.hosts === undefined ? "Allow Synorch to search the web?" : `Allow Synorch to read ${request.hosts.join(", ")}?`;
     default:
       return "Allow this action?";
   }
@@ -58,7 +60,8 @@ export function actionTitle(request: ApprovalRequest): string {
 export function actionChoices(request: ApprovalRequest): ActionChoice[] {
   const rows: { value: ActionChoice["value"]; label: string }[] = [{ value: "allowed-once", label: "Allow once" }];
   const prefix = request.subject_kind === "action" ? suggestedCommandPrefix(request.command) : undefined;
-  if (prefix !== undefined) rows.push({ value: "allowed-for-scope", label: `Always allow \`${prefix}\` in this folder` });
+  if (request.subject_kind === "action" && request.hosts !== undefined) rows.push({ value: "allowed-for-scope", label: `Always allow ${request.hosts.join(", ")} (every project)` });
+  else if (prefix !== undefined) rows.push({ value: "allowed-for-scope", label: `Always allow \`${prefix}\` in this folder` });
   else if (request.subject_kind === "action" && request.effect === "workspace-write") rows.push({ value: "allowed-for-scope", label: "Allow all edits (switch to auto mode)" });
   else if (request.scope !== "once") rows.push({ value: "allowed-for-scope", label: `Allow for this ${request.scope}` });
   rows.push({ value: "rejected", label: "Deny" }, { value: "rejected-why", label: "Deny and tell Synorch why" });

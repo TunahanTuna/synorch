@@ -13,6 +13,10 @@ import { BackgroundProcessManager, createProcessTools } from "./builtin/process-
 import { createTodoTool } from "./builtin/todo.ts";
 import { createListDirTool, createReadFileTool, createSearchTool } from "./builtin/read-tools.ts";
 import { createApplyPatchTool, createWriteFileTool } from "./builtin/write-tools.ts";
+import { createWebFetchTool } from "./builtin/web-fetch.ts";
+import type { SafeFetchOptions } from "./builtin/web-net.ts";
+import { createWebSearchTool, type WebSearchRunner } from "./builtin/web-search.ts";
+import type { WebSession } from "./builtin/web-state.ts";
 
 export interface ToolRegistryOptions {
   /** Register the v1 built-in tools (default true). */
@@ -21,6 +25,8 @@ export interface ToolRegistryOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly classifyCommand?: CommandClassifierHint;
   readonly control?: ControlCallbacks;
+  /** K4.1: registers `web_search` (over the injected backends) and `web_fetch`. */
+  readonly web?: { readonly session: WebSession; readonly search: WebSearchRunner; readonly transport?: SafeFetchOptions };
   /** K4.2: the session's background processes (a private manager when absent). */
   readonly processes?: BackgroundProcessManager;
 }
@@ -59,6 +65,11 @@ export function createToolRegistry(options: ToolRegistryOptions = {}): ToolRegis
       createTodoTool() as Tool,
       ...createControlTools(options.control ?? {}),
     ];
+    const web = options.web;
+    if (web !== undefined) {
+      builtins.push(createWebSearchTool({ session: web.session, environment, search: web.search }) as Tool);
+      builtins.push(createWebFetchTool({ session: web.session, environment, ...(web.transport === undefined ? {} : { transport: web.transport }) }) as Tool);
+    }
     for (const tool of builtins) registry.register(tool);
   }
   return registry;

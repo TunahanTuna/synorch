@@ -13,7 +13,9 @@ import {
   type AgentDriverDependencies,
   type ApprovalBridge,
   type AssistantMessage,
+  type BackendApprovalDecision,
   type BackendSession,
+  type BackendToolObservation,
   IMAGE_MAX_BYTES,
   IMAGE_MEDIA_TYPES,
   type BlobRef,
@@ -83,9 +85,35 @@ function toolImage(blob: BlobRef | undefined): Extract<ContentPart, { type: "ima
 /** Prefix under which a backend-owned loop sees Synorch's tools (MCP server `synorch`). */
 export const BRIDGE_TOOL_PREFIX = "mcp__synorch__";
 
+/** What a backend permission handler knows about the turn, and how it audits into the turn's log. */
+export interface BackendApprovalContext {
+  readonly role: TurnInput["role"];
+  readonly runId: TurnInput["runId"];
+  readonly taskId: TurnInput["taskId"];
+  readonly attemptId: TurnInput["attemptId"];
+  readonly policy: TurnInput["policy"];
+  /** Appends `approval/requested` / `approval/decided` with the turn's actor and correlation ids. */
+  record<T extends "approval/requested" | "approval/decided">(type: T, data: SessionEventOf<T>["data"]): Promise<unknown>;
+}
+
+/**
+ * Decides a backend built-in's permission prompt (Claude Code native mode): the composition root
+ * routes it to the session's approval broker. Without a handler every built-in is denied.
+ */
+export type BackendApprovalHandler = (
+  toolName: string,
+  input: Readonly<Record<string, unknown>>,
+  context: BackendApprovalContext,
+  signal: AbortSignal,
+) => Promise<BackendApprovalDecision>;
+
 export interface AgentDriverOptions {
   /** Environment handed to agent-backend children (the adapter strips `BRIDGE_STRIPPED_ENV`). */
   readonly backendEnv?: Readonly<Record<string, string>>;
+  /** Native-mode permission prompts for backend built-ins; absent means they are denied. */
+  readonly backendApprovals?: BackendApprovalHandler;
+  /** Redacts backend tool observations before they are logged (credential values, secret shapes). */
+  readonly backendRedact?: (text: string) => string;
 }
 
 /** Creates the fixed agent loop (ADR-02) over the given seams. */
@@ -315,13 +343,57 @@ class FixedAgentDriver implements PausableAgentDriver {
         return run;
       },
     };
+    const native = adapter.nativeTools === true;
     const approvals: ApprovalBridge = {
-      decide: async (toolName) => {
-        const known = toolName.startsWith(BRIDGE_TOOL_PREFIX) && this.#deps.tools.get(bridgeToolName(toolName)) !== undefined;
-        return known
-          ? { allow: true, reason: "Synorch bridge tool; policy is enforced by the tool gateway" }
-          : { allow: false, reason: `${toolName} is not a Synorch bridge tool` };
+      decide: async (toolName, toolInput, decideSignal) => {
+        if (toolName.startsWith(BRIDGE_TOOL_PREFIX)) {
+          return this.#deps.tools.get(bridgeToolName(toolName)) !== undefined
+            ? { allow: true, reason: "Synorch bridge tool; policy is enforced by the tool gateway" }
+            : { allow: false, reason: `${toolName} is not a Synorch bridge tool` };
+        }
+        const handler = this.#deps.backendApprovals;
+        if (!native || handler === undefined) return { allow: false, reason: `${toolName} is not a Synorch bridge tool` };
+        try {
+          return await handler(
+            toolName,
+            toolInput,
+            {
+              role: input.role,
+              runId: input.runId,
+              taskId: input.taskId,
+              attemptId: input.attemptId,
+              policy: input.policy,
+              record: (type, data) => step.log.append(type, data as never),
+            },
+            AbortSignal.any([stepSignal, decideSignal]),
+          );
+        } catch (error: unknown) {
+          return { allow: false, reason: `the permission check failed: ${describe(error)}`.slice(0, 1000) };
+        }
       },
+    };
+    // Native built-in tool use is audit and display only: one event per phase, never a Synorch tool call or history.
+    let observed: Promise<unknown> = Promise.resolve();
+    const redact = this.#deps.backendRedact ?? ((text: string) => text);
+    const observe = (observation: BackendToolObservation): void => {
+      observed = observed
+        .then(() =>
+          step.log.append("backend/tool_observed", {
+            source: "claude-code-native",
+            phase: observation.phase,
+            tool_use_id: observation.toolUseId.slice(0, 200),
+            tool_name: observation.toolName.slice(0, 200),
+            input_summary: redact(observation.inputSummary).slice(0, 2000),
+            ...(observation.isError === undefined ? {} : { is_error: observation.isError }),
+            ...(observation.resultSummary === undefined ? {} : { result_summary: redact(observation.resultSummary).slice(0, 4000) }),
+            ...(observation.linesAdded === undefined ? {} : { lines_added: observation.linesAdded }),
+            ...(observation.linesRemoved === undefined ? {} : { lines_removed: observation.linesRemoved }),
+          }),
+        )
+        .catch((error: unknown) => {
+          storeError ??= error;
+          stepController.abort();
+        });
     };
 
     const sessionKey = `${input.route.adapter_id}:${input.route.model_id}`;
@@ -346,10 +418,11 @@ class FixedAgentDriver implements PausableAgentDriver {
       const active = session;
       try {
         const messages = (await withImageData(this.#deps.blobs, prepared.request)).messages;
-        const stream = active.runTurn({ requestId: step.requestId, route: input.route, messages }, { tools, approvals }, stepSignal);
-        outcome = await consumeStream(stream, stepSignal, rejectForeignBackendTools);
+        const stream = active.runTurn({ requestId: step.requestId, route: input.route, messages }, native ? { tools, approvals, observe } : { tools, approvals }, stepSignal);
+        outcome = await consumeStream(stream, stepSignal, native ? undefined : rejectForeignBackendTools);
         if (outcome.kind === "failed") await active.interrupt().catch(() => undefined);
         await chain;
+        await observed;
       } finally {
         this.#backendSessions.set(sessionKey, active.backendSessionId);
         await active.close().catch(() => undefined);

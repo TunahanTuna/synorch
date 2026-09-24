@@ -22,7 +22,36 @@ import {
   type RouteSource,
 } from "../contracts/index.ts";
 import { policyConfigSchema, type PolicyConfig } from "../policy/index.ts";
+import { WEB_SEARCH_PROVIDERS, type WebSearchProvider } from "../providers/index.ts";
+import { CLAUDE_CODE_MODES, type ClaudeCodeMode } from "../providers/claude-code/native.ts";
 import type { RouteOverride } from "./args.ts";
+
+/** K4.1 `web` block (user layer only): search backend, native provider search, private fetch exceptions. */
+const webConfigSchema = z.strictObject({
+  search: z
+    .strictObject({
+      /** `auto` (default): ChatGPT subscription → Claude Code bridge → OpenAI / Anthropic API key → Brave/Tavily/Exa key. */
+      provider: z.enum(WEB_SEARCH_PROVIDERS).optional(),
+      /** Model of the ChatGPT / OpenAI API search sub-request. */
+      model: modelIdSchema.optional(),
+    })
+    .optional(),
+  /** Attach OpenAI's hosted web_search to OpenAI routes (default true; headless only when set to true explicitly). */
+  openai_hosted: z.boolean().optional(),
+  fetch: z
+    .strictObject({
+      /** `host:port` entries web_fetch may reach although they resolve to private addresses (local dev servers). */
+      allow_private: z.array(z.string().min(3).max(260)).max(64).optional(),
+    })
+    .optional(),
+});
+
+export interface WebConfig {
+  readonly searchProvider: WebSearchProvider | undefined;
+  readonly searchModel: string | undefined;
+  readonly openaiHosted: boolean | undefined;
+  readonly allowPrivate: readonly string[];
+}
 
 /**
  * Runtime configuration (providers-and-configuration design). Three YAML files are read, each
@@ -126,12 +155,19 @@ const configFileSchema = z.strictObject({
       prefer_different_provider: z.boolean().optional(),
     })
     .optional(),
+  /** Claude Code bridge (user layer only): `native` (default) runs Claude's built-in tools, `restricted` only Synorch's. */
+  claude_code: z
+    .strictObject({
+      mode: z.enum(CLAUDE_CODE_MODES).optional(),
+    })
+    .optional(),
   budget: z
     .strictObject({
       max_wall_time_seconds: z.int().positive().optional(),
       max_cost_usd: z.number().positive().optional(),
     })
     .optional(),
+  web: webConfigSchema.optional(),
 });
 type ConfigFile = z.infer<typeof configFileSchema>;
 export type UserConfigFile = ConfigFile;
@@ -198,7 +234,11 @@ export interface RuntimeConfig {
   readonly mouse: boolean | undefined;
   /** `ui.glyphs` (user layer only); `auto` or undefined detects the set. */
   readonly glyphs: GlyphSetChoice | undefined;
+  /** `claude_code.mode` (user layer only); undefined means `native`. */
+  readonly claudeCodeMode: ClaudeCodeMode | undefined;
   readonly budget: { readonly maxWallTimeSeconds: number | undefined; readonly maxCostUsd: number | undefined };
+  /** `web.*` (user layer only, K4.1). */
+  readonly web: WebConfig;
 }
 
 function configError(message: string, file?: string): HarnessError {
@@ -256,6 +296,8 @@ const IGNORED_KEY_REASON: Readonly<Record<string, string>> = {
   memory: "the memory root is chosen in the user configuration only",
   ui: "display settings are chosen in the user configuration only",
   routing: "routing preferences are chosen in the user configuration only",
+  web: "web search and fetch settings are chosen in the user configuration only",
+  claude_code: "the Claude Code bridge mode is chosen in the user configuration only",
 };
 
 function warningsOf(layer: "workspace" | "project", file: string, read: LayerRead | undefined): ConfigWarning[] {
@@ -479,9 +521,16 @@ export async function loadRuntimeConfig(
     preferDifferentProvider: user?.routing?.prefer_different_provider,
     mouse: user?.ui?.mouse,
     glyphs: user?.ui?.glyphs,
+    claudeCodeMode: user?.claude_code?.mode,
     budget: {
       maxWallTimeSeconds: smallest(layers.map((layer) => layer?.budget?.max_wall_time_seconds)),
       maxCostUsd: smallest(layers.map((layer) => layer?.budget?.max_cost_usd)),
+    },
+    web: {
+      searchProvider: user?.web?.search?.provider,
+      searchModel: user?.web?.search?.model,
+      openaiHosted: user?.web?.openai_hosted,
+      allowPrivate: user?.web?.fetch?.allow_private ?? [],
     },
   };
 }

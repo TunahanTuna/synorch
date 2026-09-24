@@ -462,9 +462,43 @@ export interface ToolBridge {
   call(call: ToolBridgeCall, signal: AbortSignal): Promise<ToolBridgeResult>;
 }
 
-/** Backend permission callbacks. Anything that is not a Synorch bridge tool is denied. */
+/** A backend permission answer; `updatedInput` (allow only) replaces the tool input the backend runs. */
+export interface BackendApprovalDecision {
+  readonly allow: boolean;
+  readonly reason: string;
+  readonly updatedInput?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Backend permission callbacks. Synorch bridge tools are decided here; a backend built-in (Claude
+ * Code native mode) is routed to the session's approval broker when the driver has a handler for
+ * it, and denied otherwise.
+ */
 export interface ApprovalBridge {
-  decide(toolName: string, input: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<{ readonly allow: boolean; readonly reason: string }>;
+  decide(toolName: string, input: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<BackendApprovalDecision>;
+}
+
+/**
+ * A backend's own (built-in) tool use, observed for audit and display only (Claude Code native
+ * mode). It is never a Synorch tool call and never enters the model conversation history.
+ */
+export interface BackendToolObservation {
+  readonly phase: "started" | "finished";
+  readonly toolUseId: string;
+  /** The backend's tool name, e.g. `Bash`, `Edit`, `WebFetch`. */
+  readonly toolName: string;
+  readonly inputSummary: string;
+  readonly isError?: boolean;
+  readonly resultSummary?: string;
+  readonly linesAdded?: number;
+  readonly linesRemoved?: number;
+}
+
+export interface BackendBridges {
+  readonly tools: ToolBridge;
+  readonly approvals: ApprovalBridge;
+  /** Receives built-in tool observations (native mode); absent means nobody records them. */
+  readonly observe?: (observation: BackendToolObservation) => void;
 }
 
 export interface BackendTurnInput {
@@ -477,7 +511,7 @@ export interface BackendSession {
   readonly backendSessionId: string;
   runTurn(
     input: BackendTurnInput,
-    bridges: { readonly tools: ToolBridge; readonly approvals: ApprovalBridge },
+    bridges: BackendBridges,
     signal: AbortSignal,
   ): AsyncIterable<ModelStreamEvent>;
   interrupt(): Promise<void>;
@@ -489,6 +523,11 @@ export interface AgentBackendAdapter {
   readonly adapterId: string;
   readonly providerId: ProviderId;
   readonly authMethod: "cli-bridge";
+  /**
+   * The backend runs its own built-in tools (Claude Code native mode, owner revision 2026-09-24):
+   * built-ins in `backend_init.tools` are expected, not a protocol mismatch.
+   */
+  readonly nativeTools?: boolean;
   probe(signal: AbortSignal): Promise<BackendProbe>;
   discoverCapabilities(signal: AbortSignal): Promise<ProviderCapabilities>;
   startSession(options: BackendSessionOptions, signal: AbortSignal): Promise<BackendSession>;

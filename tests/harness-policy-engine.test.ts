@@ -66,7 +66,7 @@ test("compute: autonomous implementer gets owned write scope, forbidden union an
   assert.deepEqual(policy.write_scope, ["src/auth/**", "tests/auth/**"]);
   assert.deepEqual(policy.read_scope, ["**"]);
   assert.deepEqual(policy.forbidden, ["src/billing/**", "secrets/**"]);
-  assert.deepEqual(policy.effects, { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "deny", control: "allow" });
+  assert.deepEqual(policy.effects, { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "deny", control: "allow", "network-read": "allow" });
   assert.ok(policy.layers.some((layer) => layer.layer === "platform"));
   assert.ok(policy.layers.some((layer) => layer.layer === "task"));
 });
@@ -89,7 +89,7 @@ test("compute: read-only roles and the orchestrator get their fixed write scopes
 
 test("compute: ask mode turns writes, exec and external writes into prompts; config can make it stricter", () => {
   const policy = engine.compute(inputs({ mode: "ask" }));
-  assert.deepEqual(policy.effects, { read: "allow", "workspace-write": "ask", exec: "ask", "external-write": "ask", control: "allow" });
+  assert.deepEqual(policy.effects, { read: "allow", "workspace-write": "ask", exec: "ask", "external-write": "ask", control: "allow", "network-read": "ask" });
   const narrowed = engine.compute(inputs({ workspaceConfig: { policy: { mode: "ask" } } }));
   assert.equal(narrowed.mode, "ask");
 });

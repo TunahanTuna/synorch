@@ -15,7 +15,16 @@ export {
   createClaudeCodeAdapter,
   type ClaudeCodeAdapterOptions,
 } from "./claude-code/adapter.ts";
-export { bridgeEnvironment, type ExecutableSpec } from "./claude-code/process.ts";
+export { bridgeEnvironment, findOnPath, type ExecutableSpec } from "./claude-code/process.ts";
+export {
+  CLAUDE_CODE_MODES,
+  claudeInputSummary,
+  claudePermissionMode,
+  claudeToolEffect,
+  DEFAULT_CLAUDE_CODE_MODE,
+  type ClaudeCodeMode,
+  type ClaudePermissionMode,
+} from "./claude-code/native.ts";
 export { createCodexAppServerAdapter } from "./codex-app-server.ts";
 export { classifyHttpError, providerError } from "./errors.ts";
 export { checkStreamGrammar, collectStream } from "./grammar.ts";
@@ -27,6 +36,7 @@ export {
   OPENAI_API_BASE_URL,
   parseCodexQuota,
   SYNORCH_ORIGINATOR,
+  type HostedSearchObserved,
   type ResponsesAdapterOptions,
 } from "./responses.ts";
 export { RouteBlockedFailure, type ModelRouterConfig, type ProviderChangeProposal, type RouteBinding, type RouteRule } from "../contracts/index.ts";
@@ -43,4 +53,16 @@ export {
   type CatalogInput,
   type CatalogModel,
 } from "./catalog.ts";
+export {
+  createWebSearchRunner,
+  KEYED_SEARCH_BACKENDS,
+  SEARCH_KEY_ENV,
+  WEB_SEARCH_PROVIDERS,
+  WEB_SEARCH_SETUP_HINT,
+  WebSearchError,
+  type KeyedSearchBackend,
+  type SearchAnswer,
+  type WebSearchProvider,
+  type WebSearchSources,
+} from "./web-search.ts";
 export { createScriptedAdapter, type ScriptedAdapterOptions, type ScriptedModelAdapter, type ScriptStep } from "./scripted.ts";

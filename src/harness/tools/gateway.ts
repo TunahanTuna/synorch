@@ -74,6 +74,7 @@ const TRUNCATION_HINTS: Readonly<Record<string, string>> = {
   exec: "truncated; narrow the command's output (a filter, head/tail, a narrower test selection) to see the omitted part",
   git_diff: "truncated; pass paths to see the diff of fewer files",
   search: "truncated; narrow the pattern, path or glob",
+  web_fetch: "truncated; call web_fetch again with a smaller max_chars or the next offset",
 };
 const ENFORCEMENT_ORDER = ["unavailable", "partial", "full"] as const;
 
@@ -282,7 +283,7 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
       const grantKey = `${decision.action_digest}|${decision.policy_digest}`;
       if (!scopedGrants.has(grantKey)) {
         try {
-          approval = await requestApproval(action, decision, scope, callSignal, append);
+          approval = await requestApproval(action, decision, scope, callSignal, append, request.arguments);
         } catch {
           return refuseUnlogged("the event log refused the approval record; nothing was started");
         }
@@ -355,6 +356,7 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
     scope: ToolInvocationScope,
     signal: AbortSignal,
     append: (body: EventBody) => Promise<SessionEvent>,
+    args: Readonly<Record<string, unknown>>,
   ): Promise<ApprovalDecision> {
     const request = approvalRequestSchema.parse({
       approval_id: createId("approval"),
@@ -362,10 +364,11 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
       task_id: scope.taskId,
       subject_kind: "action",
       subject_digest: decision.action_digest,
-      summary: redact(summarize(action)).text.slice(0, 2000),
+      summary: redact(summarize(action, args)).text.slice(0, 2000),
       effect: action.effect,
       scope: "once",
       ...(action.command === undefined ? {} : { command: action.command.argv.slice(0, 256).map((word) => redact(word).text.slice(0, 2000)) }),
+      ...(action.network_purpose === "fetch" && action.network_hosts.length > 0 ? { hosts: action.network_hosts.slice(0, 16) } : {}),
       details: {
         why: redact(decision.reasons.filter((reason) => reason.code !== "permission-prompt" && reason.code !== "approval-required").map((reason) => reason.message).join("; ") || `${action.effect} needs your approval`).text.slice(0, 1000),
         consequence: CONSEQUENCES[action.effect],
@@ -468,9 +471,14 @@ const CONSEQUENCES: Readonly<Record<NormalizedAction["effect"], string>> = {
   exec: "runs with your user permissions; without a full sandbox it can change files outside the workspace",
   "external-write": "writes to a system outside this machine; it may not be reversible",
   control: "changes the session's own state",
+  "network-read": "reads from the internet; the content is treated as untrusted data",
 };
 
-function summarize(action: NormalizedAction): string {
+function summarize(action: NormalizedAction, args: Readonly<Record<string, unknown>>): string {
+  if (action.effect === "network-read") {
+    const subject = action.network_purpose === "search" ? `search "${String(args.query ?? "")}"` : `fetch ${String(args.url ?? action.network_hosts.join(", "))}`;
+    return `${action.tool_name} [network-read] ${subject}`.slice(0, 2000);
+  }
   const target = action.command === undefined ? action.paths.map((entry) => `${entry.access} ${entry.path}`).join(", ") : `${action.command.argv.join(" ")} (cwd ${action.command.cwd})`;
   return `${action.tool_name} [${action.effect}] ${target}`.trim();
 }

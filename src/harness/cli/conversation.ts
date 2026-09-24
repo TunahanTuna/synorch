@@ -48,7 +48,7 @@ import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageT
 import { WorkerStreamHub, type OrchestrationCoordinator, type WorkerControlResult, type WorkerDirectory } from "../orchestration/index.ts";
 import { createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/index.ts";
 import { bindBackgroundStatus, describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
-import { describeProcess } from "../tools/index.ts";
+import { DEFAULT_WEB_DOMAINS, describeProcess } from "../tools/index.ts";
 import type { ParsedCommand } from "./args.ts";
 import { mayContainImage, resolveAttachments } from "./attachments.ts";
 
@@ -1590,11 +1590,36 @@ class Conversation implements ConversationCommandHost {
       await this.allow(tail === "" ? "" : `-r ${tail}`);
       return;
     }
+    if (verb === "web") {
+      await this.webDomains(rest);
+      return;
+    }
     if (verb !== "") {
-      this.print(["Usage: /permissions [ask|auto|full|plan] · /permissions allow <prefix> · /permissions remove <prefix>"]);
+      this.print(["Usage: /permissions [ask|auto|full|plan] · /permissions allow <prefix> · /permissions remove <prefix> · /permissions web [allow|remove <domain>]"]);
       return;
     }
     this.print(await this.permissionLines());
+  }
+
+  /** `/permissions web [allow|remove <domain>]`: the web domains web_fetch reads without asking (K4.1, global user scope). */
+  private async webDomains(args: readonly string[]): Promise<void> {
+    const web = this.runtime.web;
+    const [action = "", domain = ""] = args;
+    if (action === "allow" || action === "add") {
+      const added = await web.allowDomain(domain);
+      if (added) await this.append("network/host_allowed", { host: domain.trim().toLowerCase(), scope: "global" }, "user").catch(() => undefined);
+      this.print([added ? `${this.glyphs.ok} Always allowed: ${domain} (every project)` : `${domain} is already allowed or is not a domain name`]);
+      return;
+    }
+    if (action === "remove" || action === "rm") {
+      this.print([(await web.removeDomain(domain)) ? `${this.glyphs.ok} Removed: ${domain}` : `${domain} was not among your allowed domains`]);
+      return;
+    }
+    const granted = web.grantedDomains();
+    this.print([
+      `Web domains     ${granted.length === 0 ? "none of your own yet (answer \"Always allow\" at a fetch prompt, or /permissions web allow <domain>)" : granted.join(` ${this.glyphs.sep} `)}`,
+      `Built in        ${DEFAULT_WEB_DOMAINS.length} documentation and registry sites (github.com, docs.python.org, …)`,
+    ]);
   }
 
   private async permissionLines(): Promise<string[]> {
@@ -1619,6 +1644,7 @@ class Conversation implements ConversationCommandHost {
       `Sandbox         ${runtime.sandbox.backend} (${runtime.sandbox.enforcement})`,
       `Always allowed  ${rules.length === 0 ? "none yet (answer \"Always allow\" in a prompt, or /permissions allow <prefix>)" : rules.join(` ${g.sep} `)}`,
       ...(rules.length === 0 ? [] : ["                /permissions remove <prefix> deletes a rule"]),
+      `Web             search free except in ask mode; fetch asks at a new domain (auto/plan) ${g.sep} your domains: ${runtime.web.grantedDomains().length === 0 ? "none" : runtime.web.grantedDomains().join(", ")} ${g.sep} /permissions web`,
       `Always asks     destructive commands (force push, publish, recursive delete, reset --hard…), in every mode`,
       `Never           ${HARD_RAILS.filter((rail) => rail !== "destructive-command").join(", ")} (hard rails, every mode); git history changes stay with you`,
     ];

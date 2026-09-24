@@ -144,6 +144,8 @@ export class ConversationPresenter {
   private readonly options: ConversationPresenterOptions;
   private readonly now: () => number;
   private readonly tools = new Map<string, ToolState>();
+  /** Approval ids whose prompt offered "always allow <domain>" (K4.1). */
+  private readonly hostApprovals = new Set<string>();
   /** tool_call_id -> item id (a read group maps several calls to one item). */
   private readonly toolItem = new Map<string, string>();
   private readonly assistant = new Map<string, { id: string; text: string }>();
@@ -347,13 +349,22 @@ export class ConversationPresenter {
         return this.toolStarted(event);
       case "tool/result_recorded":
         return this.toolFinished(event);
+      case "backend/tool_observed":
+        return this.backendTool(event);
       case "approval/requested":
         this.waiting = !this.replaying;
+        if (event.data.request.hosts !== undefined) this.hostApprovals.add(event.data.request.approval_id);
         return [];
       case "approval/decided":
         this.waiting = false;
+        // A domain grant has its own line (network/host_allowed).
+        if (this.hostApprovals.delete(event.data.decision.approval_id)) return [];
         // The tool row already shows a one-off answer (it runs, or turns ✗ denied); only a lasting grant gets its own line.
         return event.data.decision.decided_by === "user" && event.data.decision.outcome === "allowed-for-scope" ? [this.note("info", `${this.options.glyphs.ok} Allowed for the rest of this session`)] : [];
+      case "network/host_allowed":
+        return [this.note("info", `${this.options.glyphs.ok} Always allowed: ${event.data.host} (every project) ${this.options.glyphs.sep} /permissions lists and removes it`)];
+      case "web/searched":
+        return this.nativeSearch(event);
       case "context/compacted":
         return [this.note("info", `${this.options.glyphs.bullet} Context compacted ${this.options.glyphs.sep} ${formatTokens(event.data.tokens_before)} → ${formatTokens(event.data.tokens_after)} tokens`)];
       case "checkpoint/restored":
@@ -531,7 +542,11 @@ export class ConversationPresenter {
           ? { verb: "Running", detail: sanitizeInline(argvOf(state.args).join(" "), 60) }
           : state.name === "apply_patch" || state.name === "write_file"
             ? { verb: "Editing", detail: undefined }
-            : { verb: "Reading", detail: undefined };
+            : state.name === "web_search"
+              ? { verb: "Searching", detail: sanitizeInline(stringArg(state.args, "query") ?? "", 60) }
+              : state.name === "web_fetch"
+                ? { verb: "Fetching", detail: sanitizeInline(shortUrl(stringArg(state.args, "url") ?? ""), 60) }
+                : { verb: "Reading", detail: undefined };
     }
     return [];
   }
@@ -573,6 +588,64 @@ export class ConversationPresenter {
     return [{ op: "update", item: this.toolView(state) }];
   }
 
+  /**
+   * Claude Code native mode: a built-in tool Claude ran itself, as a tool row (`✓ Bash pnpm test
+   * 12 passed`, `✓ Edit src/x.ts +3 −1`). Display only; the row feeds the turn's result line.
+   */
+  private backendTool(event: SessionEventOf<"backend/tool_observed">): ViewOp[] {
+    const data = event.data;
+    const g = this.options.glyphs;
+    const key = `backend:${data.tool_use_id}`;
+    let state = this.stateFor(key);
+    const fresh = state === undefined;
+    if (state === undefined) {
+      state = {
+        id: this.nextId(),
+        name: `claude:${data.tool_name}`,
+        args: {},
+        status: "running",
+        title: claudeToolTitle(data.tool_name, data.input_summary),
+        summary: undefined,
+        preview: [],
+        detail: [],
+        stat: undefined,
+        group: undefined,
+        pending: [],
+      };
+      this.tools.set(state.id, state);
+      this.toolItem.set(key, state.id);
+      this.lastItem = state.id;
+    }
+    if (data.phase === "started") {
+      if (!this.replaying) {
+        this.activityVerb =
+          data.tool_name === "Bash" || data.tool_name === "PowerShell"
+            ? { verb: "Running", detail: sanitizeInline(data.input_summary, 60) }
+            : CLAUDE_WRITE_TOOLS.has(data.tool_name)
+              ? { verb: "Editing", detail: undefined }
+              : { verb: "Working", detail: undefined };
+      }
+      return fresh ? [{ op: "append", item: this.toolView(state) }] : [];
+    }
+    if (!this.replaying) this.activityVerb = undefined;
+    const failed = data.is_error === true;
+    state.status = failed ? "failed" : "ok";
+    const lines = data.lines_added === undefined ? undefined : `+${data.lines_added} ${g.minus}${data.lines_removed ?? 0}`;
+    const summary = sanitizeInline(lines ?? data.result_summary ?? "", 200);
+    state.summary = summary === "" ? undefined : summary;
+    if (!failed && CLAUDE_WRITE_TOOLS.has(data.tool_name) && data.input_summary !== "") {
+      const entry = this.ledger.files.get(data.input_summary) ?? { added: 0, removed: 0, created: data.tool_name === "Write" };
+      entry.added += data.lines_added ?? 0;
+      entry.removed += data.lines_removed ?? 0;
+      this.ledger.files.set(data.input_summary, entry);
+    } else if (data.tool_name === "Bash" && isTestCommand(data.input_summary.split(/\s+/))) {
+      const body = data.result_summary ?? "";
+      const failures = testCount(body, "fail");
+      this.ledger.tests = { passed: testCount(body, "pass"), failed: failures === 0 ? undefined : failures, ok: !failed, exit: undefined };
+    }
+    return [{ op: fresh ? "append" : "update", item: this.toolView(state) }];
+  }
+
   /** Feeds the turn's result line: edited files with their line counts, and test commands. */
   private record(state: ToolState, result: SessionEventOf<"tool/result_recorded">["data"]["result"], failed: boolean): void {
     if (state.name === "apply_patch" && !failed) {
@@ -599,6 +672,28 @@ export class ConversationPresenter {
       const failures = testCount(body, "fail");
       this.ledger.tests = { passed: testCount(body, "pass"), failed: failures === 0 ? undefined : failures, ok: !failed && result.exit_code === 0, exit: result.exit_code };
     }
+  }
+
+  /** A search the provider ran natively inside the model turn (OpenAI hosted web_search). */
+  private nativeSearch(event: SessionEventOf<"web/searched">): ViewOp[] {
+    const label = event.data.provider === "openai-hosted" ? "OpenAI" : event.data.provider === "claude-code" ? "Claude" : event.data.provider;
+    const summary = plural(event.data.sources, "source");
+    const state: ToolState = {
+      id: this.nextId(),
+      name: "web_search",
+      args: { query: event.data.query },
+      status: "ok",
+      title: `Search (${label}) "${sanitizeInline(event.data.query, 80)}"`,
+      summary,
+      preview: [],
+      detail: [],
+      stat: summary,
+      group: undefined,
+      pending: [],
+    };
+    this.tools.set(state.id, state);
+    this.lastItem = state.id;
+    return [{ op: "append", item: this.toolView(state) }];
   }
 
   private toolView(state: ToolState): ConversationItem {
@@ -699,6 +794,15 @@ export function patchPaths(patch: string): string[] {
   return paths;
 }
 
+const CLAUDE_WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+
+/** A Claude built-in's row title: `Bash pnpm test`, `Edit src/x.ts`, `Search (Claude) "q"`, `Fetch (Claude) host/path`. */
+function claudeToolTitle(name: string, summary: string): string {
+  const detail = sanitizeInline(summary, 120);
+  const label = name === "WebSearch" ? "Search (Claude)" : name === "WebFetch" ? "Fetch (Claude)" : sanitizeInline(name, 40);
+  return detail === "" ? label : `${label} ${detail}`;
+}
+
 function toolTitle(name: string, args: Readonly<Record<string, unknown>>): string {
   switch (name) {
     case "read_file":
@@ -739,10 +843,25 @@ function toolTitle(name: string, args: Readonly<Record<string, unknown>>): strin
       return "Git status";
     case "git_diff":
       return "Git diff";
+    case "web_search":
+      return `Search "${sanitizeInline(stringArg(args, "query") ?? "", 80)}"`;
+    case "web_fetch":
+      return `Fetch ${sanitizeInline(shortUrl(stringArg(args, "url") ?? "?"), 100)}`;
     default: {
       const first = Object.values(args).find((value): value is string => typeof value === "string");
       return `${name}${first === undefined ? "" : ` ${sanitizeInline(first, 60)}`}`;
     }
+  }
+}
+
+/** `https://www.example.com/a/b?q` → `example.com/a/b?q` for a compact row. */
+export function shortUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    const rest = `${url.pathname === "/" ? "" : url.pathname}${url.search}`;
+    return `${url.host.replace(/^www\./, "")}${rest}`;
+  } catch {
+    return raw;
   }
 }
 
@@ -883,6 +1002,24 @@ function summarizeResult(
       if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
       const changed = text.split("\n").filter((line) => /^[ MADRCU?!]{2} /.test(line));
       return { summary: changed.length === 0 ? "clean" : `${changed.length} changed`, preview: [], detail: textLines(changed.slice(0, DETAIL_LINES)) };
+    }
+    case "web_search": {
+      if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
+      const header = text.split("\n", 1)[0] ?? "";
+      const count = /: (\d+) results?$/.exec(header)?.[1];
+      const backend = / via ([\w-]+):/.exec(header)?.[1];
+      const titles = text.split("\n").filter((line) => /^\d+\. /.test(line));
+      const summary = `${count === undefined ? "done" : plural(Number(count), "result")}${backend === undefined ? "" : ` ${g.sep} ${backend}`}`;
+      return { summary, stat: summary, preview: [], detail: textLines(titles.slice(0, DETAIL_LINES)) };
+    }
+    case "web_fetch": {
+      if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
+      const header = text.split("\n", 1)[0] ?? "";
+      const size = /, (\d+(?:\.\d+)? (?:B|KB|MB))[,)]/.exec(header)?.[1];
+      const redirect = /redirects \(\d+\) to another host: (\S+)/.exec(header)?.[1];
+      const summary = redirect !== undefined ? `redirects to ${shortUrl(redirect)}` : (size ?? "read");
+      const title = /title: (.*?) chars \d+/.exec(header)?.[1];
+      return { summary, stat: summary, preview: [], detail: title === undefined ? [] : textLines([title]) };
     }
     default: {
       if (result.status === "error") return { summary: failedText, preview: [], detail: [] };

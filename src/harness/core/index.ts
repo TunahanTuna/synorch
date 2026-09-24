@@ -18,7 +18,15 @@ export type {
   TurnInput,
   TurnOutcome,
 } from "../contracts/index.ts";
-export { BRIDGE_TOOL_PREFIX, createAgentDriver, isPausableDriver, type AgentDriverOptions, type PausableAgentDriver } from "./driver.ts";
+export {
+  BRIDGE_TOOL_PREFIX,
+  createAgentDriver,
+  isPausableDriver,
+  type AgentDriverOptions,
+  type BackendApprovalContext,
+  type BackendApprovalHandler,
+  type PausableAgentDriver,
+} from "./driver.ts";
 export { loadRecordedMessage, putCanonicalJson, rebuildModelRequest } from "./envelope.ts";
 export { projectSession, SessionProjector } from "./projection.ts";
 export { recoverSession, type RecoveryOptions } from "./recovery.ts";

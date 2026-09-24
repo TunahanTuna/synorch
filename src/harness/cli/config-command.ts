@@ -24,6 +24,9 @@ import {
   type RuntimeConfig,
 } from "./config.ts";
 import { failureInfo } from "./outcome.ts";
+import { createCredentialStore } from "../auth/index.ts";
+import { KEYED_SEARCH_BACKENDS, WEB_SEARCH_PROVIDERS, type KeyedSearchBackend } from "../providers/index.ts";
+import { CLAUDE_CODE_MODES } from "../providers/claude-code/native.ts";
 
 /**
  * `syn config` (K1.5-3) and the settings model behind the in-session `/config` screen. Only the
@@ -58,12 +61,19 @@ const PLAIN_SETTINGS: readonly SettingDefinition[] = [
   { key: "ui.mouse", kind: "boolean", scope: "user", description: "start with mouse capture on (wheel scroll, click to expand)", fallback: "false", yamlPath: ["ui", "mouse"] },
   { key: "ui.glyphs", kind: "enum", choices: GLYPH_SET_CHOICES, scope: "user", description: "glyph set of the interactive view (SYN_GLYPHS wins)", fallback: "auto", yamlPath: ["ui", "glyphs"] },
   { key: "routing.prefer_different_provider", kind: "boolean", scope: "user", description: "reviewers prefer a provider other than the implementer's", fallback: "true", yamlPath: ["routing", "prefer_different_provider"] },
+  { key: "claude_code.mode", kind: "enum", choices: CLAUDE_CODE_MODES, scope: "user", description: "Claude Code bridge: native (Claude's own tools, Synorch approvals) or restricted (Synorch tools only)", fallback: "native", yamlPath: ["claude_code", "mode"] },
   { key: "policy.mode", kind: "enum", choices: POLICY_MODES, scope: "narrow", description: "approval mode for plans (ask narrows auto/full to ask)", fallback: "autonomous", yamlPath: ["policy", "mode"] },
   { key: "policy.require_full_sandbox", kind: "boolean", scope: "narrow", description: "refuse edits and commands without a full OS sandbox", fallback: "false", yamlPath: ["policy", "require_full_sandbox"] },
   { key: "budget.max_wall_time_seconds", kind: "int", scope: "narrow", description: "wall-time limit of a run in seconds (smallest layer wins)", yamlPath: ["budget", "max_wall_time_seconds"] },
   { key: "budget.max_cost_usd", kind: "number", scope: "narrow", description: "estimated cost limit of a run in USD (smallest layer wins)", yamlPath: ["budget", "max_cost_usd"] },
   { key: "memory.root", kind: "string", scope: "user", description: "memory vault root (default <synorch home>/memory/<project>)", yamlPath: ["memory", "root"] },
+  { key: "web.search.provider", kind: "enum", choices: WEB_SEARCH_PROVIDERS, scope: "user", description: "web_search backend (auto: ChatGPT → Claude Code → OpenAI/Anthropic key → Brave/Tavily/Exa key)", fallback: "auto", yamlPath: ["web", "search", "provider"] },
+  { key: "web.search.model", kind: "string", scope: "user", description: "model of the ChatGPT / OpenAI API search sub-request", yamlPath: ["web", "search", "model"] },
+  { key: "web.openai_hosted", kind: "boolean", scope: "user", description: "OpenAI routes search natively with the hosted web_search tool (headless only when true)", fallback: "true", yamlPath: ["web", "openai_hosted"] },
 ];
+
+/** `syn config set web.search.api_key <key>`: the key goes to the credential store, never to config.yaml. */
+export const WEB_SEARCH_API_KEY_SETTING = "web.search.api_key";
 
 const ROUTE_ROLES = AGENT_ROLES.filter((role) => role !== "orchestrator");
 
@@ -546,6 +556,10 @@ export async function configCommand(invocation: ConfigInvocation, io: ConfigComm
       }
       case "set": {
         expectArgs(invocation, 2, "a key and a value");
+        if (invocation.args[0] === WEB_SEARCH_API_KEY_SETTING) {
+          io.stdout(`${await storeSearchKey(io, target, invocation.args[1] ?? "")}\n`);
+          return EXIT_CODES.success;
+        }
         const change = await setUserSetting(io.home, invocation.args[0] ?? "", invocation.args[1] ?? "");
         io.stdout(`${describeChange(change)}\n`);
         if (settingFor(change.key).scope === "narrow") io.stdout("Note: a repository layer may still narrow this value (syn config list shows the effective one).\n");
@@ -569,6 +583,23 @@ export async function configCommand(invocation: ConfigInvocation, io: ConfigComm
     io.stderr(`Error: ${info.message}\n${info.code === "config_invalid" ? `Fix it with \`syn config edit\` (${userConfigPath(io.home)}).\n` : ""}`);
     return info.code === "config_invalid" ? EXIT_CODES.usage : EXIT_CODES.internal;
   }
+}
+
+/** Stores the web search API key of the configured keyed backend in the credential store (never in config.yaml). */
+async function storeSearchKey(io: ConfigCommandIO, target: string, key: string): Promise<string> {
+  const config = await loadRuntimeConfig(io.home, target, [], io.discovery ?? {});
+  const provider = config.web.searchProvider;
+  if (provider === undefined || !(KEYED_SEARCH_BACKENDS as readonly string[]).includes(provider)) {
+    throw new ConfigCommandError(`set web.search.provider to one of ${KEYED_SEARCH_BACKENDS.join(", ")} first (syn config set web.search.provider brave), then store its key`);
+  }
+  const trimmed = key.trim();
+  if (trimmed.length < 8 || /\s/.test(trimmed)) throw new ConfigCommandError("that does not look like an API key");
+  const store = createCredentialStore(io.home, { env: io.env });
+  await store.set(
+    { provider_id: providerIdSchema.parse(provider as KeyedSearchBackend), method: "api-key", profile: "default" },
+    { method: "api-key", api_key: trimmed, created_at: new Date().toISOString() },
+  );
+  return `Stored the ${provider} search key in the credential store (${store.location}); config.yaml is unchanged.`;
 }
 
 /** Parses the positionals of `syn config` (the first names the sub-command; `list` is the default). */

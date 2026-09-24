@@ -12,11 +12,13 @@ import {
   ProviderFailure,
   type AgentBackendAdapter,
   type ApprovalBridge,
+  type BackendBridges,
   type BackendProbe,
   type BackendSession,
   type BackendSessionOptions,
   type BackendTurnInput,
   type ModelStreamEvent,
+  type PermissionMode,
   type ProviderCapabilities,
   type ProviderError,
   type ToolBridge,
@@ -26,6 +28,16 @@ import { anthropicWireModelId } from "../catalog.ts";
 import { StreamAssembler, usageOf } from "../assembler.ts";
 import { numberField, providerError, record, stringField } from "../errors.ts";
 import { McpToolServer, MCP_SERVER_NAME, PERMISSION_TOOL_NAME, serveMcpConnection } from "./mcp-server.ts";
+import {
+  claudeInputSummary,
+  claudeLineCounts,
+  claudePermissionMode,
+  claudeResultSummary,
+  isClaudeWebTool,
+  toolResultText,
+  type ClaudeCodeMode,
+  type ClaudePermissionMode,
+} from "./native.ts";
 import { bridgeEnvironment, findOnPath, runCaptured, spawnBackend, terminate, type ExecutableSpec } from "./process.ts";
 
 /** Claude sees Synorch MCP tools as `mcp__synorch__<name>`; anything else in `backend_init.tools` is a built-in. */
@@ -51,6 +63,18 @@ export interface ClaudeCodeAdapterOptions {
   readonly now?: () => Date;
   readonly platform?: NodeJS.Platform;
   readonly tempRoot?: string;
+  /**
+   * `native` (owner revision 2026-09-24): Claude runs its full built-in toolset, its permission
+   * prompts go to Synorch's approval broker, and its tool use is observed for audit. `restricted`:
+   * every built-in disabled, only Synorch MCP tools (the original bridge). The runtime passes the
+   * user configuration's `claude_code.mode` (default native); a directly built adapter defaults to
+   * `restricted` so the original bridge contract stays the API default.
+   */
+  readonly mode?: ClaudeCodeMode;
+  /** The session's current Synorch permission mode, read at every process start (native mode). */
+  readonly permissionMode?: () => PermissionMode | undefined;
+  /** Fires when a native WebSearch/WebFetch result arrives (K4.1 web-content taint). */
+  readonly onWebContentRead?: () => void;
 }
 
 export interface ClaudeArgsInput {
@@ -60,14 +84,20 @@ export interface ClaudeArgsInput {
   readonly maxTurns: number;
   readonly sessionId: string;
   readonly resume: boolean;
+  /** Native mode: full built-in toolset, Claude's permission mode, and the one workspace root. */
+  readonly native?: { readonly permissionMode: ClaudePermissionMode; readonly addDir: string };
 }
 
 /**
- * `claude -p` in bidirectional stream-json mode with every built-in tool disabled, only the
+ * `claude -p` in bidirectional stream-json mode. Restricted: every built-in tool disabled, only the
  * Synorch MCP server loaded and user/project settings (hooks, CLAUDE.md, `.mcp.json`) excluded.
- * `--bare` is deliberately absent: it disables the subscription login (research: cli-bridges §1.2).
+ * Native: Claude's full built-in toolset, its permission mode mapped from Synorch's, the user's own
+ * Claude settings (never project/local settings a repository could plant), `--add-dir` for the one
+ * workspace root, and still only the Synorch MCP server. `--bare` is deliberately absent: it
+ * disables the subscription login (research: cli-bridges §1.2).
  */
 export function buildClaudeArgs(input: ClaudeArgsInput): string[] {
+  const native = input.native;
   return [
     "-p",
     "--input-format",
@@ -76,8 +106,7 @@ export function buildClaudeArgs(input: ClaudeArgsInput): string[] {
     "stream-json",
     "--verbose",
     "--include-partial-messages",
-    "--tools",
-    "",
+    ...(native === undefined ? ["--tools", ""] : ["--permission-mode", native.permissionMode, "--add-dir", native.addDir]),
     "--mcp-config",
     input.mcpConfigPath,
     "--strict-mcp-config",
@@ -86,7 +115,7 @@ export function buildClaudeArgs(input: ClaudeArgsInput): string[] {
     "--permission-prompt-tool",
     `${CLAUDE_TOOL_PREFIX}${PERMISSION_TOOL_NAME}`,
     "--setting-sources",
-    "",
+    native === undefined ? "" : "user",
     "--system-prompt-file",
     input.systemPromptPath,
     "--model",
@@ -125,6 +154,7 @@ export function createClaudeCodeAdapter(options: ClaudeCodeAdapterOptions): Agen
   const platform = options.platform ?? process.platform;
   const probeEnv = bridgeEnvironment(options.env ?? process.env, {}, platform);
   const providerId = providerIdSchema.parse("anthropic");
+  const native = options.mode === "native";
 
   async function locate(): Promise<ExecutableSpec | undefined> {
     if (options.executable !== undefined) return options.executable;
@@ -150,6 +180,7 @@ export function createClaudeCodeAdapter(options: ClaudeCodeAdapterOptions): Agen
     adapterId: "claude-code",
     providerId,
     authMethod: "cli-bridge",
+    nativeTools: native,
     probe,
     async discoverCapabilities(signal): Promise<ProviderCapabilities> {
       const probed = await probe(signal);
@@ -186,6 +217,9 @@ export function createClaudeCodeAdapter(options: ClaudeCodeAdapterOptions): Agen
         interruptGraceMs: options.interruptGraceMs ?? 5_000,
         allowNonSubscriptionAuth: options.allowNonSubscriptionAuth === true,
         tempRoot: options.tempRoot ?? os.tmpdir(),
+        native,
+        permissionMode: options.permissionMode ?? (() => undefined),
+        onWebContentRead: options.onWebContentRead ?? (() => undefined),
       });
     },
     async health(signal) {
@@ -227,6 +261,7 @@ class Inbox {
 interface ActiveTurn {
   readonly tools: ToolBridge;
   readonly approvals: ApprovalBridge;
+  readonly observe: BackendBridges["observe"];
   readonly signal: AbortSignal;
 }
 
@@ -235,6 +270,9 @@ interface SessionConfig {
   readonly interruptGraceMs: number;
   readonly tempRoot: string;
   readonly allowNonSubscriptionAuth: boolean;
+  readonly native: boolean;
+  readonly permissionMode: () => PermissionMode | undefined;
+  readonly onWebContentRead: () => void;
 }
 
 class ClaudeCodeSession implements BackendSession {
@@ -325,13 +363,13 @@ class ClaudeCodeSession implements BackendSession {
     return session;
   }
 
-  public runTurn(input: BackendTurnInput, bridges: { readonly tools: ToolBridge; readonly approvals: ApprovalBridge }, signal: AbortSignal): AsyncIterable<ModelStreamEvent> {
+  public runTurn(input: BackendTurnInput, bridges: BackendBridges, signal: AbortSignal): AsyncIterable<ModelStreamEvent> {
     return this.turn(input, bridges, signal);
   }
 
   private async *turn(
     input: BackendTurnInput,
-    bridges: { readonly tools: ToolBridge; readonly approvals: ApprovalBridge },
+    bridges: BackendBridges,
     signal: AbortSignal,
   ): AsyncGenerator<ModelStreamEvent> {
     const assembler = new StreamAssembler();
@@ -357,7 +395,7 @@ class ClaudeCodeSession implements BackendSession {
       return;
     }
 
-    this.active = { tools: bridges.tools, approvals: bridges.approvals, signal };
+    this.active = { tools: bridges.tools, approvals: bridges.approvals, observe: bridges.observe, signal };
     let aborted = false;
     const onAbort = () => {
       aborted = true;
@@ -383,6 +421,10 @@ class ClaudeCodeSession implements BackendSession {
       let nextIndex = 0;
       let mapper: MessagesMapper | undefined;
       let sawStreamForCall = false;
+      const native = this.config.native;
+      /** Native mode: stream block indexes of the current message that are built-in tool uses (Claude runs them). */
+      let skippedBlocks = new Set<number>();
+      const nativeCalls = new Map<string, { readonly name: string; readonly input: Readonly<Record<string, unknown>> }>();
 
       while (true) {
         const incoming = await this.inbox.next();
@@ -407,7 +449,7 @@ class ClaudeCodeSession implements BackendSession {
           initSent = true;
           const tools = Array.isArray(message.tools) ? message.tools.filter((tool): tool is string => typeof tool === "string") : [];
           const foreign = tools.filter((tool) => !tool.startsWith(CLAUDE_TOOL_PREFIX));
-          if (foreign.length > 0) {
+          if (!native && foreign.length > 0) {
             yield fail(providerError("protocol_mismatch", `backend exposes built-in tools (${foreign.slice(0, 5).join(", ")}); the session was stopped`));
             await this.stopChild();
             return;
@@ -439,6 +481,14 @@ class ClaudeCodeSession implements BackendSession {
           continue;
         }
 
+        // Native mode: a subagent's (Task) own stream is Claude's business, not this conversation's.
+        if (native && typeof message.parent_tool_use_id === "string" && message.parent_tool_use_id !== "") continue;
+
+        if (type === "user") {
+          if (native) this.observeResults(message, nativeCalls);
+          continue;
+        }
+
         if (type === "stream_event") {
           const event = record(message.event);
           if (event === undefined) continue;
@@ -447,11 +497,18 @@ class ClaudeCodeSession implements BackendSession {
             const base = nextIndex;
             mapper = new MessagesMapper(() => base, assembler);
             sawStreamForCall = true;
+            skippedBlocks = new Set();
           }
           const block = record(event.content_block);
+          const blockIndex = numberField(event, "index");
+          if (native && blockIndex !== undefined && skippedBlocks.has(blockIndex)) continue;
           let payload = event;
           if (eventType === "content_block_start" && stringField(block, "type") === "tool_use") {
             const name = stringField(block, "name") ?? "";
+            if (native && !name.startsWith(CLAUDE_TOOL_PREFIX)) {
+              if (blockIndex !== undefined) skippedBlocks.add(blockIndex);
+              continue;
+            }
             if (!name.startsWith(CLAUDE_TOOL_PREFIX)) {
               yield fail(providerError("protocol_mismatch", `backend called a non-Synorch tool: ${name}`));
               await this.stopChild();
@@ -475,6 +532,7 @@ class ClaudeCodeSession implements BackendSession {
 
         if (type === "assistant") {
           const content = Array.isArray(record(message.message)?.content) ? (record(message.message)?.content as unknown[]) : [];
+          if (native) this.observeCalls(content, nativeCalls);
           if (!sawStreamForCall) {
             for (const [offset, raw] of content.entries()) {
               const block = record(raw);
@@ -484,6 +542,7 @@ class ClaudeCodeSession implements BackendSession {
               else if (blockType === "thinking") yield assembler.thinking(index, stringField(block, "thinking") ?? "");
               else if (blockType === "tool_use") {
                 const name = stringField(block, "name") ?? "";
+                if (native && !name.startsWith(CLAUDE_TOOL_PREFIX)) continue;
                 if (!name.startsWith(CLAUDE_TOOL_PREFIX)) {
                   yield fail(providerError("protocol_mismatch", `backend called a non-Synorch tool: ${name}`));
                   await this.stopChild();
@@ -557,6 +616,60 @@ class ClaudeCodeSession implements BackendSession {
     yield fail(classifyBackendText(detail, "provider_internal", detail === "" ? `backend turn failed (${subtype ?? "unknown"})` : detail));
   }
 
+  /** Native mode: a built-in tool_use (Claude runs it) becomes a `started` observation, never a Synorch call. */
+  private observeCalls(content: readonly unknown[], calls: Map<string, { readonly name: string; readonly input: Readonly<Record<string, unknown>> }>): void {
+    for (const raw of content) {
+      const block = record(raw);
+      if (stringField(block, "type") !== "tool_use") continue;
+      const name = stringField(block, "name") ?? "";
+      const id = stringField(block, "id");
+      if (name === "" || name.startsWith(CLAUDE_TOOL_PREFIX) || id === undefined || calls.has(id)) continue;
+      const input = record(block?.input) ?? {};
+      calls.set(id, { name, input });
+      this.emitObservation({ phase: "started", toolUseId: id, toolName: name, inputSummary: claudeInputSummary(name, input) });
+    }
+  }
+
+  /** Native mode: `tool_result` blocks of built-in calls become `finished` observations; web results fire the taint hook. */
+  private observeResults(message: Record<string, unknown>, calls: Map<string, { readonly name: string; readonly input: Readonly<Record<string, unknown>> }>): void {
+    const content = record(message.message)?.content;
+    if (!Array.isArray(content)) return;
+    for (const raw of content) {
+      const block = record(raw);
+      if (stringField(block, "type") !== "tool_result") continue;
+      const id = stringField(block, "tool_use_id");
+      const call = id === undefined ? undefined : calls.get(id);
+      if (id === undefined || call === undefined) continue;
+      calls.delete(id);
+      const isError = block?.is_error === true;
+      const counts = isError ? undefined : claudeLineCounts(call.name, call.input);
+      if (isClaudeWebTool(call.name) && !isError) {
+        try {
+          this.config.onWebContentRead();
+        } catch {
+          // A failing listener never breaks the turn.
+        }
+      }
+      this.emitObservation({
+        phase: "finished",
+        toolUseId: id,
+        toolName: call.name,
+        inputSummary: claudeInputSummary(call.name, call.input),
+        isError,
+        resultSummary: claudeResultSummary(call.name, toolResultText(block?.content), isError),
+        ...(counts === undefined ? {} : { linesAdded: counts.added, linesRemoved: counts.removed }),
+      });
+    }
+  }
+
+  private emitObservation(observation: Parameters<NonNullable<BackendBridges["observe"]>>[0]): void {
+    try {
+      this.active?.observe?.(observation);
+    } catch {
+      // Observation is audit and display only.
+    }
+  }
+
   private rememberCall(name: string, id: string | undefined): void {
     if (id === undefined || this.knownCallIds.has(id)) return;
     this.knownCallIds.add(id);
@@ -607,6 +720,10 @@ class ClaudeCodeSession implements BackendSession {
   private async permission(toolName: string, input: Readonly<Record<string, unknown>>, signal: AbortSignal) {
     const active = this.active;
     const stripped = toolName.startsWith(CLAUDE_TOOL_PREFIX) ? toolName.slice(CLAUDE_TOOL_PREFIX.length) : undefined;
+    if (active !== undefined && stripped === undefined && this.config.native && toolName !== "") {
+      // Native mode: Claude's own permission prompt for a built-in goes to Synorch's approval broker.
+      return active.approvals.decide(toolName, input, AbortSignal.any([signal, active.signal]));
+    }
     if (active === undefined || stripped === undefined || !active.tools.list().some((tool) => tool.name === stripped)) {
       return { allow: false, reason: "only Synorch bridge tools are permitted" };
     }
@@ -624,6 +741,7 @@ class ClaudeCodeSession implements BackendSession {
       maxTurns: this.options.maxTurns,
       sessionId: this.backendSessionId,
       resume: this.resume,
+      ...(this.config.native ? { native: { permissionMode: claudePermissionMode(this.config.permissionMode()), addDir: this.options.cwd } } : {}),
     });
     let child: ChildProcess;
     try {

@@ -13,7 +13,12 @@ import type { BlobStore } from "./store.ts";
  * execute -> redact/bound -> record -> model.
  */
 
-export const TOOL_EFFECTS = ["read", "workspace-write", "exec", "external-write", "control"] as const;
+/**
+ * `network-read` (K4.1): reads from the internet without writing anywhere (`web_search`,
+ * `web_fetch`). Allowed in every mode's effect matrix; the real decision is the network policy
+ * (domain allowlist, "always allow this domain" grants, permission-mode prompts) and the rails.
+ */
+export const TOOL_EFFECTS = ["read", "workspace-write", "exec", "external-write", "control", "network-read"] as const;
 export const toolEffectSchema = z.enum(TOOL_EFFECTS);
 export type ToolEffect = (typeof TOOL_EFFECTS)[number];
 
@@ -52,6 +57,9 @@ export const toolMetadataSchema = z
     }
     if (tool.effect === "read" && tool.network === "required") {
       context.addIssue({ code: "custom", path: ["network"], message: "a network-requiring tool cannot be classified read" });
+    }
+    if (tool.effect === "network-read" && tool.network === "none") {
+      context.addIssue({ code: "custom", path: ["network"], message: "a network-read tool uses the network" });
     }
     if (tool.ends_turn === true && tool.effect !== "control") {
       context.addIssue({ code: "custom", path: ["ends_turn"], message: "only control tools can end a turn" });

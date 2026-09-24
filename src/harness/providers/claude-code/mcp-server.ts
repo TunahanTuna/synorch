@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Socket } from "node:net";
-import type { ToolBridgeCall, ToolBridgeResult, ToolDescriptor } from "../../contracts/index.ts";
+import type { BackendApprovalDecision, ToolBridgeCall, ToolBridgeResult, ToolDescriptor } from "../../contracts/index.ts";
 
 /** MCP protocol revisions this server answers with; the client's requested one is echoed when known. */
 export const MCP_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
@@ -16,7 +16,7 @@ const JSONRPC_INVALID_PARAMS = -32602;
 export interface McpToolHost {
   list(): readonly ToolDescriptor[];
   call(call: ToolBridgeCall & { readonly rpcId: string }, signal: AbortSignal): Promise<ToolBridgeResult>;
-  permission(toolName: string, input: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<{ readonly allow: boolean; readonly reason: string }>;
+  permission(toolName: string, input: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<BackendApprovalDecision>;
 }
 
 type JsonRpcId = string | number | null;
@@ -103,13 +103,14 @@ export class McpToolServer {
     if (name === PERMISSION_TOOL_NAME) {
       const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
       const toolInput = typeof input.input === "object" && input.input !== null ? (input.input as Record<string, unknown>) : {};
-      let decision: { readonly allow: boolean; readonly reason: string };
+      let decision: BackendApprovalDecision;
       try {
         decision = await this.host.permission(toolName, toolInput, signal);
       } catch (error: unknown) {
         decision = { allow: false, reason: error instanceof Error ? error.message : "permission check failed" };
       }
-      const payload = decision.allow ? { behavior: "allow", updatedInput: toolInput } : { behavior: "deny", message: decision.reason };
+      // Claude Code's permission-prompt-tool contract: {behavior:"allow", updatedInput} or {behavior:"deny", message}.
+      const payload = decision.allow ? { behavior: "allow", updatedInput: decision.updatedInput ?? toolInput } : { behavior: "deny", message: decision.reason };
       return this.result(id, { content: [{ type: "text", text: JSON.stringify(payload) }], isError: false });
     }
     if (!this.host.list().some((tool) => tool.name === name)) {

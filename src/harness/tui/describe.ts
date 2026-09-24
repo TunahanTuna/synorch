@@ -112,6 +112,13 @@ export function describeEvent(event: SessionEvent, context: DescribeContext = {}
         event.data.state === "succeeded" ? "success" : "warning",
         `Tool ${event.data.state} in ${event.data.duration_ms} ms${event.data.result.error === undefined ? "" : `: ${event.data.result.error.message}`}`,
       );
+    case "backend/tool_observed":
+      return event.data.phase === "finished"
+        ? line(
+            event.data.is_error === true ? "warning" : "success",
+            `Claude ${event.data.tool_name} ${event.data.input_summary}${event.data.result_summary === undefined ? "" : ` · ${event.data.result_summary}`}`,
+          )
+        : undefined;
     case "tool/interrupted":
       return line("warning", `Tool call ${short(event.data.tool_call_id)} was interrupted; outcome unknown`);
     case "context/compacted":

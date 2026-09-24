@@ -45,13 +45,13 @@ type NetworkPolicy = EffectivePolicy["network"];
 
 /** What each role may do at most, before mode, scope, sandbox and configuration narrow it. */
 export const ROLE_EFFECT_CEILINGS: { readonly [R in AgentRole]: EffectMatrix } = {
-  orchestrator: { read: "allow", "workspace-write": "allow", exec: "deny", "external-write": "allow", control: "allow" },
-  explorer: { read: "allow", "workspace-write": "deny", exec: "deny", "external-write": "deny", control: "allow" },
-  reviewer: { read: "allow", "workspace-write": "deny", exec: "allow", "external-write": "deny", control: "allow" },
-  implementer: { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "allow", control: "allow" },
-  debugger: { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "allow", control: "allow" },
+  orchestrator: { read: "allow", "workspace-write": "allow", exec: "deny", "external-write": "allow", control: "allow", "network-read": "allow" },
+  explorer: { read: "allow", "workspace-write": "deny", exec: "deny", "external-write": "deny", control: "allow", "network-read": "allow" },
+  reviewer: { read: "allow", "workspace-write": "deny", exec: "allow", "external-write": "deny", control: "allow", "network-read": "allow" },
+  implementer: { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "allow", control: "allow", "network-read": "allow" },
+  debugger: { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "allow", control: "allow", "network-read": "allow" },
   // ADR-21 D3: the conversation agent edits the main tree and runs commands; mode, scope, sandbox, trust and rails still narrow it.
-  session: { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "allow", control: "allow" },
+  session: { read: "allow", "workspace-write": "allow", exec: "allow", "external-write": "allow", control: "allow", "network-read": "allow" },
 };
 
 /**
@@ -88,6 +88,18 @@ export interface PolicyEngineOptions {
    * every other mode, and every read-only role or the orchestrator, keeps the default-deny policy.
    */
   readonly permissionMode?: () => PermissionMode | undefined;
+  /**
+   * K4.1: web domains the user allowed for `web_fetch` ("always allow this domain", user scope,
+   * global) plus the built-in documentation domains; `*.example.com` matches subdomains. They
+   * extend the network allowlist for `network-read` actions only.
+   */
+  readonly webDomains?: () => readonly string[];
+  /**
+   * K4.1 prompt-injection shield: true once web content entered the current turn. An outward-facing
+   * action (git push, gh writes, HTTP writes, remote copy) the policy would allow then asks once
+   * more, even in full access mode.
+   */
+  readonly webContentRead?: () => boolean;
 }
 
 /**
@@ -140,6 +152,7 @@ function computePolicy(inputs: PolicyInputs, workspaceTrusted: boolean, enginePe
   if (effects["external-write"] === "allow") {
     effects["external-write"] = mode === "ask" ? "ask" : allowlist.length > 0 ? "allow" : "deny";
   }
+  if (effects["network-read"] === "allow" && mode === "ask") effects["network-read"] = "ask";
   if (requireFullSandbox && inputs.sandbox.enforcement !== "full") {
     effects["workspace-write"] = "deny";
     effects.exec = "deny";
@@ -220,7 +233,11 @@ function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, optio
 
   evaluatePaths(action, policy, options, deny);
   const { effect, confinement } = evaluateCommand(action, policy, deny);
-  evaluateNetwork(action, policy.network, deny);
+  if (action.egress_findings !== undefined) {
+    deny("platform", "secret-egress", `the outbound request carries what looks like a secret (${action.egress_findings.join(", ")})`.slice(0, 500), "secret-egress");
+  }
+  if (action.effect === "network-read") evaluateNetworkRead(action, policy, options, builder, deny);
+  else evaluateNetwork(action, policy.network, deny);
 
   const configured = policy.effects[effect];
   const sandboxShort = policy.require_full_sandbox && policy.sandbox.enforcement !== "full" && (effect === "workspace-write" || effect === "exec");
@@ -243,6 +260,12 @@ function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, optio
   }
 
   liftByPermission(builder, policy, isReadOnlyWorker(action.role, policy));
+
+  if (builder.decision === "allow" && effect === "external-write" && options.webContentRead?.() === true) {
+    // Owner decision 2026-09-24 (K4): web content read in this turn may carry injected instructions.
+    builder.decision = "ask";
+    builder.reasons.push({ code: "web-content-shield", layer: "approval", message: "web content was read in this turn; an action that sends data outside this machine asks you first, in every mode" });
+  }
 
   if (builder.reasons.length === 0) {
     const writes = action.paths.filter((entry) => entry.access === "write");
@@ -430,6 +453,47 @@ function evaluateNetwork(action: NormalizedAction, network: NetworkPolicy, deny:
   const allowed = new Set(network.hosts.map((host) => host.toLowerCase()));
   const blocked = action.network_hosts.filter((host) => !allowed.has(host.toLowerCase()));
   if (blocked.length > 0) deny("user", "host-not-allowlisted", `hosts outside the allowlist: ${blocked.join(", ")}`);
+}
+
+/** `example.com` matches itself; `*.example.com` matches its subdomains and itself. */
+export function hostMatches(host: string, pattern: string): boolean {
+  const wanted = pattern.trim().toLowerCase().replace(/\.$/, "");
+  const actual = host.toLowerCase().replace(/\.$/, "");
+  if (wanted.startsWith("*.")) {
+    const base = wanted.slice(2);
+    return actual === base || actual.endsWith(`.${base}`);
+  }
+  return actual === wanted;
+}
+
+/**
+ * K4.1 network policy for `network-read` (web_search / web_fetch), by permission mode (owner
+ * decisions 2026-09-24): `ask` prompts every call (effect matrix), `auto` searches freely and asks
+ * at a fetch of a domain outside the allowlist ("always allow this domain"), `full` is free, `plan`
+ * searches freely and asks at a new-domain fetch, headless allows only the allowlist. Workers use
+ * the session's mode. Hard rails (SSRF, secret egress) are enforced before and inside the tool.
+ */
+function evaluateNetworkRead(action: NormalizedAction, policy: EffectivePolicy, options: PolicyEngineOptions, builder: DecisionBuilder, deny: Deny): void {
+  const mode = policy.permission_mode ?? (policy.role === "session" ? undefined : options.permissionMode?.());
+  if (action.network_purpose !== "fetch" || action.network_hosts.length === 0) {
+    if (mode === undefined && policy.network.mode === "deny") {
+      deny("user", "network-denied", "web search is off in a run without a permission mode; set policy.network.mode (allowlist or allow) in the user configuration");
+    }
+    return;
+  }
+  const granted = [...(policy.network.mode === "allowlist" ? policy.network.hosts : []), ...(options.webDomains?.() ?? [])];
+  const blocked = policy.network.mode === "allow" ? [] : action.network_hosts.filter((host) => !granted.some((pattern) => hostMatches(host, pattern)));
+  if (blocked.length === 0) return;
+  if (mode === "full") {
+    builder.reasons.push({ code: "permission-full-access", layer: "user", message: `full access mode: fetching ${blocked.join(", ")} without a prompt` });
+    return;
+  }
+  if (mode === undefined) {
+    deny("user", "host-not-allowlisted", `web hosts outside the allowlist: ${blocked.join(", ")} (headless runs fetch only allowlisted domains)`);
+    return;
+  }
+  if (builder.decision === "allow") builder.decision = "ask";
+  builder.reasons.push({ code: "network-new-domain", layer: "approval", message: `first fetch from ${blocked.join(", ")}: allow once, or always allow this domain` });
 }
 
 function isAllowlisted(action: NormalizedAction, allowlist: readonly string[]): boolean {

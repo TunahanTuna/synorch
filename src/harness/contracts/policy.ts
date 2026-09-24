@@ -89,11 +89,13 @@ export function execConfinementFor(enforcement: SandboxEnforcement, mode: Policy
 export const effectDecisionSchema = z.enum(["allow", "ask", "deny"]);
 export type EffectDecision = z.infer<typeof effectDecisionSchema>;
 
-const effectMatrixSchema = z.strictObject(
-  Object.fromEntries(TOOL_EFFECTS.map((effect) => [effect, effectDecisionSchema])) as {
+const effectMatrixSchema = z.strictObject({
+  ...(Object.fromEntries(TOOL_EFFECTS.map((effect) => [effect, effectDecisionSchema])) as {
     [E in (typeof TOOL_EFFECTS)[number]]: typeof effectDecisionSchema;
-  },
-);
+  }),
+  // Added in K4.1: a policy recorded before it (an old `policy/snapshot`) reads as "no network".
+  "network-read": effectDecisionSchema.default("deny"),
+});
 
 export const effectivePolicySchema = z
   .strictObject({
@@ -266,6 +268,10 @@ export const normalizedActionSchema = z.strictObject({
     .optional(),
   network_hosts: z.array(z.string().min(1).max(253)),
   destructive: z.boolean(),
+  /** `network-read` actions (K4.1): a web search (no host) or a page fetch of `network_hosts` (`tool/policy_decided` v3). */
+  network_purpose: z.enum(["search", "fetch"]).optional(),
+  /** Secret-looking fragments found in an outbound URL or query; any entry is the `secret-egress` hard rail (v3). */
+  egress_findings: z.array(z.string().min(1).max(200)).min(1).max(16).optional(),
 });
 export type NormalizedAction = z.infer<typeof normalizedActionSchema>;
 
@@ -305,6 +311,8 @@ export const approvalRequestSchema = z.strictObject({
   scope: z.enum(["once", "plan", "session"]),
   /** The command an `action` approval would run (argv, redacted); the prompt offers "always allow <prefix>" from it. */
   command: z.array(z.string().max(2000)).min(1).max(256).optional(),
+  /** The web hosts a `network-read` action would reach; the prompt offers "always allow <host>" (`approval/requested` v2). */
+  hosts: z.array(z.string().min(1).max(253)).min(1).max(16).optional(),
   /** Why the policy asks and what allowing does (UX-03 action card). */
   details: z.strictObject({ why: z.string().min(1).max(1000), consequence: z.string().min(1).max(1000) }).optional(),
   requested_at: timestampSchema,

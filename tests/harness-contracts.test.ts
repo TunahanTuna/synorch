@@ -302,7 +302,7 @@ test("the shared glob matcher: ** spans segments, literals cover subtrees, grant
 test("event payload versions: new fields bump the version, older versions still parse, a v1 event cannot carry a v2 field", () => {
   assert.equal(EVENT_VERSIONS["session/resumed"], 2);
   assert.equal(EVENT_VERSIONS["attempt/started"], 3, "v3 added isolation reuse/fallback/overlay/dependency links/submodules (ADR-19)");
-  assert.equal(EVENT_VERSIONS["tool/policy_decided"], 2);
+  assert.equal(EVENT_VERSIONS["tool/policy_decided"], 3);
   assert.equal(EVENT_VERSIONS["task/integrated"], 1);
   assert.equal(EVENT_VERSIONS["session/closed"], 1);
   for (const [type, fields] of Object.entries(EVENT_FIELD_VERSIONS)) {

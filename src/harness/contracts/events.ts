@@ -382,6 +382,25 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
     "tool/interrupted",
     z.strictObject({ tool_call_id: toolCallIdSchema, outcome: z.literal("unknown"), idempotent: z.boolean() }),
   ),
+  /**
+   * Claude Code native mode (owner revision 2026-09-24): a built-in tool the backend ran itself
+   * (Bash, Edit, WebFetch, ...), observed from its stream for audit and display. It is not a Synorch
+   * tool call: no gateway decision, never part of the model conversation history.
+   */
+  eventOf(
+    "backend/tool_observed",
+    z.strictObject({
+      source: z.literal("claude-code-native"),
+      phase: z.enum(["started", "finished"]),
+      tool_use_id: z.string().min(1).max(200),
+      tool_name: z.string().min(1).max(200),
+      input_summary: z.string().max(2000),
+      is_error: z.boolean().optional(),
+      result_summary: z.string().max(4000).optional(),
+      lines_added: z.int().min(0).optional(),
+      lines_removed: z.int().min(0).optional(),
+    }),
+  ),
   eventOf(
     "context/compacted",
     z.strictObject({
@@ -470,6 +489,22 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
   ),
   /** `/allow <prefix>`: the user extended the conversation agent's exec allowlist for this workspace (user scope). */
   eventOf("command/allowed", z.strictObject({ workspace_root: trustRootSchema, prefix: z.string().min(1).max(500) })),
+  /** K4.1: the user chose "always allow this domain" for web fetches; persisted in the user scope for every project. */
+  eventOf("network/host_allowed", z.strictObject({ host: z.string().min(1).max(253), scope: z.enum(["global"]) })),
+  /**
+   * K4.1: a web search a provider ran natively inside a model turn (OpenAI hosted `web_search`) or
+   * a backend of Synorch's `web_search` tool: the query and how many sources came back. The content
+   * itself stays in the model turn or the tool result.
+   */
+  eventOf(
+    "web/searched",
+    z.strictObject({
+      provider: z.string().min(1).max(64),
+      query: z.string().max(500),
+      sources: z.int().min(0).max(1000),
+      request_id: requestIdSchema.optional(),
+    }),
+  ),
 ]);
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
 export type SessionEventType = SessionEvent["type"];
@@ -493,7 +528,8 @@ export const EVENT_FIELD_VERSIONS = {
   },
   "tool/call_proposed": { ref: 2 },
   "tool/result_recorded": { "result.digest": 2 },
-  "tool/policy_decided": { "action.escapes": 2 },
+  "tool/policy_decided": { "action.escapes": 2, "action.network_purpose": 3, "action.egress_findings": 3 },
+  "approval/requested": { "request.hosts": 2 },
   "policy/snapshot": { "policy.exec_confinement": 2, "policy.verification_commands": 2, "policy.workspace_trusted": 3 },
 } as const satisfies { readonly [T in SessionEventType]?: Readonly<Record<string, number>> };
 

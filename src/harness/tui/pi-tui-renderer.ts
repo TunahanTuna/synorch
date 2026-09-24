@@ -13,6 +13,7 @@ import {
   Text,
   TuiMainScreen,
   truncateToWidth,
+  visibleWidth,
   type Component,
   type Focusable,
   type MarkdownTheme,
@@ -78,8 +79,21 @@ import { imagePathFromPaste, readClipboardImage, type ClipboardImage } from "./i
 import { DEFAULT_COMMAND_PALETTE, mergeCommands, requiresArgument } from "./input/commands.ts";
 import { WorkspaceFileIndex } from "./input/file-index.ts";
 import { isMouseSequence, MOUSE_DISABLE_SEQUENCE, MOUSE_ENABLE_SEQUENCE, parseSgrMouse, TranscriptViewport, type MouseInput } from "./input/mouse.ts";
-import type { HarnessView, OrchestrationView, ViewHost } from "../contracts/views.ts";
-import { LiveBoardComponent, StaticViewComponent, type ViewStyleOptions } from "./views/index.ts";
+import type { HarnessView, OrchestrationTaskView, OrchestrationView, ViewHost, WorkerAssignmentView, WorkerSeam, WorkerStreamEvent } from "../contracts/views.ts";
+import {
+  cycleWorker,
+  DelegationComponent,
+  initialSelection,
+  LiveBoardComponent,
+  moveSelection,
+  renderAssignment,
+  renderWorkerHeader,
+  StaticViewComponent,
+  UserToWorkerComponent,
+  viewContext,
+  type SelectionMove,
+  type ViewStyleOptions,
+} from "./views/index.ts";
 
 /**
  * The interactive renderer (ADR-04): the only file that imports `@earendil-works/pi-tui`. It keeps
@@ -205,6 +219,167 @@ export class ChunkedTerminal implements Terminal {
 
 function fit(line: string, width: number): string {
   return truncateToWidth(line, Math.max(1, width));
+}
+
+function errorText(error: unknown): string {
+  return sanitizeInline(error instanceof Error ? error.message : String(error), 300);
+}
+
+/**
+ * The editor with a placeholder (K1.7: `message convert-mocks…` while a worker view is open),
+ * drawn after the cursor on the empty first line.
+ */
+class ChatEditor extends Editor {
+  public placeholder: string | undefined;
+  public placeholderStyle: (text: string) => string = (text) => text;
+
+  public override render(width: number): string[] {
+    const lines = super.render(width);
+    if (this.placeholder === undefined || this.getText().length > 0 || lines.length < 3) return lines;
+    const line = lines[1] ?? "";
+    const reset = "\x1b[0m";
+    const cursorEnd = line.indexOf(reset);
+    if (cursorEnd === -1) return lines;
+    const head = line.slice(0, cursorEnd + reset.length);
+    const room = width - visibleWidth(head) - 1;
+    if (room < 4) return lines;
+    const drawn = head + this.placeholderStyle(truncateToWidth(this.placeholder, room));
+    lines[1] = drawn + " ".repeat(Math.max(0, width - visibleWidth(drawn)));
+    return lines;
+  }
+}
+
+interface ItemViewDeps {
+  readonly style: Styler;
+  readonly glyphs: GlyphSet;
+  readonly markdownTheme: MarkdownTheme;
+  readonly expanded: (itemId: string) => boolean;
+}
+
+/** One conversation item as a component; shared by the main transcript and the worker view. */
+function conversationItemView(item: ConversationItem, deps: ItemViewDeps): Component {
+  switch (item.kind) {
+    case "user":
+      return new UserMessageView(item.text, deps.style);
+    case "assistant": {
+      const view = new AssistantMessageView(new Markdown("", 0, 0, deps.markdownTheme), deps.glyphs.bullet);
+      view.setText(item.text);
+      return view;
+    }
+    case "tool":
+      return new ToolLineView(item, deps.style, deps.glyphs, () => deps.expanded(item.id));
+    case "note": {
+      const text = item.level === "error" ? deps.style.red(item.text) : item.level === "warning" ? deps.style.yellow(item.text) : deps.style.dim(item.text);
+      return new Text(text, 0, 0);
+    }
+  }
+}
+
+function updateItemView(view: Component, item: ConversationItem): void {
+  if (view instanceof AssistantMessageView && item.kind === "assistant") view.setText(item.text);
+  else if (view instanceof ToolLineView && item.kind === "tool") view.update(item);
+}
+
+interface WorkerPaneDeps extends ItemViewDeps {
+  readonly now: () => number;
+  /** The task as the live board last reported it. */
+  readonly task: (key: string) => OrchestrationTaskView | undefined;
+  /** Status word overriding the board's (optimistic `pausing…`, `cancelling…`). */
+  readonly status: (key: string) => string | undefined;
+  readonly allExpanded: () => boolean;
+  readonly rows: () => number;
+  readonly siblings: () => readonly Component[];
+}
+
+/**
+ * The worker view (K1.7): header, the pinned assignment, then the worker's live transcript with the
+ * conversation rules. It takes the transcript's place in the tree; the board stays below it. The
+ * transcript is tailed so the header and assignment stay on screen.
+ */
+class WorkerPane implements Component {
+  public readonly key: string;
+  private assignment: WorkerAssignmentView | undefined;
+  private readonly deps: WorkerPaneDeps;
+  private readonly items: Component[] = [];
+  private readonly itemViews = new Map<string, Component>();
+  private readonly presenter: ConversationPresenter;
+  private unsubscribe: (() => void) | undefined;
+
+  public constructor(key: string, deps: WorkerPaneDeps) {
+    this.key = key;
+    this.deps = deps;
+    this.presenter = new ConversationPresenter({ glyphs: deps.glyphs, echoesUser: true, now: deps.now });
+  }
+
+  public attach(seam: WorkerSeam | undefined): void {
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
+    if (seam === undefined) {
+      this.applyOp(this.presenter.note("info", "No worker transcript is connected yet."));
+      return;
+    }
+    try {
+      this.unsubscribe = seam.stream.subscribe(this.key, (event) => this.apply(event));
+    } catch (error) {
+      this.applyOp(this.presenter.note("error", `Could not open the worker's transcript: ${error instanceof Error ? error.message : String(error)}`));
+    }
+  }
+
+  public dispose(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
+  }
+
+  public apply(event: WorkerStreamEvent): void {
+    if (event.kind === "assignment") {
+      this.assignment = event.assignment;
+      return;
+    }
+    for (const op of this.presenter.apply(event)) this.applyOp(op);
+  }
+
+  public addUser(text: string): void {
+    this.items.push(new UserMessageView(sanitizeTerminalText(text), this.deps.style));
+  }
+
+  public note(level: "info" | "warning" | "error", text: string): void {
+    this.applyOp(this.presenter.note(level, text));
+  }
+
+  private applyOp(op: ViewOp): void {
+    const existing = this.itemViews.get(op.item.id);
+    if (existing !== undefined) {
+      updateItemView(existing, op.item);
+      return;
+    }
+    const view = conversationItemView(op.item, this.deps);
+    this.itemViews.set(op.item.id, view);
+    this.items.push(view);
+  }
+
+  public invalidate(): void {
+    for (const item of this.items) item.invalidate();
+  }
+
+  public render(width: number): string[] {
+    const ctx = viewContext({ glyphs: this.deps.glyphs, color: this.deps.style, width, now: this.deps.now() });
+    const task = this.deps.task(this.key) ?? { key: this.key, role: "worker", state: "running" as const };
+    const top = ["", ...renderWorkerHeader(task, ctx, { status: this.deps.status(this.key) }), ...renderAssignment(this.assignment, ctx, { expanded: this.deps.allExpanded() })];
+    const body: string[] = [];
+    for (const item of this.items) body.push(...item.render(width));
+    if (body.length === 0) body.push("", fit(this.deps.style.dim("  no worker output yet"), width));
+    // Tail the transcript so the header and the assignment stay pinned on screen.
+    const siblings = this.deps.siblings();
+    let others = 0;
+    for (const sibling of siblings) if (sibling !== this) others += sibling.render(width).length;
+    const room = this.deps.rows() - others - top.length - 1;
+    if (room >= 3 && body.length > room) {
+      const hidden = body.length - (room - 1);
+      const up = this.deps.glyphs.name === "ascii" ? "^" : "↑";
+      return [...top, fit(this.deps.style.dim(`  ${up} ${hidden} earlier line(s)`), width), ...body.slice(hidden), ""];
+    }
+    return [...top, ...body, ""];
+  }
 }
 
 class ToolCardView implements Component {
@@ -453,7 +628,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private readonly header: Text;
   private readonly transcript = new Container();
   private readonly status: StatusBar;
-  private readonly editor: Editor;
+  private readonly editor: ChatEditor;
   private readonly markdownTheme: MarkdownTheme;
   private readonly selectTheme: SelectListTheme;
   private readonly queue: RenderQueue;
@@ -492,6 +667,18 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   /** K1-U3 views: the live orchestration board sits between the transcript and the activity line. */
   private readonly boardSlot = new Container();
   private board: LiveBoardComponent | undefined;
+  /** K1.7 worker drill-in: the seam, the board selection, the open worker view and its input chrome. */
+  private workerSeam: WorkerSeam | undefined;
+  private lastBoard: OrchestrationView | undefined;
+  private selecting = false;
+  private selectedKey: string | undefined;
+  private workerPane: WorkerPane | undefined;
+  private readonly inputHint = new Text("", 0, 0);
+  private readonly localPaused = new Set<string>();
+  private readonly localCancelled = new Set<string>();
+  private cancelArmed: { readonly key: string; readonly at: number } | undefined;
+  private readonly delegationIds = new WeakMap<DelegationComponent, string>();
+  private delegationCount = 0;
 
   public constructor(options: PiTuiRendererOptions) {
     this.options = options;
@@ -530,7 +717,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       options.view === "conversation"
         ? new ConversationPresenter({ glyphs: options.glyphs ?? GLYPH_SETS.rich, echoesUser: true, debug: options.debug === true, now: () => this.now() })
         : undefined;
-    this.editor = new Editor(this.tui, { borderColor: (text) => style.dim(text), selectList: this.selectTheme });
+    this.editor = new ChatEditor(this.tui, { borderColor: (text) => style.dim(text), selectList: this.selectTheme });
+    this.editor.placeholderStyle = (text) => style.dim(text);
     this.editor.onSubmit = (text) => this.submit(text);
     this.completions = new InputCompletionProvider(mergeCommands(DEFAULT_COMMAND_PALETTE), options.fileIndex);
     this.editor.setAutocompleteProvider(this.completions);
@@ -621,6 +809,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       this.tui.addChild(this.viewport);
       this.tui.addChild(this.boardSlot);
       this.tui.addChild(this.status);
+      this.tui.addChild(this.inputHint);
       this.tui.addChild(this.editor);
     }
     this.startInput(header);
@@ -667,7 +856,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     this.tui.addChild(this.viewport);
     this.tui.addChild(this.boardSlot);
     this.tui.addChild(new ActivityLineView(presenter, this.style, () => this.now()));
-    this.tui.addChild(new Text("", 0, 0));
+    this.tui.addChild(this.inputHint);
     this.tui.addChild(this.editor);
     this.tui.addChild(new FooterView(() => footerText(presenter.footer(), { ...this.footerLabel, glyphs: presenter.glyphs, mode: this.modeLabel(presenter.glyphs.sep) }), this.style));
   }
@@ -686,23 +875,16 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   }
 
   private viewFor(item: ConversationItem): Component {
-    const glyphs = this.presenter?.glyphs ?? GLYPH_SETS.rich;
-    switch (item.kind) {
-      case "user":
-        return new UserMessageView(item.text, this.style);
-      case "assistant": {
-        const view = new AssistantMessageView(new Markdown("", 0, 0, this.markdownTheme), glyphs.bullet);
-        view.setText(item.text);
-        return view;
-      }
-      case "tool":
-        return new ToolLineView(item, this.style, glyphs, () => this.expanded || this.expandedItems.has(item.id));
-      case "note": {
-        const text =
-          item.level === "error" ? this.style.red(item.text) : item.level === "warning" ? this.style.yellow(item.text) : this.style.dim(item.text);
-        return new Text(text, 0, 0);
-      }
-    }
+    return conversationItemView(item, this.itemDeps());
+  }
+
+  private itemDeps(): ItemViewDeps {
+    return {
+      style: this.style,
+      glyphs: this.presenter?.glyphs ?? this.options.glyphs ?? GLYPH_SETS.rich,
+      markdownTheme: this.markdownTheme,
+      expanded: (itemId) => this.expanded || this.expandedItems.has(itemId),
+    };
   }
 
   private viewStyle(): ViewStyleOptions {
@@ -712,7 +894,14 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   /** Pins a card (usage, evidence, action, why, or a board summary) once to the transcript. */
   public showView(view: HarnessView): void {
     if (this.stopped) return;
-    this.transcript.addChild(new StaticViewComponent(view, this.viewStyle()));
+    if (view.kind === "delegation") {
+      const id = `delegation-${(this.delegationCount += 1)}`;
+      const line = new DelegationComponent(view, this.viewStyle(), () => this.expanded || this.expandedItems.has(id));
+      this.delegationIds.set(line, id);
+      this.transcript.addChild(line);
+    } else {
+      this.transcript.addChild(new StaticViewComponent(view, this.viewStyle()));
+    }
     this.tui.requestRender();
   }
 
@@ -726,11 +915,13 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   /** Keeps one live board in place; a `done` board collapses to its summary, pinned once. */
   public setBoard(view: OrchestrationView | undefined): void {
     if (this.stopped) return;
+    if (view !== undefined) this.lastBoard = view;
     if (view === undefined || view.done) {
       // A done board is pinned once: only the live board it replaces is collapsed; later done updates are ignored.
       const live = this.board !== undefined;
       this.boardSlot.clear();
       this.board = undefined;
+      this.selecting = false;
       if (view !== undefined && live) this.transcript.addChild(new StaticViewComponent(view, this.viewStyle()));
     } else if (this.board === undefined) {
       this.board = new LiveBoardComponent(view, this.viewStyle());
@@ -738,6 +929,14 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     } else {
       this.board.setView(view);
     }
+    if (view !== undefined) {
+      // The board confirms optimistic pause / cancel states.
+      for (const task of view.tasks) {
+        if (task.paused !== undefined) this.localPaused.delete(task.key);
+        if (task.state === "cancelled" || task.state === "completed" || task.state === "failed") this.localCancelled.delete(task.key);
+      }
+    }
+    this.syncBoardSelection();
     this.updateSpinner();
     this.tui.requestRender();
   }
@@ -747,8 +946,277 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     return this.board?.mode;
   }
 
+  // ---- K1.7 worker drill-in -------------------------------------------------------------------
+
+  /** Connects the worker transcripts and controls; an open worker view re-subscribes. */
+  public connectWorkers(seam: WorkerSeam | undefined): void {
+    this.workerSeam = seam;
+    this.workerPane?.attach(seam);
+    this.updateInputChrome();
+    this.tui.requestRender();
+  }
+
+  /** The selected task key on the board / graph (undefined when nothing is selected). */
+  public get selectedTask(): string | undefined {
+    return this.selecting ? this.selectedKey : undefined;
+  }
+
+  /** Key of the open worker view, if any. */
+  public get openWorker(): string | undefined {
+    return this.workerPane?.key;
+  }
+
+  /** Opens the worker view of a task the board knows; false otherwise. */
+  public openWorkerView(taskKey: string): boolean {
+    if (this.stopped) return false;
+    const task = this.findTask(taskKey);
+    if (task === undefined) return false;
+    const previous = this.workerPane;
+    const deps: WorkerPaneDeps = {
+      ...this.itemDeps(),
+      now: () => this.now(),
+      task: (key) => this.findTask(key),
+      status: (key) => this.optimisticStatus(key),
+      allExpanded: () => this.expanded,
+      rows: () => this.terminal.rows,
+      siblings: () => this.tui.children,
+    };
+    const pane = new WorkerPane(task.key, deps);
+    const children = this.tui.children;
+    const slot = children.indexOf(previous ?? this.viewport);
+    if (slot === -1) return false;
+    previous?.dispose();
+    children[slot] = pane;
+    this.workerPane = pane;
+    this.selecting = false;
+    this.selectedKey = task.key;
+    this.cancelArmed = undefined;
+    pane.attach(this.workerSeam);
+    this.syncBoardSelection();
+    this.updateInputChrome();
+    this.updateSpinner();
+    this.tui.requestRender(true);
+    return true;
+  }
+
+  /** Back to the main session. */
+  public closeWorkerView(): void {
+    const pane = this.workerPane;
+    if (pane === undefined) return;
+    pane.dispose();
+    const children = this.tui.children;
+    const slot = children.indexOf(pane);
+    if (slot !== -1) children[slot] = this.viewport;
+    this.workerPane = undefined;
+    this.cancelArmed = undefined;
+    this.selecting = false;
+    this.selectedKey = undefined;
+    this.syncBoardSelection();
+    this.updateInputChrome();
+    this.updateSpinner();
+    this.tui.requestRender(true);
+  }
+
+  private findTask(key: string): OrchestrationTaskView | undefined {
+    return (this.board?.current ?? this.lastBoard)?.tasks.find((task) => task.key === key);
+  }
+
+  private optimisticStatus(key: string): string | undefined {
+    if (this.localCancelled.has(key)) return "cancelling…";
+    const task = this.findTask(key);
+    if (task?.paused === undefined && this.localPaused.has(key)) return "paused";
+    return undefined;
+  }
+
+  private isPaused(key: string): boolean {
+    const task = this.findTask(key);
+    return task?.paused ?? this.localPaused.has(key);
+  }
+
+  /** Mirrors the selection (or the open worker) onto the live board. */
+  private syncBoardSelection(): void {
+    const board = this.board;
+    if (board === undefined) return;
+    if (this.selectedKey !== undefined && !board.current.tasks.some((task) => task.key === this.selectedKey) && this.workerPane === undefined) {
+      this.selecting = false;
+      this.selectedKey = undefined;
+    }
+    board.selecting = this.selecting;
+    board.selected = this.selecting || this.workerPane !== undefined ? this.selectedKey : undefined;
+    const sep = ` ${(this.presenter?.glyphs ?? this.options.glyphs ?? GLYPH_SETS.rich).sep} `;
+    board.hint = this.workerPane === undefined ? undefined : ["tab next", "g graph", "esc back"].join(sep);
+  }
+
+  /** Editor placeholder, border and the hint line above it while a worker view is open. */
+  private updateInputChrome(): void {
+    const pane = this.workerPane;
+    const sep = ` ${(this.presenter?.glyphs ?? this.options.glyphs ?? GLYPH_SETS.rich).sep} `;
+    if (pane === undefined) {
+      this.editor.placeholder = undefined;
+      this.editor.borderColor = this.borderFor(this.permission);
+      this.inputHint.setText(this.selecting && this.cancelArmed !== undefined ? this.style.yellow(`  press x again to cancel ${this.cancelArmed.key}`) : "");
+      return;
+    }
+    this.editor.placeholder = `message ${pane.key}…`;
+    this.editor.borderColor = (text) => this.style.magenta(text);
+    if (this.cancelArmed?.key === pane.key) {
+      this.inputHint.setText(this.style.yellow(`  press x again to cancel ${pane.key}`));
+      return;
+    }
+    const control = this.workerSeam?.control !== undefined;
+    const parts = control
+      ? [`enter sends to ${pane.key}`, this.isPaused(pane.key) ? "p resume" : "p pause", "x cancel", "tab next", "esc back"]
+      : ["read-only: no worker control connected", "tab next", "esc back"];
+    this.inputHint.setText(this.style.dim(`  ${parts.join(sep)}`));
+  }
+
+  private startSelecting(): void {
+    const view = this.board?.current;
+    if (view === undefined) return;
+    this.selecting = true;
+    if (this.selectedKey === undefined || !view.tasks.some((task) => task.key === this.selectedKey)) this.selectedKey = initialSelection(view);
+    this.syncBoardSelection();
+    this.tui.requestRender();
+  }
+
+  private stopSelecting(): void {
+    this.selecting = false;
+    this.cancelArmed = undefined;
+    this.syncBoardSelection();
+    this.updateInputChrome();
+    this.tui.requestRender();
+  }
+
+  private moveSelected(move: SelectionMove): void {
+    const board = this.board;
+    if (board === undefined) return;
+    this.selectedKey = moveSelection(board.current, board.mode, this.selectedKey, move);
+    this.cancelArmed = undefined;
+    this.syncBoardSelection();
+    this.updateInputChrome();
+    this.tui.requestRender();
+  }
+
+  private togglePause(key: string): void {
+    const control = this.workerSeam?.control;
+    if (control === undefined) {
+      this.workerNote(key, "warning", "Can't pause: no worker control is connected.");
+      return;
+    }
+    const paused = this.isPaused(key);
+    if (paused) this.localPaused.delete(key);
+    else this.localPaused.add(key);
+    const action = paused ? control.resume(key) : control.pause(key);
+    this.workerNote(key, "info", paused ? `Resuming ${key}.` : `Pausing ${key} at its next safe step.`);
+    action.catch((error: unknown) => {
+      if (paused) this.localPaused.add(key);
+      else this.localPaused.delete(key);
+      this.workerNote(key, "error", `Couldn't ${paused ? "resume" : "pause"} ${key}: ${errorText(error)}`);
+      this.updateInputChrome();
+      this.tui.requestRender();
+    });
+    this.updateInputChrome();
+    this.tui.requestRender();
+  }
+
+  /** `x` arms, a second `x` within three seconds cancels. */
+  private armCancel(key: string): void {
+    const control = this.workerSeam?.control;
+    if (control === undefined) {
+      this.workerNote(key, "warning", "Can't cancel: no worker control is connected.");
+      return;
+    }
+    const now = this.now();
+    if (this.cancelArmed?.key === key && now - this.cancelArmed.at <= 3000) {
+      this.cancelArmed = undefined;
+      this.localCancelled.add(key);
+      this.workerNote(key, "warning", `Cancelling ${key}.`);
+      control.cancel(key).catch((error: unknown) => {
+        this.localCancelled.delete(key);
+        this.workerNote(key, "error", `Couldn't cancel ${key}: ${errorText(error)}`);
+        this.tui.requestRender();
+      });
+    } else {
+      this.cancelArmed = { key, at: now };
+    }
+    this.updateInputChrome();
+    this.tui.requestRender();
+  }
+
+  private messageWorker(key: string, text: string): void {
+    const pane = this.workerPane;
+    pane?.addUser(text);
+    this.transcript.addChild(new UserToWorkerComponent(key, text, this.viewStyle()));
+    const control = this.workerSeam?.control;
+    if (control === undefined) {
+      pane?.note("warning", "Not sent: this worker view is read-only (no worker control is connected).");
+    } else {
+      control.message(key, text).catch((error: unknown) => {
+        this.workerNote(key, "error", `Couldn't message ${key}: ${errorText(error)}`);
+        this.tui.requestRender();
+      });
+    }
+    this.tui.requestRender();
+  }
+
+  /** A note in the open worker view of `key`, else in the main transcript. */
+  private workerNote(key: string, level: "info" | "warning" | "error", text: string): void {
+    if (this.workerPane?.key === key) this.workerPane.note(level, text);
+    else this.appendLine({ level, text });
+  }
+
+  /** K1.7 keys: board / graph selection and the worker view. Undefined passes the key on. */
+  private onWorkerKey(data: string): { consume?: boolean; data?: string } | undefined {
+    if (this.dialog !== undefined) return undefined;
+    const autocomplete = this.editor.isShowingAutocomplete();
+    const empty = this.editor.getText().length === 0 && !autocomplete;
+    const pane = this.workerPane;
+    if (pane !== undefined) {
+      if (matchesKey(data, "escape") && !autocomplete) {
+        this.closeWorkerView();
+        return { consume: true };
+      }
+      if (!empty) return undefined;
+      const view = this.board?.current ?? this.lastBoard;
+      if (data === "b") this.closeWorkerView();
+      else if ((matchesKey(data, "tab") || matchesKey(data, "shift+tab")) && view !== undefined) {
+        const next = cycleWorker(view, pane.key, matchesKey(data, "tab") ? 1 : -1);
+        if (next !== pane.key) this.openWorkerView(next);
+      } else if (data === "p") this.togglePause(pane.key);
+      else if (data === "x") this.armCancel(pane.key);
+      else return undefined;
+      return { consume: true };
+    }
+    if (this.board === undefined) return undefined;
+    if (!this.selecting) {
+      if (empty && matchesKey(data, "down")) {
+        this.startSelecting();
+        return { consume: true };
+      }
+      return undefined;
+    }
+    const key = this.selectedKey;
+    if (matchesKey(data, "escape")) this.stopSelecting();
+    else if (matchesKey(data, "up") || data === "k") this.moveSelected("up");
+    else if (matchesKey(data, "down") || data === "j") this.moveSelected("down");
+    else if (matchesKey(data, "left") || data === "h") this.moveSelected("left");
+    else if (matchesKey(data, "right") || data === "l") this.moveSelected("right");
+    else if (matchesKey(data, "tab")) this.moveSelected("next");
+    else if (matchesKey(data, "shift+tab")) this.moveSelected("previous");
+    else if (matchesKey(data, "enter") || data === "\r") {
+      if (key !== undefined) this.openWorkerView(key);
+    } else if (data === "p" && key !== undefined) this.togglePause(key);
+    else if (data === "x" && key !== undefined) this.armCancel(key);
+    else {
+      // g toggles the graph and keeps the selection; anything else leaves selection for the editor.
+      if (!(data === "g" || matchesKey(data, "ctrl+g") || matchesKey(data, "ctrl+o") || matchesKey(data, "ctrl+c"))) this.stopSelecting();
+      return undefined;
+    }
+    return { consume: true };
+  }
+
   private updateSpinner(): void {
-    const active = this.presenter?.activity() !== undefined || this.board !== undefined;
+    const active = this.presenter?.activity() !== undefined || this.board !== undefined || this.workerPane !== undefined;
     if (active && this.spinner === undefined && this.started && !this.stopped) {
       const interval = this.presenter?.glyphs.spinnerMs ?? 80;
       this.spinner = setInterval(() => this.tui.requestRender(), interval);
@@ -789,6 +1257,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     this.stopped = true;
     if (this.spinner !== undefined) clearInterval(this.spinner);
     this.spinner = undefined;
+    this.workerPane?.dispose();
     this.dialog?.cancel();
     this.removeInputListener?.();
     if (this.mouseOn && !this.selectMode) this.terminal.write(MOUSE_DISABLE_SEQUENCE);
@@ -800,6 +1269,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   }
 
   private onKey(data: string): { consume?: boolean; data?: string } | undefined {
+    const worker = isMouseSequence(data) ? undefined : this.onWorkerKey(data);
+    if (worker !== undefined) return worker;
     const input = this.onInputKey(data);
     if (input !== undefined) return input;
     if (matchesKey(data, "ctrl+c")) {
@@ -933,9 +1404,10 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     this.mousePress = undefined;
     if (press === undefined || press.y !== event.y) return;
     const hit = this.viewport.hit(event.y);
-    if (hit instanceof ToolLineView) {
-      if (this.expandedItems.has(hit.itemId)) this.expandedItems.delete(hit.itemId);
-      else this.expandedItems.add(hit.itemId);
+    const itemId = hit instanceof ToolLineView ? hit.itemId : hit instanceof DelegationComponent ? this.delegationIds.get(hit) : undefined;
+    if (itemId !== undefined) {
+      if (this.expandedItems.has(itemId)) this.expandedItems.delete(itemId);
+      else this.expandedItems.add(itemId);
       this.tui.requestRender();
     }
   }
@@ -963,7 +1435,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     if (this.permission === mode) return;
     this.permission = mode;
     this.permissionShown = true;
-    this.editor.borderColor = this.borderFor(mode);
+    if (this.workerPane === undefined) this.editor.borderColor = this.borderFor(mode);
     if (this.presenter === undefined && this.permissionListeners.size === 0) this.appendLine({ level: "info", text: `Permission mode: ${mode} (Shift+Tab cycles).` });
     for (const listener of this.permissionListeners) listener(mode);
     if (this.started && !this.stopped) this.tui.requestRender();
@@ -1133,6 +1605,11 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       return;
     }
     if (this.runLocalCommand(trimmed)) return;
+    if (this.workerPane !== undefined && !trimmed.startsWith("/")) {
+      // K1.7: in a worker view, messages go to that worker, not to the main session.
+      this.messageWorker(this.workerPane.key, trimmed);
+      return;
+    }
     const attachments = this.tray.collect(trimmed);
     this.transcript.addChild(
       this.presenter !== undefined ? new UserMessageView(sanitizeTerminalText(trimmed), this.style) : new Text(`${this.style.cyan(">")} ${sanitizeTerminalText(trimmed)}`, 0, 0),

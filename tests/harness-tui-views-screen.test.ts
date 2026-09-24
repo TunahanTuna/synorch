@@ -116,7 +116,7 @@ test("the live board updates in place, toggles to the graph with g and pins its 
   try {
     tui.setBoard(BOARD);
     let screen = await settle();
-    assert.match(screen, /● Workers · 4 tasks · 2 running\s+g graph · esc to stop/);
+    assert.match(screen, /● Workers · 4 tasks · 2 running\s+g graph · ↓ select · esc to stop/);
     assert.match(screen, /✓ map-usage\s+explorer\s+luna\s+38 files mapped, 4 use mocks\s+14s/);
     assert.match(screen, /convert-mocks\s+implementer astra editing tests\/http\.test\.ts\s+41s/);
 

@@ -1,5 +1,5 @@
 import type { OrchestrationTaskView, OrchestrationView } from "../../contracts/views.ts";
-import { isActive, paint, presentTask, type Tone } from "./board.ts";
+import { boardHint, isActive, paint, presentTask, type Tone } from "./board.ts";
 import { charWidth, clean, displayWidth, finish, padEnd, spread, truncate, type BoxGlyphs, type ViewContext } from "./kit.ts";
 
 /**
@@ -226,11 +226,11 @@ function nodeText(task: OrchestrationTaskView, all: readonly OrchestrationTaskVi
   };
 }
 
-function drawBox(grid: Grid, x: number, y: number, inner: number, text: NodeText, box: BoxGlyphs): void {
-  const borderTone: CellTone = text.active ? "accent" : "edge";
+function drawBox(grid: Grid, x: number, y: number, inner: number, text: NodeText, box: BoxGlyphs, select?: string): void {
+  const borderTone: CellTone = text.active || select !== undefined ? "accent" : "edge";
   grid.put(x, y, box.tl + box.h.repeat(inner) + box.tr, borderTone);
   grid.put(x, y + 1, box.v, borderTone);
-  grid.put(x + 1, y + 1, " ", undefined);
+  grid.put(x + 1, y + 1, select ?? " ", select === undefined ? undefined : "accent");
   grid.put(x + 2, y + 1, text.glyph, text.tone);
   grid.put(x + 3, y + 1, " ", undefined);
   grid.put(x + 4, y + 1, padEnd(text.head, inner - 3), text.active ? "bold" : undefined);
@@ -241,7 +241,7 @@ function drawBox(grid: Grid, x: number, y: number, inner: number, text: NodeText
   grid.put(x, y + 3, box.bl + box.h.repeat(inner) + box.br, borderTone);
 }
 
-function renderWide(view: OrchestrationView, layout: Layout, ctx: ViewContext): string[] | undefined {
+function renderWide(view: OrchestrationView, layout: Layout, ctx: ViewContext, selected?: string): string[] | undefined {
   const all = view.tasks;
   const texts = new Map<string, NodeText>();
   for (const entries of layout.levels) for (const entry of entries) if (entry.task !== undefined) texts.set(entry.id, nodeText(entry.task, all, ctx));
@@ -311,13 +311,14 @@ function renderWide(view: OrchestrationView, layout: Layout, ctx: ViewContext): 
     entries.forEach((entry, slot) => {
       const text = texts.get(entry.id);
       if (text === undefined) return;
-      drawBox(grid, columnX[level] ?? 0, slot * NODE_PITCH, inner[level] ?? 6, text, text.active ? ctx.glyphs.strongBox : ctx.glyphs.box);
+      const select = entry.id === selected ? ctx.glyphs.select : undefined;
+      drawBox(grid, columnX[level] ?? 0, slot * NODE_PITCH, inner[level] ?? 6, text, text.active ? ctx.glyphs.strongBox : ctx.glyphs.box, select);
     });
   });
   return grid.render(ctx);
 }
 
-function renderStacked(view: OrchestrationView, layout: Layout, ctx: ViewContext): string[] {
+function renderStacked(view: OrchestrationView, layout: Layout, ctx: ViewContext, selected?: string): string[] {
   const t = ctx.theme;
   const g = ctx.glyphs;
   const all = view.tasks;
@@ -337,8 +338,10 @@ function renderStacked(view: OrchestrationView, layout: Layout, ctx: ViewContext
       const text = nodeText(task, all, ctx);
       const deps = (task.dependsOn ?? []).filter((key) => byKey.has(key)).map((key) => clean(key, 40));
       const depText = deps.length === 0 ? "" : `${g.leftArrow} ${deps.join(", ")}`;
-      const lead = `  ${t.muted(spine ?? " ")} `;
-      const head = `${paint(t, text.tone, text.glyph)} ${text.active ? t.bold(padEnd(text.head, keyWidth)) : padEnd(text.head, keyWidth)}`;
+      const isSelected = task.key === selected;
+      const lead = `${isSelected ? t.accent(g.select) : " "} ${t.muted(spine ?? " ")} `;
+      const keyText = padEnd(text.head, keyWidth);
+      const head = `${paint(t, text.tone, text.glyph)} ${isSelected ? t.accent(t.bold(keyText)) : text.active ? t.bold(keyText) : keyText}`;
       const room = ctx.width - 4 - 2 - keyWidth - 1;
       const sub = truncate(text.sub, Math.max(4, room));
       const inline = depText !== "" && displayWidth(sub) + 2 + displayWidth(depText) <= room;
@@ -354,6 +357,17 @@ export interface GraphOptions {
   readonly fromBoard?: boolean | undefined;
   /** Force the vertical layout. */
   readonly stacked?: boolean | undefined;
+  /** Key of the selected task (K1.7): `›` in its box and an accent border. */
+  readonly selected?: string | undefined;
+  /** Replaces the header hint on the right. */
+  readonly hint?: string | undefined;
+}
+
+/** Task keys per graph level, top to bottom within a level: the order ←/→ and ↑/↓ move in. */
+export function graphLevels(view: OrchestrationView): string[][] {
+  return layoutGraph(view)
+    .levels.map((entries) => entries.filter((entry) => entry.task !== undefined).map((entry) => entry.id))
+    .filter((keys) => keys.length > 0);
 }
 
 export function renderGraph(view: OrchestrationView, ctx: ViewContext, options: GraphOptions = {}): string[] {
@@ -364,14 +378,14 @@ export function renderGraph(view: OrchestrationView, ctx: ViewContext, options: 
   const running = view.tasks.filter(isActive).length;
   const left = [`${g.base.bullet} Plan graph`, `${view.tasks.length} task${view.tasks.length === 1 ? "" : "s"}`, `${levelCount} level${levelCount === 1 ? "" : "s"}`];
   if (running > 0) left.push(`${running} running`);
-  const head = spread(left.join(` ${g.base.sep} `), options.fromBoard === true ? `g board ${g.base.sep} esc to stop` : "", ctx.width);
+  const head = spread(left.join(` ${g.base.sep} `), options.hint ?? (options.fromBoard === true ? boardHint(ctx, "graph") : ""), ctx.width);
   const lines = [`${t.accent(head.left)}${head.gap}${t.muted(head.right)}`];
   if (view.tasks.length === 0) {
     lines.push(t.muted("  no tasks in the plan yet"));
     return lines;
   }
-  const body = options.stacked === true ? undefined : renderWide(view, layout, ctx);
-  lines.push(...(body ?? renderStacked(view, layout, ctx)));
+  const body = options.stacked === true ? undefined : renderWide(view, layout, ctx, options.selected);
+  lines.push(...(body ?? renderStacked(view, layout, ctx, options.selected)));
   // Activity of what is running now, and the legend.
   for (const task of view.tasks.filter(isActive)) {
     const shown = presentTask(task, view.tasks, ctx);

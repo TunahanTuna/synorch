@@ -1,11 +1,12 @@
-import type { HarnessView, OrchestrationView } from "../../contracts/views.ts";
+import type { HarnessView, OrchestrationView, WorkerDelegationView } from "../../contracts/views.ts";
 import type { GlyphSet } from "../conversation-view.ts";
 import type { Styler } from "../style.ts";
-import { PlainBoardTracker, renderBoardSummary, renderLiveBoard } from "./board.ts";
+import { boardHint, PlainBoardTracker, renderBoardSummary, renderLiveBoard, selectionHint } from "./board.ts";
 import { renderAction, renderEvidence, renderWhy } from "./cards.ts";
 import { renderGraph } from "./graph.ts";
 import { createViewTheme, viewGlyphs, type ViewContext, type ViewGlyphs, type ViewTheme } from "./kit.ts";
 import { renderUsage } from "./usage.ts";
+import { renderDelegation, renderUserToWorker, renderWorkerSnapshot } from "./worker.ts";
 
 /**
  * Mountable views. The components satisfy pi-tui's `Component` shape structurally
@@ -37,6 +38,10 @@ export function renderView(view: HarnessView, ctx: ViewContext): string[] {
       return renderAction(view, ctx);
     case "why":
       return renderWhy(view, ctx);
+    case "delegation":
+      return renderDelegation(view, ctx);
+    case "worker":
+      return renderWorkerSnapshot(view, ctx);
   }
 }
 
@@ -78,10 +83,55 @@ export class StaticViewComponent extends Styled implements ViewComponent {
   }
 }
 
+/** Main chat delegation line (K1.7): one line, the assignment when expanded (Ctrl+O or a click). */
+export class DelegationComponent extends Styled implements ViewComponent {
+  private readonly view: WorkerDelegationView;
+  private readonly expanded: () => boolean;
+
+  public constructor(view: WorkerDelegationView, options: ViewStyleOptions, expanded: () => boolean) {
+    super(options);
+    this.view = view;
+    this.expanded = expanded;
+  }
+
+  public get taskKey(): string {
+    return this.view.taskKey;
+  }
+
+  public invalidate(): void {}
+
+  public render(width: number): string[] {
+    return renderDelegation(this.view, this.context(width, this.now()), this.expanded());
+  }
+}
+
+/** Main chat: `↳ you → key: message` after the user messaged a worker. */
+export class UserToWorkerComponent extends Styled implements ViewComponent {
+  private readonly taskKey: string;
+  private readonly text: string;
+
+  public constructor(taskKey: string, text: string, options: ViewStyleOptions) {
+    super(options);
+    this.taskKey = taskKey;
+    this.text = text;
+  }
+
+  public invalidate(): void {}
+
+  public render(width: number): string[] {
+    return renderUserToWorker(this.taskKey, this.text, this.context(width, this.now()));
+  }
+}
+
 /** The live board, updated in place; `g` toggles it with the graph of the same plan. */
 export class LiveBoardComponent extends Styled implements ViewComponent {
   private view: OrchestrationView;
   private shownMode: "board" | "graph" = "board";
+  /** K1.7: the selected task key, and whether the selection keys are live (vs. only marking the open worker). */
+  public selected: string | undefined;
+  public selecting = false;
+  /** Replaces the header hint (the worker view shows its own keys). */
+  public hint: string | undefined;
 
   public constructor(view: OrchestrationView, options: ViewStyleOptions) {
     super(options);
@@ -110,7 +160,9 @@ export class LiveBoardComponent extends Styled implements ViewComponent {
   public render(width: number): string[] {
     const now = this.now();
     const ctx = this.context(width, now, Math.floor(now / this.glyphs.base.spinnerMs));
-    return this.shownMode === "graph" ? renderGraph(this.view, ctx, { fromBoard: true }) : renderLiveBoard(this.view, ctx);
+    const hint = this.hint ?? (this.selecting ? selectionHint(ctx, this.shownMode) : boardHint(ctx, this.shownMode));
+    const selected = this.selected;
+    return this.shownMode === "graph" ? renderGraph(this.view, ctx, { fromBoard: true, selected, hint }) : renderLiveBoard(this.view, ctx, { selected, hint });
   }
 }
 

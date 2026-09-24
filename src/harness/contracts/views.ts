@@ -1,4 +1,5 @@
 import type { POLICY_LAYERS } from "./policy.ts";
+import type { RenderEvent } from "./renderer.ts";
 import type { TaskState } from "./state.ts";
 
 export type PolicyLayerView = (typeof POLICY_LAYERS)[number];
@@ -41,6 +42,8 @@ export interface OrchestrationTaskView {
   readonly diffstat?: { readonly files: number; readonly added: number; readonly removed: number } | undefined;
   /** Harness-run verification checks (never worker claims). */
   readonly checks?: { readonly passed: number; readonly total: number } | undefined;
+  /** K1.7: the user paused this worker (`p`); it stops at its next safe step boundary. */
+  readonly paused?: boolean | undefined;
 }
 
 export interface OrchestrationView {
@@ -173,16 +176,130 @@ export interface WhyView {
   readonly howToChange: readonly { readonly command: string; readonly effect: string }[];
 }
 
-export type HarnessView = OrchestrationView | UsageView | EvidenceView | ActionView | WhyView;
+// ---------------------------------------------------------------------------------------------
+// Workers (K1.7): drill into a running worker from the board or the graph, see what the
+// orchestrator told it, follow its transcript and talk to it. Workers are always named by their
+// board key (`OrchestrationTaskView.key`); the runtime resolves a key to the task's latest attempt.
+
+/** A steer a worker received after dispatch. */
+export interface WorkerSteeringView {
+  readonly from: "orchestrator" | "user";
+  readonly text: string;
+  readonly atMs?: number | undefined;
+  /** False while queued for the worker's next safe step boundary; omitted when unknown. */
+  readonly delivered?: boolean | undefined;
+}
+
+/**
+ * The orchestrator's instructions to one worker: a readable digest of its task packet, pinned at
+ * the top of the worker view. Sent again in full whenever steering is added (it replaces the last).
+ *
+ * @example { taskKey: "convert-mocks", objective: "Replace nock with msw in the HTTP tests",
+ *            owned_paths: ["src/http/**", "tests/http.test.ts"],
+ *            acceptance_criteria: ["all HTTP tests pass", "no nock import remains"],
+ *            verification_commands: ["pnpm test tests/http.test.ts"],
+ *            steering: [{ from: "orchestrator", text: "keep the retry helper", atMs: 1790000000000 }] }
+ */
+export interface WorkerAssignmentView {
+  readonly taskKey: string;
+  readonly objective: string;
+  readonly owned_paths: readonly string[];
+  readonly acceptance_criteria: readonly string[];
+  readonly verification_commands: readonly string[];
+  readonly steering: readonly WorkerSteeringView[];
+}
+
+/**
+ * One event of a worker's stream: its assignment (first, and again on every steering change), or
+ * the worker session's own render events — the same `session-event` / `stream` / `notice` shapes
+ * the main conversation renders, so the worker view applies the same quiet-by-default rules.
+ */
+export type WorkerStreamEvent =
+  | { readonly kind: "assignment"; readonly assignment: WorkerAssignmentView }
+  | Extract<RenderEvent, { readonly kind: "session-event" | "stream" | "notice" }>;
+
+/**
+ * Where the worker view reads a worker's transcript (implemented by the runtime from the attempt's
+ * session log). `subscribe` delivers every past event synchronously, in order, before it returns
+ * (assignment first), then live events as they happen; the returned function unsubscribes. An
+ * unknown key delivers nothing.
+ *
+ * @example const stop = source.subscribe("convert-mocks", (event) => pane.apply(event)); … stop();
+ */
+export interface WorkerStreamSource {
+  subscribe(taskKey: string, onEvent: (event: WorkerStreamEvent) => void): () => void;
+}
+
+/**
+ * What the user can do to a running worker. `message` queues a steer for the worker's next safe
+ * step boundary (the runtime also tells the orchestrator and writes the audit); pause stops at the
+ * next boundary; cancel ends the attempt. A rejection's message is shown to the user; the new state
+ * shows up through the board (`OrchestrationTaskView.paused`, `state: "cancelled"`).
+ *
+ * @example await control.message("convert-mocks", "skip the legacy client"); await control.pause("convert-mocks");
+ */
+export interface WorkerControl {
+  message(taskKey: string, text: string): Promise<void>;
+  pause(taskKey: string): Promise<void>;
+  resume(taskKey: string): Promise<void>;
+  cancel(taskKey: string): Promise<void>;
+}
+
+/** What the session connects to the renderer for worker drill-in. */
+export interface WorkerSeam {
+  readonly stream: WorkerStreamSource;
+  /** Without it the worker view is read-only. */
+  readonly control?: WorkerControl | undefined;
+}
+
+/**
+ * A delegation line in the main chat when the orchestrator dispatches work: collapsed to
+ * `→ convert-mocks (implementer, opus-5.5): Replace nock with msw`, expanded (Ctrl+O, click) to the
+ * assignment. Shown with `ViewHost.showView`.
+ *
+ * @example { kind: "delegation", taskKey: "convert-mocks", role: "implementer", model: "opus-5.5",
+ *            objective: "Replace nock with msw in the HTTP tests", assignment }
+ */
+export interface WorkerDelegationView {
+  readonly kind: "delegation";
+  readonly taskKey: string;
+  readonly role: string;
+  readonly model?: string | undefined;
+  readonly objective: string;
+  readonly assignment?: WorkerAssignmentView | undefined;
+}
+
+/**
+ * A worker view as a one-off snapshot (plain mode `/worker <key>`, or pinned in the TUI): header,
+ * assignment and the transcript so far, rendered with the conversation rules.
+ *
+ * @example { kind: "worker", task: board.tasks[1], assignment, events: pastEvents }
+ */
+export interface WorkerSnapshotView {
+  readonly kind: "worker";
+  readonly task: OrchestrationTaskView;
+  readonly assignment?: WorkerAssignmentView | undefined;
+  readonly events: readonly WorkerStreamEvent[];
+}
+
+export type HarnessView = OrchestrationView | UsageView | EvidenceView | ActionView | WhyView | WorkerDelegationView | WorkerSnapshotView;
 export type HarnessViewKind = HarnessView["kind"];
 
 /**
  * What a renderer offers the session to show views (implemented by the pi-tui and plain
  * renderers). `showView` pins a card once to the transcript; `setBoard` keeps one live board in
  * place (pinned as a summary when `done`); `showGraph` pins the plan graph (`/graph`).
+ *
+ * Worker drill-in (K1.7, interactive renderer only, hence optional): `connectWorkers` gives the
+ * renderer the worker seam; the user then selects a task on the board or graph (↓ / arrows / j k)
+ * and opens it with Enter. `openWorkerView` opens it programmatically (e.g. `/worker <key>` in the
+ * TUI) and returns false when no such task is known; `closeWorkerView` returns to the main session.
  */
 export interface ViewHost {
   showView(view: HarnessView): void;
   setBoard(view: OrchestrationView | undefined): void;
   showGraph(view: OrchestrationView): void;
+  connectWorkers?(seam: WorkerSeam | undefined): void;
+  openWorkerView?(taskKey: string): boolean;
+  closeWorkerView?(): void;
 }

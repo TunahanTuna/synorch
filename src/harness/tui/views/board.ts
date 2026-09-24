@@ -77,6 +77,7 @@ export function presentTask(task: OrchestrationTaskView, all: readonly Orchestra
   const spinner = g.base.spinner[(ctx.frame ?? 0) % g.base.spinner.length] ?? "*";
   const reason = clean(task.reason, 120);
   const withReason = (label: string) => (reason === "" ? label : `${label}${sep}${reason}`);
+  if (task.paused === true && !isFinished(task)) return { glyph: g.interrupted, tone: "warning", label: "paused", active: false };
   switch (task.state) {
     case "draft":
     case "awaiting_approval":
@@ -164,13 +165,21 @@ function columns(tasks: readonly OrchestrationTaskView[], width: number, withMod
   return { key, role, model, elapsed, activity: Math.max(0, activity), stacked: activity < 12 };
 }
 
-function taskRow(task: OrchestrationTaskView, all: readonly OrchestrationTaskView[], cols: Columns, ctx: ViewContext, now: number): string[] {
+function taskRow(task: OrchestrationTaskView, all: readonly OrchestrationTaskView[], cols: Columns, ctx: ViewContext, now: number, selected = false): string[] {
+  const rows = taskRowLines(task, all, cols, ctx, now, selected);
+  if (!selected || rows.length === 0) return rows;
+  // The selected row: `›` in the margin (survives NO_COLOR), the key in the accent colour.
+  return [`${ctx.theme.accent(ctx.glyphs.select)}${(rows[0] ?? "").slice(1)}`, ...rows.slice(1)];
+}
+
+function taskRowLines(task: OrchestrationTaskView, all: readonly OrchestrationTaskView[], cols: Columns, ctx: ViewContext, now: number, selected: boolean): string[] {
   const t = ctx.theme;
   const shown = presentTask(task, all, ctx);
   const elapsedMs = cols.elapsed > 0 ? taskElapsedMs(task, now) : undefined;
   const elapsed = elapsedMs === undefined || isWaiting(task) ? "" : formatElapsed(elapsedMs);
   const glyph = paint(t, shown.tone, shown.glyph);
-  const key = shown.active ? t.bold(padEnd(clean(task.key, 40), cols.key)) : padEnd(clean(task.key, 40), cols.key);
+  const keyText = padEnd(clean(task.key, 40), cols.key);
+  const key = selected ? t.accent(t.bold(keyText)) : shown.active ? t.bold(keyText) : keyText;
   const role = t.muted(padEnd(clean(task.role, 20), cols.role));
   const model = cols.model > 0 ? ` ${t.muted(padEnd(clean(task.model, 20), cols.model))}` : "";
   const labelTone: Tone = shown.tone === "success" || shown.tone === "running" ? "text" : shown.tone;
@@ -191,8 +200,30 @@ function taskRow(task: OrchestrationTaskView, all: readonly OrchestrationTaskVie
   return [`  ${glyph} ${key} ${role}${model} ${label}${elapsedCell}`.trimEnd()];
 }
 
+export interface BoardOptions {
+  /** Key of the selected task (K1.7): marked with `›`; a folded row is shown while selected. */
+  readonly selected?: string | undefined;
+  /** Replaces the header hint on the right. */
+  readonly hint?: string | undefined;
+}
+
+/** Header hint of the live board while nothing is selected. */
+export function boardHint(ctx: ViewContext, mode: "board" | "graph" = "board"): string {
+  const sep = ` ${ctx.glyphs.base.sep} `;
+  return [mode === "board" ? "g graph" : "g board", `${ctx.glyphs.downArrow} select`, "esc to stop"].join(sep);
+}
+
+/** Header hint while a task is selected or a worker is open. */
+export function selectionHint(ctx: ViewContext, mode: "board" | "graph" = "board"): string {
+  const sep = ` ${ctx.glyphs.base.sep} `;
+  // The graph header is already long: arrows and Tab are implied there.
+  if (mode === "graph") return ["enter open", "g board", "esc back"].join(sep);
+  const arrows = ctx.glyphs.name === "ascii" ? "up/down" : "↑↓";
+  return [`${arrows} select`, "enter open", "tab next", "g graph", "esc back"].join(sep);
+}
+
 /** The live board: header, rows (folded past six tasks). */
-export function renderLiveBoard(view: OrchestrationView, ctx: ViewContext): string[] {
+export function renderLiveBoard(view: OrchestrationView, ctx: ViewContext, options: BoardOptions = {}): string[] {
   const t = ctx.theme;
   const g = ctx.glyphs;
   const now = ctx.now ?? Date.now();
@@ -202,19 +233,20 @@ export function renderLiveBoard(view: OrchestrationView, ctx: ViewContext): stri
   const title = clean(view.title, 40) || "Workers";
   const folded = tasks.length > LIVE_FOLD_THRESHOLD;
   const headLeft = `${g.base.bullet} ${title} ${g.base.sep} ${tasks.length} task${tasks.length === 1 ? "" : "s"}${folded || running > 0 ? ` ${g.base.sep} ${running} running` : ""}`;
-  const head = spread(headLeft, `g graph ${g.base.sep} esc to stop`, width);
+  const head = spread(headLeft, options.hint ?? boardHint(ctx), width);
   const lines = [`${t.accent(head.left)}${head.gap}${t.muted(head.right)}`];
   const cols = columns(tasks, width, true, true);
+  const selected = options.selected;
   if (!folded) {
-    for (const task of tasks) lines.push(...taskRow(task, tasks, cols, ctx, now));
+    for (const task of tasks) lines.push(...taskRow(task, tasks, cols, ctx, now, task.key === selected));
     return finish(lines, ctx);
   }
   const done = tasks.filter((task) => task.state === "completed");
   const waiting = tasks.filter(isWaiting);
   if (done.length > 0) lines.push(`  ${t.success(g.base.ok)} ${done.length} done`);
   for (const task of tasks) {
-    if (task.state === "completed" || isWaiting(task)) continue;
-    lines.push(...taskRow(task, tasks, cols, ctx, now));
+    if ((task.state === "completed" || isWaiting(task)) && task.key !== selected) continue;
+    lines.push(...taskRow(task, tasks, cols, ctx, now, task.key === selected));
   }
   if (waiting.length > 0) lines.push(t.muted(`  ${g.pending} ${waiting.length} waiting`));
   return finish(lines, ctx);

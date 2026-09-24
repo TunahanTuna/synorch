@@ -96,6 +96,8 @@ export interface ContextBuilderDependencies {
   readonly platform?: NodeJS.Platform;
   /** Shared with `createSkillLoadCallback` so `load_skill` knows which skills are already in context. */
   readonly skillContext?: SkillContextRegistry;
+  /** The auto-detected "Project profile" block (zero-config onboarding); undefined while unknown. */
+  readonly projectProfile?: () => Promise<string | undefined>;
 }
 
 interface DraftBlock {
@@ -301,6 +303,10 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
     }
     if (project?.entrypoint !== undefined) {
       blocks.push({ id: `entrypoint:${project.entrypoint.path}`, source: "protocol", trust: "project", text: project.entrypoint.text, truncated: false, optional: true });
+    }
+    const profile = await deps.projectProfile?.().catch(() => undefined);
+    if (profile !== undefined && profile !== "") {
+      blocks.push({ id: "project-profile", source: "protocol", trust: "project", text: profile, truncated: false, optional: true });
     }
     const roleText = project?.roles?.[input.role];
     if (roleText !== undefined) {

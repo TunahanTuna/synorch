@@ -389,6 +389,7 @@ function instructionLabel(blockId: string): string {
   if (blockId === "constitution") return ".ai constitution";
   if (blockId.startsWith("protocol:")) return `protocol ${blockId.slice(9)}`;
   if (blockId.startsWith("entrypoint:")) return `${blockId.slice(11)} (repository guidance)`;
+  if (blockId === "project-profile") return "Project profile (auto-detected: stack, package manager, commands)";
   if (blockId.startsWith("role:")) return `role manifest (${blockId.slice(5)})`;
   return blockId;
 }

@@ -32,10 +32,13 @@ export interface MemoryDeskHost {
   ask(question: string, options: readonly string[] | undefined): Promise<string>;
   /** Appends an audit event to the conversation log when one is open. */
   append(type: SessionEventDraft["type"], data: unknown): Promise<void>;
+  /** `/memory init`: bootstraps the project memory from the detected project profile; returns the lines to print. */
+  bootstrap?(): Promise<readonly string[]>;
 }
 
 const USAGE = [
   "/memory                    the ledger: active decisions, preferences, open assumptions, contradictions",
+  "/memory init               bootstrap project memory from the detected stack, commands and conventions",
   "/memory review             the decision desk: accept / edit / reject / defer each proposal",
   "/memory accept|reject|defer <n | proposal-id> [reason]",
   "/memory show <id>          one note with its source and freshness",
@@ -189,6 +192,10 @@ export async function runMemoryDesk(host: MemoryDeskHost, argument: string): Pro
       if (!host.show(view)) host.print(ledgerLines(view));
       return;
     }
+    case "init":
+    case "bootstrap":
+      host.print(host.bootstrap === undefined ? ["Project memory bootstrap is not available here."] : await host.bootstrap());
+      return;
     case "review":
     case "desk":
       await review(host);

@@ -100,9 +100,16 @@ interface PreparedProject {
 
 export class ProjectDiscoveryService {
   private readonly fileSystem: FileSystem;
+  private readonly extraIgnored: (name: string) => boolean;
 
-  public constructor(fileSystem: FileSystem) {
+  /** `ignoreDirectory` skips further directories (the harness profile skips hidden and virtualenv trees). */
+  public constructor(fileSystem: FileSystem, options: { readonly ignoreDirectory?: (name: string) => boolean } = {}) {
     this.fileSystem = fileSystem;
+    this.extraIgnored = options.ignoreDirectory ?? (() => false);
+  }
+
+  private ignored(name: string): boolean {
+    return IGNORED_DIRECTORIES.has(name) || this.extraIgnored(name);
   }
 
   public async sync(targetDirectory: string, options: SyncOptions = {}): Promise<SyncResult> {
@@ -289,6 +296,33 @@ export class ProjectDiscoveryService {
   }
 
   /**
+   * Read-only discovery of one repository (the harness project profile): the same module walk and
+   * inspection as `sync`, with no `.ai/` requirement and nothing written. `shallow` inspects only
+   * the root directory's manifests (the fallback when the full walk hits a safety limit).
+   */
+  public async discoverRepository(
+    targetDirectory: string,
+    options: { readonly shallow?: boolean } = {},
+  ): Promise<Omit<ProjectRecord, "skill_registry">> {
+    const root = path.resolve(targetDirectory);
+    if (options.shallow !== true) return this.inspectProject(root, root, new Date().toISOString());
+    const files = await this.findDiscoveryFileNames(root);
+    const modules = files.length === 0 ? [] : [await this.inspectModule(root, root, files)];
+    const { id, path: relativePath } = projectIdentity(root, root);
+    return {
+      id,
+      path: relativePath,
+      detected_at: new Date().toISOString(),
+      repository: { git: await this.fileSystem.exists(path.join(root, ".git")) },
+      stack: aggregateStack(modules),
+      commands: aggregateCommands(modules),
+      manifests: sortedUnique(modules.flatMap((module) => module.manifests)),
+      evidence: sortEvidence(modules.flatMap((module) => module.evidence)),
+      modules,
+    };
+  }
+
+  /**
    * Prune expired observations from the ledger. The ledger is optional: a project that has never
    * recorded one syncs exactly as before. Returns undefined when there is nothing to rewrite.
    */
@@ -364,7 +398,7 @@ export class ProjectDiscoveryService {
       left.name.localeCompare(right.name),
     );
     for (const entry of entries) {
-      if (!entry.isDirectory || IGNORED_DIRECTORIES.has(entry.name)) {
+      if (!entry.isDirectory || this.ignored(entry.name)) {
         continue;
       }
       const candidate = path.join(root, entry.name);
@@ -424,7 +458,7 @@ export class ProjectDiscoveryService {
       );
       const childDirectories: typeof entries = [];
       for (const entry of entries) {
-        if (!entry.isDirectory || IGNORED_DIRECTORIES.has(entry.name)) continue;
+        if (!entry.isDirectory || this.ignored(entry.name)) continue;
         if (SOURCE_TREE_DIRECTORIES.has(entry.name)) {
           const sourceTreePath = path.join(current.directory, entry.name);
           if ((await this.findDiscoveryFileNames(sourceTreePath)).length === 0) {
@@ -490,7 +524,7 @@ export class ProjectDiscoveryService {
         modules.push(await this.inspectModule(root, directory, discoveryFiles));
       }
       for (const entry of entries) {
-        if (entry.isDirectory && !IGNORED_DIRECTORIES.has(entry.name)) {
+        if (entry.isDirectory && !this.ignored(entry.name)) {
           directories.push(path.join(directory, entry.name));
         }
       }

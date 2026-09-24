@@ -79,6 +79,8 @@ import { buildContextView, buildEvidence, buildWhy } from "./transparency.ts";
 import { memorySeam, runMemoryDesk, type MemoryDeskHost } from "./memory-desk.ts";
 import { createSystemObsidianLauncher, ledgerSummary, readLedger, type MarkdownMemoryStore } from "../memory/index.ts";
 import { promptTrustForCommand } from "./trust.ts";
+import { runInitCommand, runMemoryInit, startOnboarding } from "./onboarding.ts";
+import { profileSummaryLines } from "./project-profile.ts";
 import { UsageLedger } from "./usage-stats.ts";
 
 /**
@@ -397,6 +399,8 @@ class Conversation implements ConversationCommandHost {
       if (runtime.permissionMode() === "full") this.note("error", this.fullAccessNotice());
       if (resumed !== undefined) await this.showResumed(resumed);
       else await this.memoryStartLine();
+      // Zero-config onboarding: the quiet "Synorch ready · …" line, the memory vault and the first-session memory bootstrap (user scope only).
+      void startOnboarding(runtime, (line) => this.note("info", line), this.glyphs.sep);
       if (this.debug) this.note("info", `harness: runtime ready in ${runtimeMs} ms`);
       // Credential pre-resolution (keychain, token refresh) happens in the background, never before the editor.
       void this.routePromise.then((decision) => runtime.credentials(decision.route, this.outer.signal)).catch(() => undefined);
@@ -1075,6 +1079,7 @@ class Conversation implements ConversationCommandHost {
       append: async (type, data) => {
         await this.append(type, data, "user");
       },
+      bootstrap: () => runMemoryInit(this.runtime),
     };
     views?.connectMemory?.(memorySeam(host));
     return host;
@@ -2078,6 +2083,10 @@ class Conversation implements ConversationCommandHost {
     else this.print(["Compaction is unavailable for this conversation."]);
   }
 
+  public async init(argument: string): Promise<void> {
+    await runInitCommand({ runtime: this.runtime, print: (lines) => this.print(lines), ask: (question, options) => this.askUser(question, options, this.outer.signal) }, argument);
+  }
+
   public async report(name: "context" | "permissions" | "tasks" | "memory" | "diff" | "log", argument: string): Promise<void> {
     switch (name) {
       case "context": {
@@ -2087,7 +2096,10 @@ class Conversation implements ConversationCommandHost {
         const views = this.renderer.views;
         if (view !== undefined && views !== undefined) views.showView(view);
         else if (view !== undefined) this.print(view.groups.flatMap((group) => [`${group.title}:`, ...group.items.map((item) => `  ${item.label} ~${item.tokens}${item.detail === undefined ? "" : ` (${item.detail})`}`)]));
-        else this.print(contextReport(events));
+        else {
+          const profile = this.runtime.profile.current();
+          this.print([...contextReport(events), ...(profile === undefined ? [] : ["Project profile (sent with every request):", ...profileSummaryLines(profile).map((line) => `  ${line}`)])]);
+        }
         return;
       }
       case "permissions":

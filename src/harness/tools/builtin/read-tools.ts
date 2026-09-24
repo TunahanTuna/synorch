@@ -16,6 +16,7 @@ import {
   type ToolExecutionContext,
 } from "../../contracts/index.ts";
 import { resolveWorkspacePath } from "../workspace-path.ts";
+import { mediaKindOf, readImage, readPdf } from "./read-media.ts";
 import { actionOf, builtinMetadata, defineTool, errorResult, okResult, readableByPolicy, scopeViolationResult } from "./shared.ts";
 
 const READ_LIMIT_BYTES = 1024 * 1024;
@@ -36,6 +37,8 @@ const readFileInput = z.strictObject({
   path: relativePathInput,
   offset: z.int().min(1).optional(),
   limit: z.int().min(1).max(20_000).optional(),
+  /** PDFs only: `3`, `2-5`, `1,4-6` (default: the first 20 pages). */
+  pages: z.string().trim().min(1).max(100).optional(),
 });
 type ReadFileInput = z.infer<typeof readFileInput>;
 
@@ -43,7 +46,7 @@ export function createReadFileTool(): Tool<ReadFileInput> {
   const metadata = builtinMetadata({
     name: "read_file",
     description:
-      "Read a text file inside the read scope. Optional 1-based line offset and line limit. The first line is a header with the file's digest, which write_file/apply_patch use as their precondition.",
+      "Read a text file inside the read scope. Optional 1-based line offset and line limit. The first line is a header with the file's digest, which write_file/apply_patch use as their precondition. Images (png, jpg, gif, webp) are shown to you as images when the model supports it; PDFs come back as text by page (`pages`: \"3\", \"2-5\").",
     effect: "read",
     idempotent: true,
     network: "none",
@@ -66,6 +69,9 @@ export function createReadFileTool(): Tool<ReadFileInput> {
         if (!info.isFile()) return errorResult("invalid_arguments", `${resolved.relative} is not a file`);
         const digest = await digestFile(resolved.absolute, info.size);
         context.files?.noteRead(resolved.relative, digest);
+        const media = mediaKindOf(resolved.relative);
+        if (media === "image") return await readImage(resolved.relative, resolved.absolute, info.size, digest, context);
+        if (media === "pdf") return await readPdf(resolved.relative, resolved.absolute, info.size, digest, input.pages, context);
         const { bytes, truncated: headOnly } = await readHead(resolved.absolute, READ_LIMIT_BYTES);
         if (bytes.subarray(0, BINARY_SNIFF_BYTES).includes(0)) {
           return okResult(`${resolved.relative} · digest ${digest} · binary file (${info.size} bytes); content not shown.`, { digest });

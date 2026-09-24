@@ -94,7 +94,7 @@ import {
   type FetchLike,
 } from "../providers/index.ts";
 import { createBlobStore, createSessionStore } from "../store/index.ts";
-import { createSandboxRunner, createToolGateway, createToolRegistry, probeSandbox } from "../tools/index.ts";
+import { BackgroundProcessManager, createSandboxRunner, createToolGateway, createToolRegistry, probeSandbox } from "../tools/index.ts";
 import type { RouteOverride } from "./args.ts";
 import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts";
 import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
@@ -176,6 +176,8 @@ export interface Runtime {
   readonly adapters: readonly AnyModelAdapter[];
   readonly policy: PolicyEngine;
   readonly registry: ToolRegistry;
+  /** K4.2: background processes started by `exec {background: true}`; killed when the session ends. */
+  readonly processes: BackgroundProcessManager;
   readonly sandbox: SandboxReport;
   readonly trust: RuntimeTrust;
   readonly memory: MemoryStore;
@@ -547,7 +549,9 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const reports = createReportSlot();
   const skillContext = createSkillContextRegistry();
   let userPrompt: UserPrompt | undefined;
+  const processes = new BackgroundProcessManager();
   const registry = createToolRegistry({
+    processes,
     classifyCommand: (argv, scope) => classifyCommand(argv, scope),
     control: {
       ...delegationCallbacks(delegation),
@@ -696,6 +700,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     adapters,
     policy,
     registry,
+    processes,
     sandbox,
     trust,
     memory,

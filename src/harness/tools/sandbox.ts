@@ -7,7 +7,7 @@ import {
   type SandboxReport,
   type SandboxRunner,
 } from "../contracts/index.ts";
-import { runProcess } from "./process.ts";
+import { runProcess, startProcess } from "./process.ts";
 
 /**
  * OS sandbox backends (ADR-06). The runner applies and reports limits; it never decides
@@ -69,6 +69,10 @@ export function createSandboxRunner(report: SandboxReport, options: SandboxRunne
       );
       const stderr = result.termination === "spawn-failed" && result.stderr.length === 0 ? `failed to start ${spec.argv[0]}: ${result.spawnError ?? "unknown error"}` : result.stderr;
       return { ...result, stderr };
+    },
+    start: (spec: ProcessSpec) => {
+      const untrustedRoots = [...(options.untrustedRoots ?? []), ...(spec.untrustedRoots ?? [])];
+      return startProcess(sandboxedArgv(checked, spec), { cwd: spec.cwd, env: spec.env, stdin: spec.stdin, timeoutMs: spec.timeoutMs, outputLimitBytes: spec.outputLimitBytes, untrustedRoots });
     },
   };
 }

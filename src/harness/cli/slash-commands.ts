@@ -199,6 +199,8 @@ export interface ConversationCommandHost {
   commit(argument: string): Promise<void>;
   usage(): Promise<void>;
   cost(): Promise<void>;
+  /** K4.2 `/ps [kill <handle|all>]`: background processes. */
+  ps(argument: string): Promise<void>;
   evidence(): Promise<void>;
   why(argument: string): Promise<void>;
   compact(focus: string): Promise<void>;
@@ -249,6 +251,7 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/memory", description: "memory vault and pending proposals", whileBusy: true, run: (host, argument) => host.report("memory", argument) },
   { name: "/mouse", argsHint: "[on|off]", description: "toggle mouse capture (scroll / select)", whileBusy: true, rendererLocal: true, run: (host, argument) => host.mouse(argument) },
   { name: "/diff", description: "files changed by Synorch in this conversation", whileBusy: true, run: (host, argument) => host.report("diff", argument) },
+  { name: "/ps", argsHint: "[kill <handle|all>]", description: "background processes (dev servers, watchers); stop one or all", whileBusy: true, run: (host, argument) => host.ps(argument) },
   { name: "/graph", description: "the plan graph of the current or last worker run", whileBusy: true, run: (host) => host.graph() },
   { name: "/tasks", description: "tasks of this conversation's worker runs", whileBusy: true, run: (host, argument) => host.report("tasks", argument) },
   { name: "/permissions", argsHint: "[ask|auto|full|plan | allow <prefix> | remove <prefix>]", description: "permission mode, allow rules and trust; switch mode or edit rules", whileBusy: true, run: (host, argument) => host.report("permissions", argument) },

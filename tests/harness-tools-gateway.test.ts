@@ -417,9 +417,27 @@ test("the registry shows each role only the tools its policy can use", async (t)
       grants: [],
     });
   const names = (role: AgentRole) => registry.visibleTo(role, policyFor(role)).map((descriptor) => descriptor.name).sort();
-  assert.deepEqual(names("explorer"), ["git_diff", "git_status", "list_dir", "load_skill", "memory_propose", "read_file", "search", "task_report"]);
-  assert.deepEqual(names("implementer"), ["apply_patch", "exec", "git_diff", "git_status", "list_dir", "load_skill", "memory_propose", "read_file", "search", "task_report", "write_file"]);
-  assert.deepEqual(names("orchestrator"), ["apply_patch", "ask_user", "git_diff", "git_status", "list_dir", "load_skill", "memory_propose", "plan_propose", "read_file", "search", "task_spawn", "task_status", "task_triage"]);
+  assert.deepEqual(names("explorer"), ["git_diff", "git_status", "glob", "list_dir", "load_skill", "memory_propose", "read_file", "search", "task_report", "todo"]);
+  assert.deepEqual(names("implementer"), [
+    "apply_patch",
+    "exec",
+    "git_diff",
+    "git_status",
+    "glob",
+    "list_dir",
+    "load_skill",
+    "memory_propose",
+    "process_kill",
+    "process_list",
+    "process_output",
+    "process_wait",
+    "read_file",
+    "search",
+    "task_report",
+    "todo",
+    "write_file",
+  ]);
+  assert.deepEqual(names("orchestrator"), ["apply_patch", "ask_user", "git_diff", "git_status", "glob", "list_dir", "load_skill", "memory_propose", "plan_propose", "read_file", "search", "task_spawn", "task_status", "task_triage"]);
   const descriptor = registry.get("exec")?.descriptor();
   assert.equal(descriptor?.input_schema.type, "object");
   assert.throws(() => registry.register(registry.get("exec")!), /already registered/);

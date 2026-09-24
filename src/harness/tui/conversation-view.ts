@@ -77,6 +77,8 @@ export type ConversationItem =
        * the status glyph carries success or failure, so it repeats neither. Plain mode keeps `summary`.
        */
       readonly stat?: string | undefined;
+      /** K4.2: a background process this call started (`◌ dev server (pnpm dev)  running · 12s`). */
+      readonly background?: { readonly handle: string; readonly startedAt: number } | undefined;
     }
   /** The turn-end result line: what changed and whether tests ran (never claims an unrun test). */
   | { readonly kind: "result"; readonly id: string; readonly text: string; readonly tone: "ok" | "warning" | "error" }
@@ -127,6 +129,7 @@ interface ToolState {
   group: string[] | undefined;
   /** Edit preview shown in an approval prompt before the tool runs. */
   pending: DiffLine[];
+  background?: { readonly handle: string; readonly startedAt: number } | undefined;
 }
 
 /** What this turn changed and tested, for the result line (terminal polish brief §5). */
@@ -159,6 +162,8 @@ export class ConversationPresenter {
   private model: string | undefined;
   private contextWindow: number | undefined;
   private ledger: TurnLedger = { files: new Map(), tests: undefined };
+  /** The turn's checklist item: later `todo` calls in the same turn update it in place. */
+  private todoItem: string | undefined;
   /** Enter was pressed and no turn has started yet: the activity line shows at once. */
   private submittedAt: number | undefined;
 
@@ -307,6 +312,7 @@ export class ConversationPresenter {
     switch (event.type) {
       case "turn/started":
         this.ledger = { files: new Map(), tests: undefined };
+        this.todoItem = undefined;
         if (!this.replaying) {
           this.turnStartedAt = this.submittedAt ?? this.now();
           this.submittedAt = undefined;
@@ -439,6 +445,8 @@ export class ConversationPresenter {
     const message: ModelMessage | undefined = event.data.message;
     if (message === undefined) return [];
     if (message.role === "user") {
+      // A user message inside a step (request id) is the harness's own: a tool image for the model (K4.2).
+      if (event.data.request_id !== undefined) return [];
       if (this.options.echoesUser && !this.replaying) return [];
       const text = message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
       return text.trim() === "" ? [] : [this.user(stripHarnessNotes(text))];
@@ -460,6 +468,15 @@ export class ConversationPresenter {
   private toolProposed(part: ToolCallPart): ViewOp[] {
     if (COORDINATION_TOOLS.has(part.name) || part.tool_call_id === undefined) return [];
     const args = part.arguments as Readonly<Record<string, unknown>>;
+    if (part.name === "todo" && this.todoItem !== undefined) {
+      const existing = this.tools.get(this.todoItem);
+      if (existing !== undefined) {
+        existing.args = args;
+        existing.status = "running";
+        this.toolItem.set(part.tool_call_id, existing.id);
+        return [{ op: "update", item: this.toolView(existing) }];
+      }
+    }
     if (part.name === "read_file") {
       const last = this.lastItem === undefined ? undefined : [...this.tools.values()].find((state) => state.id === this.lastItem && state.group !== undefined);
       const file = stringArg(args, "path") ?? "?";
@@ -488,6 +505,7 @@ export class ConversationPresenter {
     this.tools.set(state.id, state);
     this.toolItem.set(part.tool_call_id, state.id);
     this.lastItem = state.id;
+    if (part.name === "todo") this.todoItem = state.id;
     return [{ op: "append", item: this.toolView(state) }];
   }
 
@@ -547,6 +565,10 @@ export class ConversationPresenter {
     state.stat = outcome.stat;
     state.preview = outcome.preview;
     state.detail = outcome.detail;
+    if (state.name === "exec" && state.args.background === true && !failed) {
+      const handle = /^(p\d+) · /.exec(result.text)?.[1];
+      if (handle !== undefined && / · running · /.test(result.text.split("\n", 1)[0] ?? "")) state.background = { handle, startedAt: Date.parse(event.timestamp) - event.data.duration_ms };
+    }
     this.record(state, result, failed);
     return [{ op: "update", item: this.toolView(state) }];
   }
@@ -572,7 +594,7 @@ export class ConversationPresenter {
       const entry = this.ledger.files.get(file) ?? { added: 0, removed: 0, created: result.text.startsWith("created") };
       entry.added += content === "" ? 0 : content.replace(/\r?\n$/, "").split(/\r?\n/).length;
       this.ledger.files.set(file, entry);
-    } else if (state.name === "exec" && isTestCommand(argvOf(state.args))) {
+    } else if (state.name === "exec" && state.args.background !== true && isTestCommand(argvOf(state.args))) {
       const body = outputLines(result.text).join("\n");
       const failures = testCount(body, "fail");
       this.ledger.tests = { passed: testCount(body, "pass"), failed: failures === 0 ? undefined : failures, ok: !failed && result.exit_code === 0, exit: result.exit_code };
@@ -580,7 +602,17 @@ export class ConversationPresenter {
   }
 
   private toolView(state: ToolState): ConversationItem {
-    return { kind: "tool", id: state.id, status: state.status, title: state.title, summary: state.summary, preview: [...state.preview], detail: [...state.detail], stat: state.stat };
+    return {
+      kind: "tool",
+      id: state.id,
+      status: state.status,
+      title: state.title,
+      summary: state.summary,
+      preview: [...state.preview],
+      detail: [...state.detail],
+      stat: state.stat,
+      ...(state.background === undefined ? {} : { background: state.background }),
+    };
   }
 }
 
@@ -683,8 +715,26 @@ function toolTitle(name: string, args: Readonly<Record<string, unknown>>): strin
     }
     case "write_file":
       return `Write ${stringArg(args, "path") ?? "?"}`;
-    case "exec":
-      return `Run ${sanitizeInline(argvOf(args).join(" "), 120)}`;
+    case "exec": {
+      const command = sanitizeInline(argvOf(args).join(" "), 120);
+      if (args.background !== true) return `Run ${command}`;
+      const name = stringArg(args, "name");
+      return name === undefined ? `Start ${command}` : `${sanitizeInline(name, 40)} (${command})`;
+    }
+    case "glob": {
+      const where = stringArg(args, "path");
+      return `Find ${sanitizeInline(stringArg(args, "pattern") ?? "", 60)}${where === undefined || where === "." ? "" : ` in ${where}`}`;
+    }
+    case "todo":
+      return "Tasks";
+    case "process_output":
+      return `Output of ${stringArg(args, "handle") ?? "?"}`;
+    case "process_wait":
+      return `Wait for ${stringArg(args, "handle") ?? "?"}`;
+    case "process_kill":
+      return `Stop ${stringArg(args, "handle") ?? "?"}`;
+    case "process_list":
+      return "Background processes";
     case "git_status":
       return "Git status";
     case "git_diff":
@@ -780,6 +830,7 @@ function summarizeResult(
       return { summary: `${created ? "new file" : "rewritten"} ${g.sep} ${plural(lines, "line")}`, preview: [], detail: textLines(content.split(/\r?\n/).slice(0, DETAIL_LINES)) };
     }
     case "exec": {
+      if (args.background === true) return backgroundSummary(result, g);
       const body = outputLines(text);
       const seconds = `${(durationMs / 1000).toFixed(1)}s`;
       if (result.exit_code === undefined) return { summary: `${g.fail} ${failedText}`, stat: failedText, preview: textLines(body.slice(-5)), detail: textLines(body.slice(-DETAIL_LINES)) };
@@ -800,6 +851,34 @@ function summarizeResult(
         detail: textLines(body.slice(-DETAIL_LINES)),
       };
     }
+    case "glob": {
+      if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
+      const [header = "", ...files] = text.split("\n");
+      const count = /^(\d+) files? match/.exec(header)?.[1];
+      return { summary: count === undefined ? "no files" : plural(Number(count), "file"), preview: [], detail: textLines(files.slice(0, DETAIL_LINES)) };
+    }
+    case "todo": {
+      if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
+      const items = todoItems(args);
+      if (items.length === 0) return { summary: "checklist cleared", preview: [], detail: [] };
+      const done = items.filter((item) => item.status === "done").length;
+      const mark = (status: string): string => (status === "done" ? g.ok : status === "in_progress" ? (g.name === "rich" ? "◐" : ">") : g.name === "rich" ? "○" : "o");
+      const lines = items.map((item) => ({ op: " " as const, text: `${mark(item.status)} ${sanitizeInline(item.text, 200)}` }));
+      const inline = items.map((item) => `${item.status === "done" ? "[x]" : item.status === "in_progress" ? "[>]" : "[ ]"} ${sanitizeInline(item.text, 80)}`).join("; ");
+      return { summary: `${done}/${items.length} done ${g.sep} ${inline}`, stat: `${done}/${items.length} done`, preview: lines.slice(0, 12), detail: lines };
+    }
+    case "process_output":
+    case "process_wait":
+    case "process_kill":
+    case "process_list": {
+      if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
+      const [first = "", ...rest] = text.split("\n");
+      const body = rest.filter((line) => !/^(output \d+-\d+|no new output|still running|wait cancelled)/.test(line));
+      if (name === "process_list") return { summary: first === "no background processes" ? "none" : plural(text.split("\n").length, "process", "processes"), preview: [], detail: textLines(text.split("\n").slice(0, DETAIL_LINES)) };
+      const status = first.split(" · ").slice(2, 4).join(` ${g.sep} `);
+      const lines = rest.find((line) => line.startsWith("no new output")) !== undefined ? "no new output" : plural(body.length, "line");
+      return { summary: name === "process_kill" ? "stopped" : `${status}${name === "process_output" ? ` ${g.sep} ${lines}` : ""}`, preview: [], detail: textLines(body.slice(-DETAIL_LINES)) };
+    }
     case "git_status": {
       if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
       const changed = text.split("\n").filter((line) => /^[ MADRCU?!]{2} /.test(line));
@@ -811,6 +890,28 @@ function summarizeResult(
       return { summary: sanitizeInline(lines[0] ?? "done", 80) || "done", preview: [], detail: textLines(lines.slice(0, 20)) };
     }
   }
+}
+
+function todoItems(args: Readonly<Record<string, unknown>>): { readonly text: string; readonly status: string }[] {
+  const items = args.items;
+  if (!Array.isArray(items)) return [];
+  return items.flatMap((item: unknown) => {
+    if (typeof item !== "object" || item === null) return [];
+    const record = item as Record<string, unknown>;
+    return typeof record.text === "string" ? [{ text: record.text, status: typeof record.status === "string" ? record.status : "pending" }] : [];
+  });
+}
+
+/** `exec {background: true}`: `running · p1` while it runs, or how it ended within the start window. */
+function backgroundSummary(result: SessionEventOf<"tool/result_recorded">["data"]["result"], g: GlyphSet): ResultSummary {
+  const [first = "", ...rest] = result.text.split("\n");
+  const body = rest.slice(2);
+  if (result.status === "error") return { summary: friendlyError(result.error?.message ?? "failed to start"), preview: textLines(body.slice(-5)), detail: textLines(body.slice(-DETAIL_LINES)) };
+  const parts = first.split(" · ");
+  const handle = parts[0] ?? "";
+  const state = parts[2] ?? "";
+  if (state === "running") return { summary: `running in the background ${g.sep} ${handle}`, stat: `running ${g.sep} ${handle}`, preview: [], detail: textLines(body.slice(-DETAIL_LINES)) };
+  return { summary: `${state} ${g.sep} ${parts[3] ?? ""}`, stat: `${state} ${g.sep} ${parts[3] ?? ""}`, preview: textLines(body.slice(-5)), detail: textLines(body.slice(-DETAIL_LINES)) };
 }
 
 function plural(count: number, word: string, many = `${word}s`): string {

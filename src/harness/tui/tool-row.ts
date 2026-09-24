@@ -45,12 +45,53 @@ export function toolGlyph(item: ToolItem, glyphs: GlyphSet, paint: ToolRowPaint)
   }
 }
 
+/** What a background process is doing now; the session binds it to its process manager (K4.2). */
+export interface BackgroundStatus {
+  readonly running: boolean;
+  readonly startedAt: number;
+  readonly endedAt: number | undefined;
+  /** `exited 0`, `stopped`, `timed out` once it ended. */
+  readonly ended: string | undefined;
+}
+
+let backgroundSource: ((handle: string) => BackgroundStatus | undefined) | undefined;
+
+/** Binds the live status of background processes shown in tool rows; returns the unbind. */
+export function bindBackgroundStatus(source: (handle: string) => BackgroundStatus | undefined): () => void {
+  backgroundSource = source;
+  return () => {
+    if (backgroundSource === source) backgroundSource = undefined;
+  };
+}
+
+function elapsedShort(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes}m ${String(seconds % 60).padStart(2, "0")}s` : `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+/** `◌ dev server (pnpm dev)  running · 12s` (live) or `✓ … exited 0 · 34s` once it ended. */
+function backgroundHead(item: ToolItem, g: GlyphSet, paint: ToolRowPaint): { readonly glyph: string; readonly stat: string } | undefined {
+  const background = item.background;
+  if (background === undefined || item.status !== "ok") return undefined;
+  const live = backgroundSource?.(background.handle);
+  const now = Date.now();
+  if (live === undefined || live.running) {
+    const started = live?.startedAt ?? background.startedAt;
+    return { glyph: paint.running(g.name === "rich" ? "◌" : "o"), stat: `running ${g.sep} ${elapsedShort(now - started)} ${g.sep} ${background.handle}` };
+  }
+  const failed = live.ended !== undefined && !/^(exited 0|stopped)/.test(live.ended);
+  return { glyph: failed ? paint.fail(g.fail) : paint.dim(g.ok), stat: `${live.ended ?? "ended"} ${g.sep} ${elapsedShort((live.endedAt ?? now) - live.startedAt)} ${g.sep} ${background.handle}` };
+}
+
 export function renderToolRow(item: ToolItem, options: ToolRowOptions): string[] {
   const { width, glyphs: g, paint, fit, measure } = options;
   const lines: string[] = options.gap ? [""] : [];
-  const head = `${toolGlyph(item, g, paint)} ${paint.bold(item.title)}`;
+  const background = backgroundHead(item, g, paint);
+  const head = `${background?.glyph ?? toolGlyph(item, g, paint)} ${paint.bold(item.title)}`;
   const trouble = item.status === "failed" || item.status === "denied" || item.status === "cancelled";
-  const stat = item.stat ?? item.summary;
+  const stat = background?.stat ?? item.stat ?? item.summary;
   if (stat !== undefined && !trouble && measure(item.title) + measure(stat) + 4 <= width) {
     lines.push(fit(`${head}  ${paint.dim(stat)}`, width));
   } else {

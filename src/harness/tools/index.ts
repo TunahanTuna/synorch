@@ -16,5 +16,8 @@ export { childEnvironment, INHERITED_ENV_ALLOWLIST, isBlockedEnvName } from "./e
 export { createToolGateway, type ToolGatewayDependencies } from "./gateway.ts";
 export { boundText, createRedactor, INLINE_OUTPUT_LIMIT_BYTES, REDACTED, type Redactor } from "./redaction.ts";
 export { createToolRegistry, type ToolRegistryOptions } from "./registry.ts";
+export { BackgroundProcessManager, describeProcess, formatElapsedShort, type BackgroundProcessInfo } from "./builtin/process-bg.ts";
+export { todoSummary, TODO_STATUSES, type TodoStatus } from "./builtin/todo.ts";
+export { isImageBlob } from "./builtin/read-media.ts";
 export { createSandboxRunner, probeSandbox, sandboxedArgv, type SandboxProbeOptions } from "./sandbox.ts";
 export { resolveWorkspacePath, ToolScopeViolation, type ResolvedWorkspacePath } from "./workspace-path.ts";

@@ -49,7 +49,8 @@ import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageTokens, reconstructHistory } from "../context/index.ts";
 import { WorkerStreamHub, type OrchestrationCoordinator, type WorkerControlResult, type WorkerDirectory } from "../orchestration/index.ts";
 import { createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/index.ts";
-import { describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
+import { bindBackgroundStatus, describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
+import { describeProcess } from "../tools/index.ts";
 import type { ParsedCommand } from "./args.ts";
 import { mayContainImage, resolveAttachments } from "./attachments.ts";
 
@@ -287,6 +288,8 @@ class Conversation implements ConversationCommandHost {
   private debug = false;
   private submittedAt: number | undefined;
   private readonly timings: string[] = [];
+  /** K4.2: the first Esc (with background processes running) armed "Esc again stops them". */
+  private processStopArmedAt: number | undefined;
 
   public constructor(parsed: AgentCommand, io: SessionIO, overrides: RuntimeOverrides) {
     this.parsed = parsed;
@@ -381,6 +384,7 @@ class Conversation implements ConversationCommandHost {
     const unbind = io.stdinIsTTY && this.renderer.input !== undefined ? runtime.bindUserPrompt((question, options, signal) => this.askUser(question, options, signal)) : () => undefined;
     runtime.orchestrate.set((input, context) => this.runOrchestration(input, context));
     let unbindControls: () => void = () => undefined;
+    const unwatchProcesses = this.watchProcesses();
     this.startedAt = Date.now();
     try {
       this.grants = createCommandGrantStore(runtime.home, runtime.trust.state().root);
@@ -409,6 +413,10 @@ class Conversation implements ConversationCommandHost {
     } catch (error) {
       return await this.fail(failureInfo(error));
     } finally {
+      // Background processes never outlive the session (K4.2): the whole tree of each is killed.
+      this.exiting = true;
+      await runtime.processes.killAll().catch(() => undefined);
+      unwatchProcesses();
       unbindControls();
       runtime.orchestrate.set(undefined);
       unbind();
@@ -882,6 +890,17 @@ class Conversation implements ConversationCommandHost {
     const orchestration = this.orchestration;
     if (orchestration === undefined) {
       this.active?.abort();
+      // K4.2: background processes survive an interrupted turn; a second Esc within the window stops them.
+      const running = this.runtime.processes.running().length;
+      if (running > 0) {
+        if (this.processStopArmedAt !== undefined && Date.now() - this.processStopArmedAt <= ESC_ARM_MS) {
+          this.processStopArmedAt = undefined;
+          void this.runtime.processes.killAll().then((count) => this.note("warning", `Stopped ${count} background process${count === 1 ? "" : "es"}`));
+        } else {
+          this.processStopArmedAt = Date.now();
+          this.note("info", `${running} background process${running === 1 ? " is" : "es are"} still running ${this.glyphs.sep} Esc again stops ${running === 1 ? "it" : "them"} ${this.glyphs.sep} /ps lists them`);
+        }
+      }
       return;
     }
     if (!orchestration.tracker.stopArmed) {
@@ -1805,6 +1824,55 @@ class Conversation implements ConversationCommandHost {
 
   public async cost(): Promise<void> {
     this.print(this.usageLedger?.cost() ?? ["No usage recorded yet."]);
+  }
+
+  /** `/ps [kill <handle|all>]`: background processes of this session (conversation and workers). */
+  public async ps(argument: string): Promise<void> {
+    const processes = this.runtime.processes;
+    const [verb, target] = argument.trim().split(/\s+/);
+    if (verb === "kill" || verb === "stop") {
+      if (target === undefined || target === "all") {
+        const count = await processes.killAll();
+        this.print([count === 0 ? "No background process is running." : `Stopped ${count} background process${count === 1 ? "" : "es"}.`]);
+        return;
+      }
+      const stopped = await processes.kill(target);
+      this.print([stopped === undefined ? `No background process ${target}; /ps lists them.` : `Stopped ${describeProcess(stopped)}`]);
+      return;
+    }
+    const all = processes.list();
+    if (all.length === 0) {
+      this.print(["No background processes. The agent starts one with exec {background: true} (dev servers, watchers, long test runs)."]);
+      return;
+    }
+    const g = this.glyphs;
+    this.print([
+      ...all.map((info) => `${info.state === "running" ? (g.name === "rich" ? "◌" : "o") : info.state === "exited" && info.exitCode === 0 ? g.ok : g.fail} ${describeProcess(info)}${info.owner === "session" ? "" : ` ${g.sep} worker`}`),
+      `/ps kill <handle|all> stops them ${g.sep} all are stopped when the session ends`,
+    ]);
+  }
+
+  /** Background process lifecycle in the view: live row status and a note when one ends by itself. */
+  private watchProcesses(): () => void {
+    const processes = this.runtime.processes;
+    const unbindStatus = bindBackgroundStatus((handle) => {
+      const info = processes.get(handle);
+      if (info === undefined) return undefined;
+      const ended = info.state === "running" ? undefined : info.state === "exited" ? `exited ${info.exitCode ?? info.signal ?? "?"}` : info.state === "killed" ? "stopped" : info.state === "timeout" ? "timed out" : "failed to start";
+      return { running: info.state === "running", startedAt: info.startedAt, endedAt: info.endedAt, ended };
+    });
+    const unsubscribe = processes.onChange((info, change) => {
+      if (change !== "ended" || info.state === "killed" || this.exiting) return;
+      const failed = info.state !== "exited" || info.exitCode !== 0;
+      this.note(failed ? "warning" : "info", `${failed ? this.glyphs.warn : this.glyphs.ok} background ${describeProcess(info)}`);
+    });
+    const onExit = (): void => processes.killAllSync();
+    process.once("exit", onExit);
+    return () => {
+      unbindStatus();
+      unsubscribe();
+      process.removeListener("exit", onExit);
+    };
   }
 
   /** Events of this conversation's worker runs (this process, or recorded in orchestrate results when resumed). */

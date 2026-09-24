@@ -8,6 +8,9 @@ import {
 } from "../contracts/index.ts";
 import { createControlTools, type ControlCallbacks } from "./builtin/control-tools.ts";
 import { createExecTool, createGitDiffTool, createGitStatusTool, type CommandClassifierHint } from "./builtin/process-tools.ts";
+import { createGlobTool } from "./builtin/glob.ts";
+import { BackgroundProcessManager, createProcessTools } from "./builtin/process-bg.ts";
+import { createTodoTool } from "./builtin/todo.ts";
 import { createListDirTool, createReadFileTool, createSearchTool } from "./builtin/read-tools.ts";
 import { createApplyPatchTool, createWriteFileTool } from "./builtin/write-tools.ts";
 
@@ -18,6 +21,8 @@ export interface ToolRegistryOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly classifyCommand?: CommandClassifierHint;
   readonly control?: ControlCallbacks;
+  /** K4.2: the session's background processes (a private manager when absent). */
+  readonly processes?: BackgroundProcessManager;
 }
 
 /** The v1 registry: built-in tools plus anything registered later; every tool's metadata is validated. */
@@ -37,7 +42,9 @@ export function createToolRegistry(options: ToolRegistryOptions = {}): ToolRegis
     },
   };
   if (options.builtins ?? true) {
-    const processOptions = { environment: options.environment ?? process.env, classifyCommand: options.classifyCommand };
+    const background = options.processes ?? new BackgroundProcessManager();
+    const environment = options.environment ?? process.env;
+    const processOptions = { environment, classifyCommand: options.classifyCommand, background };
     const builtins: Tool[] = [
       createReadFileTool() as Tool,
       createSearchTool() as Tool,
@@ -47,6 +54,9 @@ export function createToolRegistry(options: ToolRegistryOptions = {}): ToolRegis
       createApplyPatchTool() as Tool,
       createWriteFileTool() as Tool,
       createExecTool(processOptions) as Tool,
+      ...createProcessTools(background),
+      createGlobTool({ environment }) as Tool,
+      createTodoTool() as Tool,
       ...createControlTools(options.control ?? {}),
     ];
     for (const tool of builtins) registry.register(tool);

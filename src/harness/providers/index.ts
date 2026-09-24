@@ -30,5 +30,17 @@ export {
   type ResponsesAdapterOptions,
 } from "./responses.ts";
 export { RouteBlockedFailure, type ModelRouterConfig, type ProviderChangeProposal, type RouteBinding, type RouteRule } from "../contracts/index.ts";
-export { createModelRouter, type ModelRouterOptions } from "./router.ts";
+export { createModelRouter, type ModelRouterOptions, type SessionModelRouter } from "./router.ts";
+export {
+  anthropicWireModelId,
+  badgeOf,
+  buildModelCatalog,
+  fetchCodexModels,
+  KNOWN_ANTHROPIC_MODELS,
+  KNOWN_OPENAI_MODELS,
+  type CatalogBadge,
+  type CatalogIdentity,
+  type CatalogInput,
+  type CatalogModel,
+} from "./catalog.ts";
 export { createScriptedAdapter, type ScriptedAdapterOptions, type ScriptedModelAdapter, type ScriptStep } from "./scripted.ts";

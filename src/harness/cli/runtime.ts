@@ -19,7 +19,13 @@ import {
   type EffectivePolicy,
   type EventStore,
   type MemoryStore,
+  type ModelRoute,
   type ModelRouter,
+  type ModelTier,
+  type AgentRole,
+  type AuthMethodKind,
+  type RouteBinding,
+  type RouteRule,
   type PolicyEngine,
   type PermissionMode,
   type PolicyMode,
@@ -78,6 +84,12 @@ import {
   createOpenAIChatGPTAdapter,
   createOpenAIResponsesAdapter,
   createScriptedAdapter,
+  buildModelCatalog,
+  CHATGPT_CODEX_BASE_URL,
+  fetchCodexModels,
+  SYNORCH_ORIGINATOR,
+  type CatalogIdentity,
+  type CatalogModel,
   type FetchLike,
 } from "../providers/index.ts";
 import { createBlobStore, createSessionStore } from "../store/index.ts";
@@ -198,6 +210,20 @@ export interface Runtime {
   /** Switches the permission mode (Shift+Tab, /permissions); workers started later inherit `full` only. */
   setPermissionMode(mode: PermissionMode | undefined): void;
   createCoordinator(broker: ApprovalBroker): Coordinator;
+  /** The route rules as the router sees them now: `/model` session routes first, then the configured ones (K1.5). */
+  routeRules(): readonly RouteRule[];
+  /**
+   * Points a tier (and optionally a role) at another provider/model for this session (K1.5 `/model`).
+   * The adapter is built on first use; only a logged-in identity is accepted (never a silent fallback).
+   */
+  setSessionRoute(tier: ModelTier, role: AgentRole | undefined, route: RouteBinding): Promise<ModelRoute>;
+  clearSessionRoute(tier: ModelTier, role: AgentRole | undefined): boolean;
+  /**
+   * Models of every provider and auth method, grouped by provider, with whether each identity is
+   * logged in. No paid request is sent; `listing: true` also asks the ChatGPT subscription's free
+   * Codex models listing (never used by doctor).
+   */
+  modelCatalog(signal: AbortSignal, options?: { readonly listing?: boolean }): Promise<CatalogModel[]>;
   /** Crash recovery of a session and of every attempt session it started; nothing is re-executed. */
   recover(sessionId: SessionId): Promise<readonly RecoveryReport[]>;
 }
@@ -332,6 +358,14 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   });
   const adapters = await buildAdapters(config, overrides, env, home);
   const baseRouter = createModelRouter({ rules: config.router.rules }, adapters);
+  /** An adapter for a built-in kind the configuration did not need yet (a provider first picked in `/model`). */
+  const implicitAdapter = async (id: string): Promise<AnyModelAdapter | undefined> => {
+    const existing = adapters.find((adapter) => adapter.adapterId === id);
+    if (existing !== undefined) return existing;
+    const kind = IMPLICIT_ADAPTERS[id];
+    if (kind === undefined) return undefined;
+    return buildAdapter({ id, kind, script: undefined, provider: undefined, baseUrl: undefined, source: "user" }, overrides.fetch, env, home);
+  };
 
   const listeners = new Set<RuntimeListener>();
   const emit = (event: RenderEvent): void => {
@@ -436,9 +470,26 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     return authProviders.get(key);
   };
 
+  /** Whether an identity is usable, from its auth status only (store / env / opt-in; never a model request). */
+  const identityOf = async (provider: string, method: AuthMethodKind, profile: string, signal: AbortSignal): Promise<CatalogIdentity> => {
+    if (provider === SCRIPTED_PROVIDER) return { connected: true, hint: "" };
+    const scripted = adapters.find((adapter) => adapter.providerId === provider && adapter.authMethod === method && (adapter as { readonly scripted?: boolean }).scripted === true);
+    if (scripted !== undefined) return { connected: true, hint: "" };
+    const auth = authProvider(provider, method, profile);
+    if (auth === undefined) return { connected: false, hint: `${provider} does not support ${method}` };
+    const status = await auth.status(signal).catch(() => undefined);
+    const state = status?.state;
+    const connected = method === "cli-bridge" ? state === "unknown" || state === "connected" : state === "connected" || state === "expired";
+    const login = method === "cli-bridge" ? `syn login ${provider} --method cli-bridge` : method === "api-key" ? `syn login ${provider} --method api-key` : `syn login ${provider}`;
+    return { connected, hint: connected ? "" : `${status?.detail ?? state ?? "not logged in"}; run ${login}` };
+  };
+
   const redactionValues = new Set<string>();
   const credentials: CredentialResolver = async (route, signal, resolveOptions) => {
-    if (route.provider_id === SCRIPTED_PROVIDER || adapters.some((adapter) => adapter.adapterId === route.adapter_id && adapter.providerId === SCRIPTED_PROVIDER)) {
+    if (
+      route.provider_id === SCRIPTED_PROVIDER ||
+      adapters.some((adapter) => adapter.adapterId === route.adapter_id && (adapter.providerId === SCRIPTED_PROVIDER || (adapter as { readonly scripted?: boolean }).scripted === true))
+    ) {
       return scriptedCredential(route.profile);
     }
     const auth = authProvider(route.provider_id, route.auth_method, route.profile);
@@ -728,6 +779,46 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         platform,
         workspaceTrust: effectiveTrust,
         ...(overrides.limits === undefined ? {} : { limits: overrides.limits }),
+      });
+    },
+    routeRules: () => baseRouter.rules(),
+    async setSessionRoute(tier, role, binding) {
+      const adapter = await implicitAdapter(binding.adapter_id);
+      if (adapter === undefined) throw configError(`adapter ${binding.adapter_id} is neither built in nor configured`);
+      if (adapter.providerId !== binding.provider_id) throw configError(`adapter ${adapter.adapterId} belongs to ${adapter.providerId}, not ${binding.provider_id}`);
+      const identity = await identityOf(adapter.providerId, adapter.authMethod, binding.profile ?? "default", new AbortController().signal);
+      if (!identity.connected) throw configError(`${adapter.providerId} (${adapter.authMethod}) is not logged in: ${identity.hint}`);
+      if (!baseRouter.hasAdapter(adapter.adapterId)) {
+        baseRouter.addAdapter(adapter);
+        if (!adapters.includes(adapter)) adapters.push(adapter);
+      }
+      return baseRouter.setSessionRule(tier, role, binding);
+    },
+    clearSessionRoute: (tier, role) => baseRouter.clearSessionRule(tier, role),
+    async modelCatalog(signal, catalogOptions = {}) {
+      const pool: AnyModelAdapter[] = [...adapters];
+      for (const id of Object.keys(IMPLICIT_ADAPTERS)) {
+        if (pool.some((adapter) => adapter.adapterId === id)) continue;
+        const built = await implicitAdapter(id).catch(() => undefined);
+        if (built !== undefined) pool.push(built);
+      }
+      return buildModelCatalog({
+        adapters: pool,
+        rules: baseRouter.rules(),
+        identity: (provider, method) => identityOf(provider, method, "default", signal),
+        ...(catalogOptions.listing === true
+          ? {
+              listed: async (adapter: AnyModelAdapter) => {
+                if (adapter.kind !== "model" || adapter.authMethod !== "oauth-subscription" || adapter.providerId !== "openai") return undefined;
+                const auth = authProvider("openai", "oauth-subscription", "default");
+                if (auth === undefined) return undefined;
+                const credential = await auth.resolve(signal);
+                const headers = new Headers({ accept: "application/json", originator: SYNORCH_ORIGINATOR });
+                credential.applyTo(headers);
+                return fetchCodexModels(overrides.fetch ?? fetch, headers, signal, CHATGPT_CODEX_BASE_URL);
+              },
+            }
+          : {}),
       });
     },
     async recover(sessionId) {

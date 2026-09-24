@@ -32,7 +32,7 @@ import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts
 export type CheckStatus = "ok" | "warn" | "fail";
 
 export interface DoctorCheck {
-  readonly id: "node" | "terminal" | "config" | "canonical" | "sandbox" | "trust" | "store" | "auth" | "capabilities" | "probe-model";
+  readonly id: "node" | "terminal" | "config" | "canonical" | "sandbox" | "trust" | "store" | "auth" | "capabilities" | "models" | "probe-model";
   readonly status: CheckStatus;
   readonly summary: string;
   readonly details: readonly unknown[];
@@ -231,6 +231,37 @@ async function capabilitiesCheck(runtime: Runtime, signal: AbortSignal): Promise
   };
 }
 
+/**
+ * K1.5: which models each provider identity offers right now (ChatGPT subscription, Claude via the
+ * bridge, API keys), from auth status and the known lists only: no model request, no listing call.
+ */
+async function modelsCheck(runtime: Runtime, signal: AbortSignal): Promise<DoctorCheck> {
+  try {
+    const catalog = await runtime.modelCatalog(signal);
+    const groups = new Map<string, { connected: boolean; models: string[]; hint: string | undefined }>();
+    for (const row of catalog) {
+      const key = `${row.provider} ${row.badge}`;
+      const group = groups.get(key) ?? { connected: row.connected, models: [], hint: row.unavailable };
+      group.models.push(row.model);
+      groups.set(key, group);
+    }
+    const usable = [...groups.entries()].filter(([, group]) => group.connected);
+    const missing = [...groups.entries()].filter(([, group]) => !group.connected).map(([key]) => key);
+    const summary =
+      usable.length === 0
+        ? "no provider is logged in (syn login openai · syn login anthropic --method cli-bridge|api-key)"
+        : `${usable.map(([key, group]) => `${key}: ${group.models.slice(0, 4).join(", ")}${group.models.length > 4 ? ` +${group.models.length - 4}` : ""}`).join(" · ")}${missing.length === 0 ? "" : ` · not logged in: ${missing.join(", ")}`}`;
+    return {
+      id: "models",
+      status: usable.length === 0 ? "warn" : "ok",
+      summary,
+      details: catalog.map((row) => ({ provider: row.provider, model: row.model, adapter_id: row.adapterId, auth: row.badge, connected: row.connected, capability: row.capability, image_input: row.imageInput, source: row.source, ...(row.unavailable === undefined ? {} : { unavailable: row.unavailable }) })),
+    };
+  } catch (error) {
+    return { id: "models", status: "warn", summary: `model catalog unavailable: ${failureInfo(error).message}`, details: [] };
+  }
+}
+
 async function probeModels(runtime: Runtime, signal: AbortSignal): Promise<DoctorCheck> {
   const details: unknown[] = [];
   const statuses: CheckStatus[] = [];
@@ -304,6 +335,7 @@ export async function doctorRuntime(io: DoctorIO, target: string | undefined, pr
   checks.push(await storeCheck(home, runtime?.projectId ?? deriveProjectId(workspaceRoot, io.platform), workspaceRoot));
   checks.push(await authCheck(home, io, overrides, controller.signal));
   if (runtime !== undefined) checks.push(await capabilitiesCheck(runtime, controller.signal));
+  if (runtime !== undefined) checks.push(await modelsCheck(runtime, controller.signal));
   if (probeModel && runtime !== undefined) checks.push(await probeModels(runtime, controller.signal));
   const report: DoctorReport = {
     schema: "synorch.doctor.runtime",

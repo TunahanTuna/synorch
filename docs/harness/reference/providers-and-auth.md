@@ -15,7 +15,8 @@ Bu belge I2'nin gerçekte ne yaptığını, hangi varsayımlara dayandığını 
 | `providers/responses.ts` | `openai-chatgpt` ve `openai-responses` (aynı durumsuz Responses kodu) |
 | `providers/anthropic-messages.ts` | `anthropic-messages`; `MessagesMapper` köprüde de kullanılır |
 | `providers/authenticated-stream.ts` | `streamAuthenticated`: credential çözümü + 401'de tek zorunlu refresh |
-| `providers/router.ts` | `createModelRouter`: tier → route, reviewer bağımsızlığı, kota bloğu, `provider-change` |
+| `providers/router.ts` | `createModelRouter`: tier → route, reviewer bağımsızlığı (farklı sağlayıcı tercihi), oturum route katmanı (`/model`), kota bloğu, `provider-change` |
+| `providers/catalog.ts` | K1.5 model kataloğu: bağlı kimlik başına modeller, rozet (abonelik / API key / köprü), `anthropicWireModelId`, Codex model listesi |
 | `providers/claude-code/*` | `claude-code` köprüsü: süreç yönetimi, MCP sunucusu, stdio relay |
 | `providers/codex-app-server.ts` | P2 iskelet (uygulama yok) |
 | `providers/scripted.ts`, `grammar.ts`, `testing.ts` | Scripted adapter, stream dilbilgisi denetçisi, test doubles |
@@ -108,6 +109,31 @@ Credential `AuthProvider.resolve` ile alınır (süresi dolmak üzereyse refresh
 - Capability yoklaması adapter'ın statik keşfiyle yapılır (önbellek 5 dk); adapter model listesi boş değilse ve model listede yoksa `model_unavailable` (sessiz değişiklik yok).
 - Kota: `reportFailure(route, error)` yalnız `quota_exhausted` için route'u `retry_after_ms` sonuna kadar (yoksa süresiz) bloklar. Bloklu route'a çözümleme `RouteBlockedFailure` (`quota_exhausted`, `alternatives[]`) fırlatır. `proposeProviderChange` insan onayı gerektiren `provider-change` `ApprovalRequest`'i üretir (`subject_digest = digestOf({from, to, tier, role})`). `applyProviderChange` yalnız `decided_by: "user"` ve izin veren sonuçla, aynı onay kimliği ve digest için fallback'i açar; sonraki kararlar `fallback{used: true, from, approval_id}` taşır. Orkestratör, reddedilmiş veya digest'i değiştirilmiş karar reddedilir.
 
+## 5a. Çapraz sağlayıcı: katalog, tier/rol route'ları ve köprü worker'ları (K1.5, 2026-09-24)
+
+**Model kataloğu** (`runtime.modelCatalog`, `buildModelCatalog`): her yerleşik adapter için (`openai-chatgpt`, `openai-responses`, `anthropic-messages`, `claude-code` + yapılandırılmış olanlar) satırlar üretir; sıra openai → anthropic → diğerleri. Kaynak: önce yapılandırılmış route modelleri, sonra sağlayıcı listesi (yalnız ChatGPT aboneliği için `GET chatgpt.com/backend-api/codex/models`, ücretsiz listeleme, yalnız `/model` seçicisi açıkken; biçimi doğrulanmadı, hata → bilinen liste), yoksa bilinen liste (`KNOWN_OPENAI_MODELS`: gpt-6-sol/astra/luna, gpt-5.6-sol/luna; `KNOWN_ANTHROPIC_MODELS`: opus-5.5, fable-5.1, opus-5, sonnet-5, haiku-4.5). `connected` yalnız auth durumundan gelir (depo/env/opt-in; model isteği yok): ChatGPT `connected|expired`, API key `connected`, köprü opt-in (`unknown`). Bağlı olmayan satırlar seçilemez ve giriş komutunu gösterir. Yetenek bilinmiyorsa `capability: unknown`; `imageInput` bilinen modellerde `supported`, diğerlerinde `unknown`.
+
+**Claude model kimlikleri:** route'larda kısa kimlik kullanılır; `anthropicWireModelId` hem `claude --model` hem Messages API için çevirir: `opus-5.5` → `claude-opus-5-5`, `sonnet-5` → `claude-sonnet-5`, `haiku-4.5` → `claude-haiku-4-5`; `claude-*` ve Claude Code takma adları (`opus`, `sonnet`, `haiku`) aynen geçer. Messages API'de Opus 5.x / Sonnet 5 / Fable modelleri için `reasoning_effort` → `thinking: {type: adaptive}` + `output_config.effort` (bu modeller `budget_tokens`'ı reddeder).
+
+**Tier ve rol route'ları:** her tier (`orchestrator`, `complex_worker`, `fast_worker`, `session`) ve rol kuralı farklı sağlayıcıya/adapter türüne işaret edebilir. `SessionModelRouter` sözleşmedeki `ModelRouter`'a oturum katmanını ekler: `rules()`, `setSessionRule(tier, role, binding)`, `clearSessionRule`, `addAdapter`. Runtime: `routeRules()`, `setSessionRoute()` (adapter ilk kullanımda kurulur; giriş yapılmamış kimlik `config_invalid` ile reddedilir — sessiz fallback yok), `clearSessionRoute()`.
+
+**Reviewer bağımsızlığı:** `RouteRequest.implementer` (coordinator, implementer attempt'inin gerçek route'unu verir). `preferDifferentProvider` (router seçeneği, varsayılan `true`): önce aynı tier'da implementer'dan farklı sağlayıcı; yoksa herhangi bir tier'daki farklı sağlayıcılı route (önce `reviewer` rol kuralları; route talep edilen tier'a yeniden etiketlenir); yoksa farklı model; hiçbiri yoksa aynı model. Karar gerekçesi hangisinin olduğunu her zaman yazar (`route/decided.reason`: "independent of the implementer provider …", "no route on a provider other than … is configured", "shares the implementer model"). Yapılandırma anahtarı (`prefer_different_provider`) config şemasına bağlanmadı (cli/config.ts başka çalışanın); bağlanınca `createModelRouter({ preferDifferentProvider })` ile verilir.
+
+**Köprü worker olarak:** `claude-code` route'u herhangi bir worker/reviewer tier'ına konabilir. Driver'ın `#backendStep`'i attempt turunu `AgentBackendAdapter` ile sürer; araçlar (rapor araçları `task_report` / `review_report` dahil) MCP ToolBridge üzerinden rolün policy'siyle listelenir ve her çağrı ToolGateway'den geçer; `tool/*`, `message/recorded`, `provider/usage` olayları doğrudan adapter'larla aynıdır; iptal attempt sinyaliyle köprüyü keser. Worker manager attempt başına **tek driver** tutar: finish-now / report-only / düzeltme turları aynı Claude Code oturumunu `--resume` ile sürdürür. Görseller (K1.5-B) köprüde stream-json kullanıcı mesajına base64 `image` blokları olarak gider.
+
+**`/model`** (`cli/model-picker.ts`): seçici (U1 `openModelPicker`) önce tier satırlarını (geçerli route, rozet, kaynak) sonra sağlayıcıya göre gruplu katalog satırlarını gösterir; seçim bu oturum için tier route'unu ayarlar, ardından "varsayılan olarak kaydet?" onayı `<home>/config.yaml` `routes` girdisini yazar (yorumlar korunur, varsayılan olmayan adapter yazılır). Metin: `/model` (tier'lar + katalog), `/model <tier>` (sohbeti o tier'a geçir), `/model <tier>[/<rol>] <sağlayıcı>/<model>[@adapter] [--save]`. Örnek hedef:
+
+```yaml
+routes:
+  - { tier: orchestrator,   provider: openai,    model: gpt-6-sol }
+  - { tier: complex_worker, provider: anthropic, model: opus-5.5, adapter: claude-code }   # veya adapter'sız: anthropic-messages (API key)
+  - { tier: fast_worker,    provider: openai,    model: gpt-6-luna }
+```
+
+**Doctor:** `models` kontrolü sağlayıcı/rozet başına kullanılabilir modelleri ve giriş yapılmamış kimlikleri listeler; ağ isteği yok (Codex listesi çağrılmaz).
+
+**Testler:** `tests/harness-crossprovider-routing.test.ts` (tier başına sağlayıcı, farklı sağlayıcılı reviewer, oturum route'u, kimlik eşlemesi, katalog + kalıcılık), `tests/harness-crossprovider-e2e.test.ts` (OpenAI orkestratör → sahte `claude` köprü implementer'ı MCP ile `write_file` + `task_report` → OpenAI reviewer; koşu başarılı). Gerçek Claude Code ile henüz denenmedi (bkz. §9).
+
 ## 6. Kimlik doğrulama
 
 ### 6.1 ChatGPT aboneliği (`openai` / `oauth-subscription`)
@@ -176,7 +202,8 @@ Hiçbir test ağa veya gerçek hesaba çıkmaz; aşağıdakiler kullanıcının 
 3. `claude` bayrakları: `--setting-sources ""` boş değerinin kabulü, `--allowedTools "mcp__synorch__*"` joker biçimi, `--permission-prompt-tool` dönüş biçimi (`{"behavior":"allow","updatedInput"}` / `{"behavior":"deny","message"}`), `--include-partial-messages` ile olay sırası, `result.is_error` + `Login expired` metni ve `apiKeySource` değerleri resmi dokümandan/araştırmadan alındı; gerçek `claude` ile denenmedi. Kimlik kaynağı zorlaması yalnız `oauth`'u abonelik sayar: gerçek `claude` abonelik girişinde başka bir değer (ör. `none`) bildirirse tur reddedilir ve kullanıcı `allow_non_subscription_auth: true` ile açıkça kabul etmelidir. `system/init` ilk kullanıcı mesajından sonra geldiği için reddedilen turun ilk model isteği `claude` tarafında başlamış olabilir. `CLAUDE_CODE_MINIMUM_VERSION = 2.0.0` tahmindir.
 4. Stream-json girdi modunda SIGINT'in yalnız turu mu yoksa süreci mi bitirdiği doğrulanmadı; uygulama her iki durumda süreci atıp sonraki turda `--resume` kullanır.
 5. macOS `security -i` ve Linux `secret-tool` davranışı sahte runner ile test edildi; gerçek macOS/Linux makinede CI matrisi gerekir.
-6. Anthropic Messages eşlemesi resmi şemaya göre yazıldı, kayıtlı fixture ile test edildi; canlı API ile denenmedi.
+6. K1.5: köprünün worker rolünde gerçek `claude` ile davranışı (MCP'den rapor araçları, `--resume` ile follow-up turları, `--model claude-opus-5-5` kabulü, görsel blokları) ve Codex models listeleme uç noktasının yanıt biçimi doğrulanmadı.
+7. Anthropic Messages eşlemesi resmi şemaya göre yazıldı, kayıtlı fixture ile test edildi; canlı API ile denenmedi.
 
 ## 10. Sözleşme değişiklik istekleri (Dalga 2a sonucu)
 

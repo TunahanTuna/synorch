@@ -22,6 +22,7 @@ import {
   type ToolBridge,
 } from "../../contracts/index.ts";
 import { MessagesMapper } from "../anthropic-messages.ts";
+import { anthropicWireModelId } from "../catalog.ts";
 import { StreamAssembler, usageOf } from "../assembler.ts";
 import { numberField, providerError, record, stringField } from "../errors.ts";
 import { McpToolServer, MCP_SERVER_NAME, PERMISSION_TOOL_NAME, serveMcpConnection } from "./mcp-server.ts";
@@ -89,7 +90,7 @@ export function buildClaudeArgs(input: ClaudeArgsInput): string[] {
     "--system-prompt-file",
     input.systemPromptPath,
     "--model",
-    input.modelId,
+    anthropicWireModelId(input.modelId),
     ...(input.resume ? ["--resume", input.sessionId] : ["--session-id", input.sessionId]),
     "--max-turns",
     String(input.maxTurns),
@@ -339,8 +340,8 @@ class ClaudeCodeSession implements BackendSession {
       yield { type: "error", error: providerError("invalid_request", "a turn is already running in this backend session") };
       return;
     }
-    const text = trailingUserText(input);
-    if (text === undefined) {
+    const content = trailingUserContent(input);
+    if (content === undefined) {
       yield { type: "error", error: providerError("invalid_request", "a backend turn needs a trailing user message") };
       return;
     }
@@ -369,7 +370,7 @@ class ClaudeCodeSession implements BackendSession {
         return;
       }
       yield start.data;
-      this.child?.stdin?.write(`${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })}\n`);
+      this.child?.stdin?.write(`${JSON.stringify({ type: "user", message: { role: "user", content } })}\n`);
 
       let initSent = false;
       let nextIndex = 0;
@@ -701,18 +702,29 @@ class ClaudeCodeSession implements BackendSession {
   }
 }
 
-function trailingUserText(input: BackendTurnInput): string | undefined {
-  const texts: string[] = [];
+type UserBlock = { readonly type: "text"; readonly text: string } | { readonly type: "image"; readonly source: { readonly type: "base64"; readonly media_type: string; readonly data: string } };
+
+/**
+ * The trailing user messages as stream-json content blocks: text, and images as base64 `image`
+ * blocks (the driver fills `data` from the blob store right before the turn; K1.5-B).
+ */
+function trailingUserContent(input: BackendTurnInput): UserBlock[] | undefined {
+  const blocks: UserBlock[] = [];
   for (let index = input.messages.length - 1; index >= 0; index -= 1) {
     const message = input.messages[index];
     if (message === undefined || message.role !== "user") break;
+    const own: UserBlock[] = [];
     const text = message.content
       .filter((part) => part.type === "text")
       .map((part) => (part.type === "text" ? part.text : ""))
       .join("\n");
-    if (text !== "") texts.unshift(text);
+    if (text !== "") own.push({ type: "text", text });
+    for (const part of message.content) {
+      if (part.type === "image" && part.data !== undefined) own.push({ type: "image", source: { type: "base64", media_type: part.blob.media_type, data: part.data } });
+    }
+    blocks.unshift(...own);
   }
-  return texts.length === 0 ? undefined : texts.join("\n\n");
+  return blocks.some((block) => block.type === "text") ? blocks : undefined;
 }
 
 /** Recognizes `Login expired · Please run /login` and rate/billing failures in backend output. */

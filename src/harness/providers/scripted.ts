@@ -24,6 +24,8 @@ export interface ScriptedAdapterOptions {
 export interface ScriptedModelAdapter extends ModelAdapter {
   /** Every request the adapter received, in order. */
   readonly requests: readonly ModelRequest[];
+  /** Marks a test adapter: it never needs a credential, whatever provider id it reports. */
+  readonly scripted: true;
 }
 
 /**
@@ -98,6 +100,7 @@ export function createScriptedAdapter(script: readonly ScriptStep[], options: Sc
     providerId,
     authMethod,
     requests,
+    scripted: true,
     async discoverCapabilities() {
       return capabilities();
     },

@@ -54,11 +54,12 @@ import type { ParsedCommand } from "./args.ts";
 import { mayContainImage, resolveAttachments } from "./attachments.ts";
 
 /** Adapters that turn `image` message parts into provider image input. */
-const IMAGE_ADAPTERS: ReadonlySet<string> = new Set(["openai-chatgpt", "openai-responses", "anthropic-messages"]);
+const IMAGE_ADAPTERS: ReadonlySet<string> = new Set(["openai-chatgpt", "openai-responses", "anthropic-messages", "claude-code"]);
 import { profileHintsFor } from "./canonical.ts";
 import { createCommandGrantStore, normalizeGrant, type CommandGrantStore } from "./command-grants.ts";
 import type { OrchestrateInput } from "./orchestrate-tool.ts";
 import { OrchestrationTracker } from "./orchestration-view.ts";
+import { runModelCommand } from "./model-picker.ts";
 import { failureInfo } from "./outcome.ts";
 import { createSessionRenderer, type SessionRenderer } from "./renderers.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
@@ -132,7 +133,7 @@ function snippet(text: string, length: number): string {
 }
 
 function sessionRouteRule(runtime: Runtime, preferred?: ModelTier): RouteRule | undefined {
-  const rules = runtime.config.router.rules;
+  const rules = runtime.routeRules();
   const fits = (rule: RouteRule, tier: ModelTier): boolean => rule.tier === tier && (rule.role === undefined || rule.role === "session");
   if (preferred !== undefined) {
     const chosen = rules.find((rule) => fits(rule, preferred));
@@ -985,7 +986,7 @@ class Conversation implements ConversationCommandHost {
   private async imageSupport(route: RouteDecision): Promise<{ readonly send: boolean; readonly reason: string }> {
     const adapterId = route.route.adapter_id;
     if (!IMAGE_ADAPTERS.has(adapterId)) {
-      return { send: false, reason: adapterId === "claude-code" ? "images are not sent through the Claude Code bridge yet" : `the ${adapterId} route does not take image input` };
+      return { send: false, reason: `the ${adapterId} route does not take image input` };
     }
     let level = "unknown";
     try {
@@ -1349,7 +1350,7 @@ class Conversation implements ConversationCommandHost {
 
   /** Tiers whose route the conversation may use (a rule without a role, or one narrowed to `session`). */
   private sessionRules(): RouteRule[] {
-    return this.runtime.config.router.rules.filter((rule) => rule.role === undefined || rule.role === "session");
+    return this.runtime.routeRules().filter((rule) => rule.role === undefined || rule.role === "session");
   }
 
   private authLabel(rule: RouteRule): string {
@@ -1358,55 +1359,22 @@ class Conversation implements ConversationCommandHost {
   }
 
   public async model(argument: string): Promise<void> {
-    const g = this.glyphs;
-    const runtime = this.runtime;
-    const rules = runtime.config.router.rules;
-    const [tierArg = "", ...flags] = argument.split(/\s+/).filter((part) => part !== "");
-    if (tierArg === "") {
-      const controls = this.renderer.controls;
-      if (controls !== undefined) {
-        // The K1-U1 picker: rows per tier, the conversation's current one marked; Esc keeps it.
-        const entries: ModelPickerEntry[] = rules.map((rule, index) => ({
-          id: String(index),
-          tier: rule.role === undefined ? rule.tier : `${rule.tier}/${rule.role}`,
-          provider: rule.route.provider_id,
-          model: rule.route.model_id,
-          auth: this.authLabel(rule),
-          current: rule.tier === this.sessionTier && (rule.role === undefined || rule.role === "session"),
-          description: rule.tier === "session" ? "conversation tier" : `${rule.source} route`,
-          ...(rule.role === undefined || rule.role === "session" ? {} : { disabled: `only for the ${rule.role} role` }),
-        }));
-        const chosen = await controls.openModelPicker(entries, this.outer.signal).catch(() => undefined);
-        const rule = chosen === undefined ? undefined : rules[Number(chosen.id)];
-        if (rule === undefined || chosen?.current === true) return;
-        await this.switchModel(rule.tier, false);
-        return;
-      }
-      const lines = [`Conversation model: ${this.currentModel ?? "?"} (${this.sessionTier ?? "?"} tier)${this.planOn ? ` ${g.sep} plan mode` : ""}`];
-      for (const tier of MODEL_TIERS) {
-        const tierRules = rules.filter((rule) => rule.tier === tier);
-        if (tierRules.length === 0) {
-          lines.push(`  ${tier.padEnd(15)} not configured${tier === "session" ? " (the conversation uses the orchestrator route)" : ""}`);
-          continue;
-        }
-        for (const rule of tierRules) {
-          const current = tier === this.sessionTier && (rule.role === undefined || rule.role === "session") ? `  ${g.name === "rich" ? "←" : "<-"} conversation` : "";
-          lines.push(`  ${`${tier}${rule.role === undefined ? "" : `/${rule.role}`}`.padEnd(15)} ${rule.route.provider_id}/${rule.route.model_id} via ${rule.route.adapter_id} (${this.authLabel(rule)}, ${rule.source})${current}`);
-        }
-      }
-      if (!rules.some((rule) => rule.tier === "session") && rules.some((rule) => rule.tier === "fast_worker")) {
-        lines.push("Tip: /model fast_worker makes the conversation answer faster; /model fast_worker --save keeps it for new conversations");
-      }
-      lines.push("Switch: /model <tier> (this conversation) · add --save to make it the default");
-      this.print(lines);
-      return;
-    }
-    const tier = MODEL_TIERS.find((candidate) => candidate === tierArg);
-    if (tier === undefined || !this.sessionRules().some((rule) => rule.tier === tier)) {
-      this.print([`No route for "${tierArg}". Configured tiers: ${[...new Set(this.sessionRules().map((candidate) => candidate.tier))].join(", ") || "none"}`]);
-      return;
-    }
-    await this.switchModel(tier, flags.includes("--save"));
+    // K1.5: every logged-in provider's models, per-tier session routes and --save (cli/model-picker.ts).
+    await runModelCommand(
+      {
+        runtime: this.runtime,
+        controls: this.renderer.controls,
+        signal: this.outer.signal,
+        ok: this.glyphs.ok,
+        sep: this.glyphs.sep,
+        conversationTier: () => this.sessionTier,
+        print: (lines) => this.print(lines),
+        ask: (question, options) => this.askUser(question, options, this.outer.signal),
+        switchConversation: (tier, save) => this.switchModel(tier, save),
+        showFailure: (error) => this.showFailure(failureInfo(error)),
+      },
+      argument,
+    );
   }
 
   /** Switches the conversation's route for this session; `save` persists it as the default only after the human confirms. */
@@ -1450,7 +1418,7 @@ class Conversation implements ConversationCommandHost {
       this.print(["No uncommitted changes to review."]);
       return;
     }
-    const rules = runtime.config.router.rules;
+    const rules = runtime.routeRules();
     const rule = rules.find((candidate) => candidate.role === "reviewer") ?? rules.find((candidate) => candidate.tier === "complex_worker") ?? sessionRouteRule(runtime, this.sessionTier);
     if (rule === undefined) return;
     let route: RouteDecision;

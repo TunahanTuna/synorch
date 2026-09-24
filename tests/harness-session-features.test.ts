@@ -130,7 +130,7 @@ test("command registry: every session command is registered once and feeds the p
   const entries = conversationPaletteEntries();
   assert.ok(entries.every((entry) => !entry.name.startsWith("/") && entry.description.length > 0), "palette rows carry names without the slash");
   assert.ok(!entries.some((entry) => entry.name === "mouse" || entry.name === "exit"), "renderer-local commands stay the renderer's");
-  assert.equal(entries.find((entry) => entry.name === "model")?.argsHint, "[tier] [--save]");
+  assert.equal(entries.find((entry) => entry.name === "model")?.argsHint, "[tier] [provider/model] [--save]");
   assert.equal(entries.find((entry) => entry.name === "workers")?.argsHint, "<goal>", "a required argument makes Enter complete");
 });
 

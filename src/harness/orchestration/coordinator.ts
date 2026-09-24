@@ -1175,7 +1175,7 @@ export function createCoordinator(deps: CoordinatorDependencies): Coordinator {
               maxSteps: reviewerStepLimit(packet.limits.max_steps, limits.stepFloors),
               ...(widened ? { notes: [SCOPE_NOTE] } : {}),
             });
-            const reviewerRoute = await deps.router.resolve({ tier: reviewerPacket.model_tier, role: "reviewer" }, signal);
+            const reviewerRoute = await deps.router.resolve({ tier: reviewerPacket.model_tier, role: "reviewer", ...(record?.route === undefined ? {} : { implementer: record.route }) }, signal);
             const reviewHandle = await workers.dispatchReview(reviewerPacket, handle.attemptId, signal, { route: reviewerRoute });
             entry.attempts.push(reviewHandle.attemptId);
             const result = await reviewHandle.result;

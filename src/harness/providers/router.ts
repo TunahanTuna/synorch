@@ -17,6 +17,7 @@ import {
   type ModelRouterConfig,
   type ModelTier,
   type ProviderCapabilities,
+  type RouteBinding,
   type RouteDecision,
   type RouteRule,
 } from "../contracts/index.ts";
@@ -26,6 +27,25 @@ import { providerError } from "./errors.ts";
 export interface ModelRouterOptions extends ModelRouterConfig {
   readonly now?: () => Date;
   readonly capabilityTtlMs?: number;
+  /**
+   * Reviewer independence (ADR-09, K1.5): prefer a reviewer route on a provider other than the
+   * implementer's when one is configured (default true); otherwise a different model; the decision's
+   * reason always says which independence was achieved, never silently.
+   */
+  readonly preferDifferentProvider?: boolean;
+}
+
+/** The router the composition root holds: the contract plus the session route layer `/model` edits. */
+export interface SessionModelRouter extends ModelRouter {
+  /** Every rule in precedence order as the router sees it now (session rules first). */
+  rules(): readonly RouteRule[];
+  /** Sets (replaces) the session-layer route of a tier (and role); validated against the registered adapters. */
+  setSessionRule(tier: ModelTier, role: AgentRole | undefined, route: RouteBinding): ModelRoute;
+  /** Removes the session-layer route of a tier (and role); returns whether one existed. */
+  clearSessionRule(tier: ModelTier, role: AgentRole | undefined): boolean;
+  /** Registers an adapter built after construction (a provider first chosen in `/model`); an existing id is kept. */
+  addAdapter(adapter: AnyModelAdapter): void;
+  hasAdapter(adapterId: string): boolean;
 }
 
 interface Candidate {
@@ -47,7 +67,7 @@ const DEFAULT_CAPABILITY_TTL_MS = 5 * 60_000;
  * probes capabilities without paid calls and never falls back silently: a blocked route raises
  * `quota_exhausted` until a human approves a `provider-change`.
  */
-export function createModelRouter(config: ModelRouterOptions, providers: readonly AnyModelAdapter[]): ModelRouter {
+export function createModelRouter(config: ModelRouterOptions, providers: readonly AnyModelAdapter[]): SessionModelRouter {
   const now = config.now ?? (() => new Date());
   const ttl = config.capabilityTtlMs ?? DEFAULT_CAPABILITY_TTL_MS;
   const adapters = new Map<string, AnyModelAdapter>();
@@ -55,7 +75,8 @@ export function createModelRouter(config: ModelRouterOptions, providers: readonl
     if (adapters.has(adapter.adapterId)) throw configError(`adapter ${adapter.adapterId} is registered twice`);
     adapters.set(adapter.adapterId, adapter);
   }
-  const candidates = config.rules.map((rule): Candidate => ({ rule, route: routeOf(rule) }));
+  let candidates = config.rules.map((rule): Candidate => ({ rule, route: routeOf(rule) }));
+  const preferDifferentProvider = config.preferDifferentProvider ?? true;
   const blocked = new Map<string, number>();
   const pending = new Map<string, Override & { readonly digest: string; readonly tier: ModelTier; readonly role: AgentRole | undefined }>();
   const overrides = new Map<string, Override>();
@@ -117,7 +138,7 @@ export function createModelRouter(config: ModelRouterOptions, providers: readonl
     }
   }
 
-  const router: ModelRouter = {
+  const router: SessionModelRouter = {
     async resolve(request, signal): Promise<RouteDecision> {
       const options = ordered(request.tier, request.role);
       const primary = options[0];
@@ -125,13 +146,30 @@ export function createModelRouter(config: ModelRouterOptions, providers: readonl
       let chosen = primary;
       let reason = `${primary.rule.source} maps ${request.tier} to ${primary.route.model_id}`;
       if (request.role === "reviewer") {
-        const implementer = ordered(request.tier, "implementer")[0];
-        const independent = implementer === undefined ? undefined : options.find((option) => !sameModel(option.route, implementer.route));
-        if (independent !== undefined) {
-          chosen = independent;
-          reason = `${independent.rule.source} maps ${request.tier} to ${independent.route.model_id}; independent of the implementer model ${implementer?.route.model_id ?? "unknown"}`;
-        } else if (implementer !== undefined) {
-          reason = `${reason}; no independent reviewer model is configured, the reviewer shares the implementer model`;
+        const implementer = request.implementer ?? ordered(request.tier, "implementer")[0]?.route;
+        if (implementer !== undefined) {
+          const otherProvider = (candidate: Candidate): boolean => candidate.route.provider_id !== implementer.provider_id;
+          let crossProvider = options.find(otherProvider);
+          let crossTier = false;
+          if (preferDifferentProvider && crossProvider === undefined) {
+            // No same-tier route on another provider: any configured route on another provider, reviewer rules first.
+            crossProvider = [...candidates]
+              .filter(otherProvider)
+              .sort((left, right) => Number(left.rule.role !== "reviewer") - Number(right.rule.role !== "reviewer") || ROUTE_SOURCES.indexOf(left.rule.source) - ROUTE_SOURCES.indexOf(right.rule.source))
+              .find((candidate) => candidate.rule.role === undefined || candidate.rule.role === "reviewer");
+            crossTier = crossProvider !== undefined;
+          }
+          const otherModel = options.find((option) => !sameModel(option.route, implementer));
+          if (preferDifferentProvider && crossProvider !== undefined) {
+            chosen = crossTier ? { rule: crossProvider.rule, route: modelRouteSchema.parse({ ...crossProvider.route, tier: request.tier }) } : crossProvider;
+            reason = `${crossProvider.rule.source} maps ${crossTier ? `${crossProvider.rule.tier} (no ${request.tier} route on another provider)` : request.tier} to ${crossProvider.route.provider_id}/${crossProvider.route.model_id}; independent of the implementer provider ${implementer.provider_id}`;
+          } else if (otherModel !== undefined) {
+            chosen = otherModel;
+            reason = `${otherModel.rule.source} maps ${request.tier} to ${otherModel.route.model_id}; independent of the implementer model ${implementer.model_id}`;
+            if (preferDifferentProvider) reason = `${reason}; no route on a provider other than ${implementer.provider_id} is configured, so the reviewer uses the same provider`;
+          } else {
+            reason = `${reason}; no independent reviewer model is configured, the reviewer shares the implementer model`;
+          }
         }
       }
 
@@ -168,6 +206,34 @@ export function createModelRouter(config: ModelRouterOptions, providers: readonl
         ...(capabilities === undefined ? {} : { capabilities_probed_at: capabilities.probed_at }),
         fallback,
       });
+    },
+
+    rules() {
+      return [...candidates]
+        .map((candidate, position) => ({ candidate, position }))
+        .sort((left, right) => ROUTE_SOURCES.indexOf(left.candidate.rule.source) - ROUTE_SOURCES.indexOf(right.candidate.rule.source) || left.position - right.position)
+        .map(({ candidate }) => candidate.rule);
+    },
+
+    setSessionRule(tier, role, binding) {
+      const rule: RouteRule = { source: "session", tier, ...(role === undefined ? {} : { role }), route: binding };
+      const candidate: Candidate = { rule, route: routeOf(rule) };
+      candidates = [candidate, ...candidates.filter((entry) => !(entry.rule.source === "session" && entry.rule.tier === tier && entry.rule.role === role))];
+      return candidate.route;
+    },
+
+    addAdapter(adapter) {
+      if (!adapters.has(adapter.adapterId)) adapters.set(adapter.adapterId, adapter);
+    },
+
+    hasAdapter(adapterId) {
+      return adapters.has(adapterId);
+    },
+
+    clearSessionRule(tier, role) {
+      const before = candidates.length;
+      candidates = candidates.filter((entry) => !(entry.rule.source === "session" && entry.rule.tier === tier && entry.rule.role === role));
+      return candidates.length !== before;
     },
 
     adapterFor(route) {

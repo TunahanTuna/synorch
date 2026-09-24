@@ -13,6 +13,7 @@ import {
 } from "../contracts/index.ts";
 import { isProviderError, StreamAssembler, usageOf } from "./assembler.ts";
 import { classifyStreamError, numberField, providerError, record, stringField } from "./errors.ts";
+import { anthropicWireModelId } from "./catalog.ts";
 import { failure, splitSystemBlocks, streamHttp, type FetchLike, type SseMapper } from "./http-stream.ts";
 import type { SseMessage } from "./sse.ts";
 
@@ -168,7 +169,7 @@ function buildMessagesBody(request: ModelRequest): Built | { readonly error: str
     warnings.push(`max_output_tokens not set; using ${ANTHROPIC_DEFAULT_MAX_TOKENS}`);
   }
   const body: Record<string, unknown> = {
-    model: request.route.model_id,
+    model: anthropicWireModelId(request.route.model_id),
     max_tokens: maxTokens,
     messages,
     stream: true,
@@ -187,13 +188,20 @@ function buildMessagesBody(request: ModelRequest): Built | { readonly error: str
     if (lastBlock !== undefined && lastBlock.type !== "thinking" && lastBlock.type !== "redacted_thinking") lastBlock.cache_control = EPHEMERAL;
   }
   if (tools.length > 0) body.tools = tools;
-  if (request.reasoning_effort !== undefined) {
+  if (request.reasoning_effort !== undefined && ADAPTIVE_THINKING.test(String(body.model))) {
+    // Opus 5.x / Sonnet 5 / Fable reject budget_tokens (400): adaptive thinking with an effort level.
+    body.thinking = { type: "adaptive" };
+    body.output_config = { effort: request.reasoning_effort };
+  } else if (request.reasoning_effort !== undefined) {
     const budget = THINKING_BUDGETS[request.reasoning_effort];
     if (budget < maxTokens) body.thinking = { type: "enabled", budget_tokens: budget };
     else warnings.push(`reasoning_effort ${request.reasoning_effort} needs max_output_tokens above ${budget}; thinking disabled`);
   }
   return { body, warnings };
 }
+
+/** Models on which thinking is adaptive only (`budget_tokens` is refused). */
+const ADAPTIVE_THINKING = /^claude-(opus-5|sonnet-5|fable|mythos|opus-4-[678])/;
 
 function prepareMessages(request: ModelRequest, caps: ProviderCapabilities): PrepareResult {
   if (caps.adapter_id !== "anthropic-messages" || request.route.adapter_id !== "anthropic-messages") {

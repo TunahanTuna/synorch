@@ -64,7 +64,7 @@ test("doctor --runtime --json reports each area separately and makes no network 
     const report = JSON.parse(doctor.stdout()) as Report;
     assert.deepEqual(network.urls, [], "doctor --runtime must not send any request");
     assert.equal(report.network_requests, "none");
-    assert.deepEqual(report.checks.map((check) => check.id), ["node", "terminal", "config", "canonical", "sandbox", "trust", "store", "auth", "capabilities"]);
+    assert.deepEqual(report.checks.map((check) => check.id), ["node", "terminal", "config", "canonical", "sandbox", "trust", "store", "auth", "capabilities", "models"]);
     const byId = new Map(report.checks.map((check) => [check.id, check]));
     assert.equal(byId.get("trust")?.status, "warn", "an untrusted workspace on a partial sandbox is reported (SEC-N1)");
     assert.match(byId.get("trust")?.summary ?? "", /not trusted.*syn trust/);

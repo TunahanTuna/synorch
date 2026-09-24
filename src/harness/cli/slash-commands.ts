@@ -102,7 +102,7 @@ export function permissionsReport(runtime: Runtime, events: readonly SessionEven
 }
 
 export function modelReport(runtime: Runtime, events: readonly SessionEvent[]): string[] {
-  const lines = runtime.config.router.rules.map(
+  const lines = runtime.routeRules().map(
     (rule) => `configured ${rule.tier}${rule.role === undefined ? "" : `/${rule.role}`} -> ${rule.route.provider_id}/${rule.route.model_id} via ${rule.route.adapter_id} (${rule.source})`,
   );
   for (const event of events) {
@@ -227,7 +227,7 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/plan", argsHint: "[goal]", description: "plan mode: read-only, discuss and plan before changing anything (Shift+Tab cycles modes)", whileBusy: true, run: (host, argument) => host.planMode(argument) },
   { name: "/go", argsHint: "[workers]", description: "leave plan mode and carry out the plan here, or with workers", run: (host, argument) => host.go(argument) },
   { name: "/workers", argsHint: "<goal>", description: "run a large goal with parallel workers and an independent reviewer", run: (host, argument) => host.workers(argument) },
-  { name: "/model", argsHint: "[tier] [--save]", description: "models per tier; switch the conversation model (--save makes it the default)", run: (host, argument) => host.model(argument) },
+  { name: "/model", argsHint: "[tier] [provider/model] [--save]", description: "every logged-in provider's models; set a tier's model for this session (--save keeps it)", run: (host, argument) => host.model(argument) },
   { name: "/review", argsHint: "[focus]", description: "independent review of the uncommitted changes (fresh context)", run: (host, argument) => host.review(argument) },
   { name: "/commit", argsHint: "[message]", description: "diff summary and a proposed message; commits only after you confirm", run: (host, argument) => host.commit(argument) },
   { name: "/undo", description: "revert the last edit Synorch made (files only)", run: (host) => host.undo() },

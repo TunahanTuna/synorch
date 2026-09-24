@@ -509,6 +509,9 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
   const records = new Map<AttemptId, AttemptRecord>();
   const handles = new Map<AttemptId, AttemptHandle>();
   const controllers = new Map<AttemptId, AbortController>();
+  // One driver per attempt: a backend-owned loop (Claude Code bridge) keeps its session across the
+  // attempt's follow-up turns (finish-now, report-only, corrections) instead of starting cold (K1.5).
+  const drivers = new Map<AttemptId, AgentDriver>();
   const pendingStores = new Map<AttemptId, EventStore>();
   /** Packets as the coordinator issued them (main-tree digests): the in-flight freshness gate compares against these. */
   const baselines = new Map<AttemptId, TaskContextPacket>();
@@ -716,7 +719,12 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         sources: readerFor(record.workspace, platform),
         ...(options.reportOnly === undefined ? {} : { reportOnly: options.reportOnly }),
       };
-      outcome = await deps.createDriver(events).runTurn(input, controller.signal);
+      let driver = drivers.get(record.attemptId);
+      if (driver === undefined) {
+        driver = deps.createDriver(events);
+        drivers.set(record.attemptId, driver);
+      }
+      outcome = await driver.runTurn(input, controller.signal);
     } catch (caught) {
       error = caught;
     } finally {
@@ -780,6 +788,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     const events = pendingStores.get(record.attemptId);
     pendingStores.delete(record.attemptId);
     controllers.delete(record.attemptId);
+    drivers.delete(record.attemptId);
     await events?.close().catch(() => undefined);
   };
 

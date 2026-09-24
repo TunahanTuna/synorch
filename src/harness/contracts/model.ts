@@ -500,6 +500,8 @@ export type AnyModelAdapter = ModelAdapter | AgentBackendAdapter;
 export interface RouteRequest {
   readonly tier: z.infer<typeof modelTierSchema>;
   readonly role: z.infer<typeof agentRoleSchema> | undefined;
+  /** Reviewer requests: the route the implementer actually ran on (K1.5 reviewer independence). */
+  readonly implementer?: ModelRoute;
 }
 
 export type RouteSource = (typeof ROUTE_SOURCES)[number];

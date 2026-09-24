@@ -140,6 +140,15 @@ function userPromptFor(parsed: RunCommand | AgentCommand, renderer: SessionRende
   const show = (question: string, options: readonly string[] | undefined): void => {
     for (const line of questionLines(question, options)) renderer.render({ kind: "notice", level: "info", message: line });
   };
+  const controls = renderer.controls;
+  if (renderer.kind === "tui" && controls !== undefined) {
+    // The question owns the input (a picker for choices): the answer never steers the run.
+    return async (question, options, signal) => {
+      const answer = await controls.ask(question, options, signal);
+      if (answer === undefined) throw new DOMException("the question was cancelled", "AbortError");
+      return answer;
+    };
+  }
   if (parsed.kind === "agent") {
     return (question, options, signal) => {
       show(question, options);

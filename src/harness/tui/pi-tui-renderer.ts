@@ -722,6 +722,13 @@ class DialogFrame implements Component {
   }
 }
 
+interface DialogEntry {
+  readonly component: Component;
+  readonly focus: Component;
+  readonly cancel: () => void;
+  readonly tone: "attention" | "neutral";
+}
+
 type Interruption = { readonly kind: "interrupt" | "exit" };
 type InputResult = Awaited<ReturnType<UserInputSource["next"]>>;
 
@@ -756,7 +763,13 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private readonly interrupts = new InterruptController();
   private readonly pendingInputs: InputResult[] = [];
   private readonly inputWaiters: ((result: InputResult) => void)[] = [];
-  private dialog: { readonly handle: { hide(): void }; readonly cancel: () => void } | undefined;
+  /**
+   * The prompt-owner stack: every question, picker and approval pushes an entry and owns the
+   * keyboard while it is on top; the editor only gets input back when the stack is empty. A prompt
+   * opened over another (an approval during an `ask_user` question) hides it without cancelling it.
+   */
+  private readonly dialogs: DialogEntry[] = [];
+  private dialogOverlay: { hide(): void } | undefined;
   private guard: TerminalGuard | undefined;
   private removeInputListener: (() => void) | undefined;
   private turnActive = false;
@@ -803,6 +816,11 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private cancelArmed: { readonly key: string; readonly at: number } | undefined;
   private readonly delegationIds = new WeakMap<DelegationComponent, string>();
   private delegationCount = 0;
+
+  /** The prompt that currently owns the input, if any. */
+  private get dialog(): DialogEntry | undefined {
+    return this.dialogs.at(-1);
+  }
 
   public constructor(options: PiTuiRendererOptions) {
     this.options = options;
@@ -863,6 +881,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         return () => this.attachmentListeners.delete(listener);
       },
       openModelPicker: (entries, signal, heading) => this.openModelPicker(entries, signal, heading),
+      ask: (question, options, signal) => this.askQuestion(question, options, signal),
       get permissionMode() {
         return self.permission;
       },
@@ -1504,7 +1523,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     if (this.spinner !== undefined) clearInterval(this.spinner);
     this.spinner = undefined;
     this.workerPane?.dispose();
-    this.dialog?.cancel();
+    for (const dialog of [...this.dialogs].reverse()) dialog.cancel();
     this.removeInputListener?.();
     if (this.mouseOn && !this.selectMode) this.terminal.write(MOUSE_DISABLE_SEQUENCE);
     await this.terminal.drainInput(this.options.drainInputMs ?? 300, 50);
@@ -1855,12 +1874,13 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       box.addChild(new Text(this.style.cyan(heading?.title ?? "Select model"), 0, 0));
       box.addChild(new Text(this.style.dim(heading?.hint ?? "route per tier · provider/model · auth  —  Enter selects, Esc cancels"), 0, 0));
       box.addChild(list);
+      let dialog: DialogEntry | undefined;
       let settled = false;
       const finish = (entry: ModelPickerEntry | undefined): void => {
         if (settled) return;
         settled = true;
         signal?.removeEventListener("abort", onAbort);
-        this.closeDialog();
+        this.closeDialog(dialog);
         resolve(entry);
       };
       const onAbort = (): void => finish(undefined);
@@ -1875,11 +1895,13 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         finish(entry);
       };
       list.onCancel = () => finish(undefined);
-      this.openDialog(box, list, () => finish(undefined));
+      dialog = this.openDialog(box, list, () => finish(undefined));
     });
   }
 
   private submit(text: string): void {
+    // An open prompt owns the input: nothing typed while it is open becomes a message.
+    if (this.dialog !== undefined) return;
     const trimmed = text.trim();
     if (trimmed === "") return;
     this.editor.addToHistory(trimmed);
@@ -2070,34 +2092,82 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     if (this.started && !this.stopped) this.tui.requestRender();
   }
 
-  private openDialog(component: Component, focus: Component, cancel: () => void, tone: "attention" | "neutral" = "neutral"): void {
-    this.dialog?.cancel();
-    let handle: { hide(): void };
+  private openDialog(component: Component, focus: Component, cancel: () => void, tone: "attention" | "neutral" = "neutral"): DialogEntry {
+    const entry: DialogEntry = { component, focus, cancel, tone };
+    this.dialogs.push(entry);
+    this.showTopDialog();
+    return entry;
+  }
+
+  private closeDialog(entry: DialogEntry | undefined): void {
+    const index = entry === undefined ? -1 : this.dialogs.indexOf(entry);
+    if (index < 0) return;
+    this.dialogs.splice(index, 1);
+    this.showTopDialog();
+  }
+
+  /** Draws the top of the prompt stack (conversation view: in place of the editor) and focuses it. */
+  private showTopDialog(): void {
+    this.dialogOverlay?.hide();
+    this.dialogOverlay = undefined;
+    const top = this.dialog;
     if (this.presenter !== undefined) {
-      // Conversation view: the prompt replaces the editor in the flow of the screen (the draft is kept).
       this.dialogSlot.clear();
-      this.dialogSlot.addChild(new DialogFrame(component, tone === "attention" ? (text) => this.style.yellow(text) : (text) => this.style.dim(text)));
-      this.editorSlot.hidden = true;
-      handle = {
-        hide: () => {
-          this.dialogSlot.clear();
-          this.editorSlot.hidden = false;
-        },
-      };
-    } else {
-      handle = this.tui.showOverlay(component, { anchor: "bottom-center", width: "90%", margin: 1 });
+      if (top !== undefined) this.dialogSlot.addChild(new DialogFrame(top.component, top.tone === "attention" ? (text) => this.style.yellow(text) : (text) => this.style.dim(text)));
+      this.editorSlot.hidden = top !== undefined;
+    } else if (top !== undefined) {
+      this.dialogOverlay = this.tui.showOverlay(top.component, { anchor: "bottom-center", width: "90%", margin: 1 });
     }
-    this.tui.setFocus(focus);
-    this.dialog = { handle, cancel };
+    this.tui.setFocus(top?.focus ?? this.editor);
     this.tui.requestRender();
   }
 
-  private closeDialog(): void {
-    const dialog = this.dialog;
-    this.dialog = undefined;
-    dialog?.handle.hide();
-    this.tui.setFocus(this.editor);
-    this.tui.requestRender();
+  /**
+   * A question that owns the input until it is answered (K5): with options a picker (arrows +
+   * Enter, 1-9 as shortcuts, Esc cancels), without a one-line answer field. Nothing typed here
+   * reaches the conversation. Resolves undefined on Esc or abort.
+   */
+  private askQuestion(question: string, options: readonly string[] | undefined, signal?: AbortSignal): Promise<string | undefined> {
+    if (this.stopped || signal?.aborted === true) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      const sep = (this.presenter?.glyphs ?? GLYPH_SETS.rich).sep;
+      const box = new Box(1, 0);
+      box.addChild(new Text(this.style.yellow(this.style.bold(`? ${sanitizeInline(question, 2000)}`)), 0, 0));
+      let entry: DialogEntry | undefined;
+      let settled = false;
+      const finish = (value: string | undefined): void => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        this.closeDialog(entry);
+        resolve(value);
+      };
+      const onAbort = (): void => finish(undefined);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      let focus: Component;
+      if (options !== undefined && options.length > 0) {
+        const items = options.map((option, index) => ({ value: String(index), label: `${index + 1}. ${sanitizeInline(option, 200)}` }));
+        const list = new SelectList(items, Math.min(items.length, 10), this.selectTheme);
+        const handle = list.handleInput.bind(list);
+        list.handleInput = (data: string): void => {
+          const picked = /^[1-9]$/.test(data) ? options[Number(data) - 1] : undefined;
+          if (picked !== undefined) finish(picked);
+          else handle(data);
+        };
+        list.onSelect = (item) => finish(options[Number(item.value)]);
+        list.onCancel = () => finish(undefined);
+        box.addChild(list);
+        box.addChild(new Text(this.style.dim(`  ↑↓ + Enter ${sep} 1-${Math.min(items.length, 9)} ${sep} Esc cancels`), 0, 0));
+        focus = list;
+      } else {
+        const input = new Input({ prompt: "> ", placeholder: "type the answer (Enter sends, Esc cancels)" });
+        input.onSubmit = (value) => finish(value);
+        input.onEscape = () => finish(undefined);
+        box.addChild(input);
+        focus = input;
+      }
+      entry = this.openDialog(box, focus, () => finish(undefined), "attention");
+    });
   }
 
   /**
@@ -2161,12 +2231,13 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         box.addChild(list);
         const sep = (this.presenter?.glyphs ?? GLYPH_SETS.rich).sep;
         box.addChild(new Text(this.style.dim(trust ? `  ↑↓ choose ${sep} Enter confirm ${sep} Esc not now` : `  1-${items.length} or ↑↓ + Enter ${sep} Esc denies`), 0, 0));
+        let entry: DialogEntry | undefined;
         let settled = false;
         const finish = (outcome: ApprovalAnswer | undefined): void => {
           if (settled) return;
           settled = true;
           promptSignal.removeEventListener("abort", onAbort);
-          this.closeDialog();
+          this.closeDialog(entry);
           if (outcome === undefined) reject(new DOMException("The approval prompt was cancelled", "AbortError"));
           else resolve(outcome);
         };
@@ -2180,8 +2251,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
           reason.onSubmit = (value) => finish(value.trim() === "" ? "rejected" : { choice: "rejected", reason: value });
           reason.onEscape = () => finish("rejected");
           // Replace the choices without cancelling the pending answer.
-          this.closeDialog();
-          this.openDialog(why, reason, () => finish(undefined));
+          this.closeDialog(entry);
+          entry = this.openDialog(why, reason, () => finish(undefined));
         };
         const pick = (value: string): void => {
           if (value === "rejected-why") askWhy();
@@ -2196,7 +2267,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         };
         list.onSelect = (item) => pick(item.value);
         list.onCancel = () => finish("rejected");
-        this.openDialog(box, list, () => finish(undefined), "attention");
+        entry = this.openDialog(box, list, () => finish(undefined), "attention");
       }),
     );
   }
@@ -2213,12 +2284,13 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private promptSecret(label: string, signal: AbortSignal): Promise<string> {
     return new Promise((resolve, reject) => {
       const input = new SecretInput(sanitizeInline(label, 100));
+      let entry: DialogEntry | undefined;
       let settled = false;
       const finish = (value: string | undefined): void => {
         if (settled) return;
         settled = true;
         signal.removeEventListener("abort", onAbort);
-        this.closeDialog();
+        this.closeDialog(entry);
         if (value === undefined) reject(new DOMException("The secret prompt was cancelled", "AbortError"));
         else resolve(value);
       };
@@ -2230,7 +2302,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       signal.addEventListener("abort", onAbort, { once: true });
       input.onSubmit = (value) => finish(value);
       input.onCancel = () => finish(undefined);
-      this.openDialog(input, input, () => finish(undefined));
+      entry = this.openDialog(input, input, () => finish(undefined));
     });
   }
 
@@ -2251,19 +2323,20 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       const box = new Box(1, 0);
       box.addChild(new Text(this.style.yellow(sanitizeInline(notice.text, 1000)), 0, 0));
       box.addChild(list);
+      let entry: DialogEntry | undefined;
       let settled = false;
       const finish = (accepted: boolean): void => {
         if (settled) return;
         settled = true;
         signal.removeEventListener("abort", onAbort);
-        this.closeDialog();
+        this.closeDialog(entry);
         resolve(accepted);
       };
       const onAbort = (): void => finish(false);
       signal.addEventListener("abort", onAbort, { once: true });
       list.onSelect = (item) => finish(item.value === "yes");
       list.onCancel = () => finish(false);
-      this.openDialog(box, list, () => finish(false));
+      entry = this.openDialog(box, list, () => finish(false));
     });
   }
 }

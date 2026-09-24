@@ -106,3 +106,19 @@ test("session rails: reserved paths, role manifests and git history stay out of 
   assert.equal(decide(action([{ path: ".", access: "read" }], { argv: ["node", "scripts/other.mjs"], cwd: "." })), "deny", "anything else stays refused");
   assert.equal(decide(action([{ path: ".", access: "read" }], { argv: ["rm", "-rf", "/"], cwd: "." })), "deny", "destructive commands stay refused");
 });
+
+test("K5: the answer to a /init question goes to the question only: no model request", async () => {
+  const sandbox = await createSandbox({ "README.md": "# init\n" });
+  try {
+    await writeFile(path.join(sandbox.home, "config.yaml"), "routes:\n  - { tier: orchestrator, provider: scripted, model: chat, adapter: conv-script }\n");
+    const model = createScriptedAdapter([text("never")], { adapterId: "conv-script" });
+    const io = capture({ cwd: sandbox.workspace, stdin: new ScriptedInput(["/init", "1", "/exit", ""].join("\n"), true), stdinIsTTY: true });
+    const code = await runHarnessCommand(["agent", "--plain"], io.io, overridesFor(sandbox, { adapters: [model] }));
+    assert.equal(code, 0, io.stderr());
+    assert.match(io.stdout(), /Wrote \d+ new file/, "choice 1 creates the files");
+    assert.equal(model.requests.length, 0, "the typed answer never reached the model");
+    assert.doesNotMatch(io.stdout(), /synorch: never/);
+  } finally {
+    await sandbox.cleanup();
+  }
+});

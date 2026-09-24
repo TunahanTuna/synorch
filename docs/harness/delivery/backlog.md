@@ -20,7 +20,7 @@
 | K0 | Sohbet öncelikli `syn agent` (anında cevap, doğrudan düzenleme, `/undo`, `/allow`) — ürün sahibi onayladı | `2c51679` |
 | K1 (sürüyor) | U1 giriş (palet, @dosya, görsel, mouse, model seçici) ✅ `7c0c7c2` · U3 görünümler (pano, graf, usage, kartlar) ✅ `1cab7ec` · U2 oturum özellikleri ✅ `73f834f` → deneme bekliyor | |
 
-## 🔥 P0 — YARIN İLK İŞ: Orantılılık ve hız (ürün sahibi testi, 2026-09-25)
+## ✅ P0 — Orantılılık ve hız (ürün sahibi testi, 2026-09-25) — yapıldı: `0faaada` worker izinleri (auto = otonom), `17d4bde` orantılı review + üretilmiş dosyalar hariç + kurulum bir kez + tek tur; gerçek modelle ölçüm bekliyor. Not: orkestrasyon ASLA caydırılmaz (ürün sahibi hızlı/ucuz modellerle bilinçli kullanıyor).
 Ürün sahibi aynı işi ("boş bir React projesi oluştur") ChatGPT'nin harness'ına ve bize verdi: ChatGPT 2 dk 21 sn, Synorch 9 dk+ ve bitmedi. Kayıtlar (`C:\temp\Yeni klasör`, run `run_01M3AKRA9EQ0X4VP4PTKZFFRD7` failed + `run_01M3AM498W7VJXWX3QT486312W`):
 1. Session agent tek komutluk işi doğrudan yapmak yerine orkestrasyon açtı (iki run: plan + "onaylanan planı uygula").
 2. Tek görevli plana zorunlu bağımsız reviewer eklendi (risk "standard").

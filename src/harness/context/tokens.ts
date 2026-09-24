@@ -26,6 +26,10 @@ export function messageTokens(message: ModelMessage): number {
       case "blob":
         total += 16;
         break;
+      case "image":
+        // Providers bill an image by pixels (roughly 1-2k tokens for a screenshot); budget conservatively.
+        total += 1600;
+        break;
     }
   }
   return total;

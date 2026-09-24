@@ -196,7 +196,7 @@ test("attachments: @path inlines the file with its digest; outside paths and ima
     await writeFile(path.join(root, "notes.md"), "hello\n");
     await writeFile(path.join(root, "shot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0]));
     const outside = { id: "file-1", kind: "file" as const, label: "@../outside.txt", path: path.join(root, "..", "outside.txt"), displayPath: "../outside.txt", source: "mention" as const };
-    const result = await resolveAttachments("look at @notes.md and @shot.png", [outside], { workspaceRoot: root, imageInput: "unsupported", model: "chat" });
+    const result = await resolveAttachments("look at @notes.md and @shot.png", [outside], { workspaceRoot: root, model: "chat" });
     assert.match(result.message, /<file path="notes\.md" digest="sha256:[0-9a-f]{64}" bytes="6">\nhello\n/);
     assert.ok(result.notices.some((notice) => /outside the workspace/.test(notice.text)));
     assert.ok(result.notices.some((notice) => /does not take image input/.test(notice.text)));

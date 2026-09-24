@@ -153,6 +153,11 @@ function buildMessagesBody(request: ModelRequest): Built | { readonly error: str
           break;
         case "blob":
           return { error: "blob (image/file) input is not supported by this adapter" };
+        case "image":
+          if (part.data === undefined) return { error: `image ${part.blob.digest} has no bytes attached` };
+          if (role === "assistant") return { error: "an assistant message cannot carry an image" };
+          push("user", { type: "image", source: { type: "base64", media_type: part.blob.media_type, data: part.data } });
+          break;
       }
     }
   }

@@ -1,5 +1,5 @@
 import type { ResolvedCredential, ResolveOptions } from "./auth.ts";
-import type { AgentRole } from "./common.ts";
+import type { AgentRole, BlobRef } from "./common.ts";
 import type { Digest } from "./digest.ts";
 import type { ExitCode } from "./errors.ts";
 import type { EventStore, BlobStore } from "./store.ts";
@@ -88,6 +88,8 @@ export interface TurnInput {
   readonly policy: EffectivePolicy;
   readonly packet: TaskContextPacket | undefined;
   readonly userMessage: string | undefined;
+  /** Images attached to `userMessage`, already in the blob store (recorded as `image` parts after the text). */
+  readonly userImages?: readonly BlobRef[];
   readonly trigger: "user" | "orchestrator" | "steer" | "follow-up" | "dispatch";
   readonly maxSteps: number;
   /** Passed through to `ContextBuildInput.sources` (ADR-19); set by the worker manager per attempt. */

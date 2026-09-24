@@ -52,6 +52,9 @@ import { createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/i
 import { describeEvent, formatHarnessError, GLYPH_SETS, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
 import type { ParsedCommand } from "./args.ts";
 import { mayContainImage, resolveAttachments } from "./attachments.ts";
+
+/** Adapters that turn `image` message parts into provider image input. */
+const IMAGE_ADAPTERS: ReadonlySet<string> = new Set(["openai-chatgpt", "openai-responses", "anthropic-messages"]);
 import { profileHintsFor } from "./canonical.ts";
 import { createCommandGrantStore, normalizeGrant, type CommandGrantStore } from "./command-grants.ts";
 import type { OrchestrateInput } from "./orchestrate-tool.ts";
@@ -428,6 +431,9 @@ class Conversation implements ConversationCommandHost {
     if (event.kind === "session-event") {
       const recorded = event.event;
       const orchestration = this.orchestration;
+      // Worker, reviewer and planner requests of this process count toward the footer's quota %, cost
+      // and activity tokens: their provider/usage events (with `x-codex-*` quota) reach the view too.
+      if (recorded.session_id !== this.sessionId && recorded.type === "provider/usage" && this.renderer.kind !== "jsonl") this.renderer.render(event);
       if (orchestration !== undefined && recorded.session_id !== this.sessionId) {
         this.observeOrchestration(orchestration, recorded);
         return;
@@ -918,11 +924,18 @@ class Conversation implements ConversationCommandHost {
       await this.append("route/decided", { decision: route }, "agent").catch(() => undefined);
     }
     let body = text;
+    let images: readonly BlobRef[] = [];
     if (attachments.length > 0 || /(^|\s)@\S/.test(text)) {
-      const imageInput = mayContainImage(text, attachments) ? await this.imageInput(route) : "unknown";
-      const resolved = await resolveAttachments(text, attachments, { workspaceRoot: this.runtime.workspaceRoot, imageInput, model: route.route.model_id });
+      const support = mayContainImage(text, attachments) ? await this.imageSupport(route) : { send: false, reason: "" };
+      const blobs = this.runtime.blobs;
+      const resolved = await resolveAttachments(text, attachments, {
+        workspaceRoot: this.runtime.workspaceRoot,
+        model: route.route.model_id,
+        images: { ...support, put: (bytes, mediaType) => blobs.put(bytes, mediaType) },
+      });
       for (const entry of resolved.notices) this.note(entry.level, entry.text);
       body = resolved.message;
+      images = resolved.images;
     }
     const notes = this.pendingNotes.splice(0);
     const message = notes.length === 0 ? body : `[Synorch note: ${notes.join(" ").replaceAll("]", ")")}]\n${body}`;
@@ -942,6 +955,7 @@ class Conversation implements ConversationCommandHost {
           policy: this.policy(),
           packet: undefined,
           userMessage: message,
+          ...(images.length === 0 ? {} : { userImages: images }),
           trigger: "user",
           maxSteps: MAX_STEPS,
         },
@@ -963,14 +977,25 @@ class Conversation implements ConversationCommandHost {
     return false;
   }
 
-  private async imageInput(route: RouteDecision): Promise<"supported" | "degraded" | "unsupported" | "unknown"> {
+  /**
+   * Whether this route sends images: the direct OpenAI Responses and Anthropic Messages adapters do
+   * unless the model's capability says `unsupported`; other routes (the Claude Code bridge, Codex
+   * app-server, scripted) get a notice instead.
+   */
+  private async imageSupport(route: RouteDecision): Promise<{ readonly send: boolean; readonly reason: string }> {
+    const adapterId = route.route.adapter_id;
+    if (!IMAGE_ADAPTERS.has(adapterId)) {
+      return { send: false, reason: adapterId === "claude-code" ? "images are not sent through the Claude Code bridge yet" : `the ${adapterId} route does not take image input` };
+    }
+    let level = "unknown";
     try {
       const adapter = this.runtime.router.adapterFor(route.route);
       const capabilities = await adapter.discoverCapabilities(this.outer.signal);
-      return capabilities.models.find((model) => model.id === route.route.model_id)?.image_input ?? "unknown";
+      level = capabilities.models.find((model) => model.id === route.route.model_id)?.image_input ?? "unknown";
     } catch {
-      return "unknown";
+      // Capability discovery failing does not block the image; the provider will refuse it if needed.
     }
+    return level === "unsupported" ? { send: false, reason: `${route.route.model_id} does not take image input` } : { send: true, reason: "" };
   }
 
   private showFailure(error: HarnessErrorInfo): void {

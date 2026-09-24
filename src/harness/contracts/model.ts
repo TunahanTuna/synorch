@@ -81,6 +81,12 @@ export type SystemBlock = z.infer<typeof systemBlockSchema>;
 
 const jsonObjectSchema = z.record(z.string(), z.unknown());
 
+/** Image media types every image-capable adapter accepts. */
+export const IMAGE_MEDIA_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+export type ImageMediaType = (typeof IMAGE_MEDIA_TYPES)[number];
+/** Per-image size cap (the Anthropic API limit; images are not downscaled). */
+export const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+
 export const contentPartSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("text"), text: z.string() }),
   z.strictObject({
@@ -105,6 +111,19 @@ export const contentPartSchema = z.discriminatedUnion("type", [
     blob: blobRefSchema.optional(),
   }),
   z.strictObject({ type: z.literal("blob"), blob: blobRefSchema }),
+  /**
+   * An image the user attached (pasted `[image N]` chip or `@img.png`). The bytes live in the blob
+   * store; events and the recorded request envelope carry only the `blob` ref. `data` (base64) is
+   * filled by the driver right before the request goes to the adapter and is never persisted.
+   * Adapters with image input send it (`input_image` data URL / Anthropic `image` base64 source).
+   *
+   * @example { type: "image", blob: { digest: "sha256:…", size_bytes: 48213, media_type: "image/png" } }
+   */
+  z.strictObject({
+    type: z.literal("image"),
+    blob: blobRefSchema.extend({ media_type: z.enum(IMAGE_MEDIA_TYPES), size_bytes: z.int().min(1).max(IMAGE_MAX_BYTES) }),
+    data: z.string().optional(),
+  }),
 ]);
 export type ContentPart = z.infer<typeof contentPartSchema>;
 

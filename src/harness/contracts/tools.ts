@@ -31,7 +31,8 @@ export const toolMetadataSchema = z
     idempotent: z.boolean(),
     network: z.enum(["none", "optional", "required"]),
     output_limit_bytes: z.int().min(1024).max(4 * 1024 * 1024),
-    timeout_ms: z.int().min(100).max(3_600_000),
+    /** Up to 24 h: long control tools (`orchestrate`) are bounded by the run budget, not this timer. */
+    timeout_ms: z.int().min(100).max(86_400_000),
     cancellable: z.boolean(),
     concurrency: z.enum(["parallel", "sequential"]),
     visible_to: z.array(agentRoleSchema).min(1),

@@ -154,6 +154,11 @@ function buildBody(variant: Variant, request: ModelRequest): PreparedBody | { re
           break;
         case "blob":
           return { error: "blob (image/file) input is not supported by this adapter" };
+        case "image":
+          if (part.data === undefined) return { error: `image ${part.blob.digest} has no bytes attached` };
+          if (message.role === "assistant") return { error: "an assistant message cannot carry an image" };
+          userText.push({ type: "input_image", image_url: `data:${part.blob.media_type};base64,${part.data}`, detail: "auto" });
+          break;
       }
     }
     flushUser();

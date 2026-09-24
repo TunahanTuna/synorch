@@ -67,7 +67,8 @@ export function createOrchestrateTool(slot: OrchestrateSlot): Tool<OrchestrateIn
     idempotent: false,
     network: "none",
     output_limit_bytes: 64 * 1024,
-    timeout_ms: 3_600_000,
+    // The run budget (max_wall_time_seconds, steps, cost) bounds an orchestration; Esc cancels it. This is only a 24 h backstop.
+    timeout_ms: 86_400_000,
     cancellable: true,
     concurrency: "sequential",
     visible_to: ["session"],

@@ -15,6 +15,7 @@ import {
   type AssistantMessage,
   type BackendSession,
   type BlobRef,
+  type BlobStore,
   type ContentPart,
   type EventStore,
   type ModelAdapter,
@@ -41,6 +42,33 @@ import {
 } from "../contracts/index.ts";
 import { putCanonicalJson } from "./envelope.ts";
 import { consumeStream, describe, providerError, type StreamOutcome } from "./stream.ts";
+
+/**
+ * Fills `data` (base64) on every `image` part from the blob store, right before the request goes to
+ * the adapter. The recorded envelope keeps only the blob refs. A missing blob becomes a text note so
+ * the step still runs.
+ */
+export async function withImageData(blobs: BlobStore, request: ModelRequest): Promise<ModelRequest> {
+  if (!request.messages.some((message) => message.content.some((part) => part.type === "image" && part.data === undefined))) return request;
+  const messages: ModelMessage[] = [];
+  for (const message of request.messages) {
+    const content: ContentPart[] = [];
+    for (const part of message.content) {
+      if (part.type !== "image" || part.data !== undefined) {
+        content.push(part);
+        continue;
+      }
+      try {
+        const bytes = await blobs.get(part.blob.digest);
+        content.push({ ...part, data: Buffer.from(bytes).toString("base64") });
+      } catch {
+        content.push({ type: "text", text: `[image ${part.blob.digest.slice(7, 19)} is no longer available]` });
+      }
+    }
+    messages.push({ ...message, content });
+  }
+  return { ...request, messages };
+}
 
 /** Prefix under which a backend-owned loop sees Synorch's tools (MCP server `synorch`). */
 export const BRIDGE_TOOL_PREFIX = "mcp__synorch__";
@@ -107,7 +135,8 @@ class FixedAgentDriver implements AgentDriver {
     let steps = 0;
     try {
       if (input.userMessage !== undefined) {
-        await this.#recordMessage(log, { role: "user", content: [{ type: "text", text: input.userMessage }] }, undefined);
+        const images = (input.userImages ?? []).map((blob): ContentPart => ({ type: "image", blob: blob as Extract<ContentPart, { type: "image" }>["blob"] }));
+        await this.#recordMessage(log, { role: "user", content: [{ type: "text", text: input.userMessage }, ...images] }, undefined);
       }
       const adapter = this.#deps.router.adapterFor(input.route);
       let outcome: TurnOutcome["outcome"] = "max_steps";
@@ -144,7 +173,7 @@ class FixedAgentDriver implements AgentDriver {
   async #modelStep(adapter: ModelAdapter, step: StepContext, signal: AbortSignal): Promise<StepResult> {
     const prepared = await this.#prepare(step, signal);
     if (prepared.kind !== "ok") return this.#endStep(step, refusedStepState(prepared.kind), prepared.kind);
-    const outcome = await consumeStream(await this.#openModelStream(adapter, prepared.request, step.input.route, signal), signal);
+    const outcome = await consumeStream(await this.#openModelStream(adapter, await withImageData(this.#deps.blobs, prepared.request), step.input.route, signal), signal);
     if (outcome.kind === "failed") return this.#recordFailure(step, outcome);
 
     const calls: ToolCallRef[] = [];
@@ -249,7 +278,8 @@ class FixedAgentDriver implements AgentDriver {
     if (session !== undefined) {
       const active = session;
       try {
-        const stream = active.runTurn({ requestId: step.requestId, route: input.route, messages: prepared.request.messages }, { tools, approvals }, stepSignal);
+        const messages = (await withImageData(this.#deps.blobs, prepared.request)).messages;
+        const stream = active.runTurn({ requestId: step.requestId, route: input.route, messages }, { tools, approvals }, stepSignal);
         outcome = await consumeStream(stream, stepSignal, rejectForeignBackendTools);
         if (outcome.kind === "failed") await active.interrupt().catch(() => undefined);
         await chain;
@@ -379,10 +409,11 @@ class FixedAgentDriver implements AgentDriver {
   }
 
   async #recordUsage(step: StepContext, outcome: StreamOutcome): Promise<void> {
-    if (outcome.usage === undefined) return;
+    // Quota headers without a usage report (e.g. a 429) still reach the footer.
+    if (outcome.usage === undefined && outcome.quota === undefined) return;
     await step.log.append("provider/usage", {
       request_id: step.requestId,
-      usage: outcome.usage,
+      usage: outcome.usage ?? { source: "unknown" },
       ...(outcome.quota === undefined ? {} : { quota: outcome.quota }),
     });
   }

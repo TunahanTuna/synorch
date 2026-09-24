@@ -37,3 +37,4 @@ Claude Code'un resmi GitHub deposu CLI çekirdeğinin kaynak ağacı değil; bu 
 
 - TUI ve agent döngüsü araştırması (2026-09-22; pi `27c072e`, OMP `8cd6f8c`, Ink `02ae1e5`): [TUI araştırması ve ADR-04 önerisi](./tui/README.md), [pi/OMP agent kalıpları](./tui/pi-agent-patterns.md), [çapraz platform kontrol listesi](./tui/cross-platform-checklist.md).
 - Sağlayıcı kimlik doğrulama araştırması (2026-09-22; codex `d93909a`, hermes-agent `71a2fe3`, pi `27c072e`, OMP `8cd6f8c`, opencode `2406400`): [abonelik OAuth, CLI köprüleri ve API key özeti](./provider-auth/README.md), [öneri](./provider-auth/recommendation.md).
+- Yetenek boşluğu araştırması, K4.0 (2026-09-24; codex `35aaa5d9`/`27c05a52`, OMP `c0d0ad76`): [bulgular, boşluk matrisi ve kaynaklar](./capabilities/README.md), [K4 önerisi: internet, eksik araçlar, güvenlik tasarımı](./capabilities/recommendation.md).

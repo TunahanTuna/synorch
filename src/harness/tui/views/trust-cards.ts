@@ -1,4 +1,4 @@
-import type { ContextView, MemoryGraphView, MemoryLedgerView, MemoryProposalView, OrchestrationTaskView } from "../../contracts/views.ts";
+import type { ContextView, MemoryGraphView, MemoryLedgerView, MemoryNoteView, MemoryProposalView, OrchestrationTaskView, OrchestrationView } from "../../contracts/views.ts";
 import type { TaskState } from "../../contracts/state.ts";
 import { paint } from "./board.ts";
 import { renderGraph } from "./graph.ts";
@@ -101,20 +101,35 @@ function nodeState(node: MemoryGraphView["nodes"][number]): TaskState {
  * it does not fit): a note is a box `id` / `kind · status`, an edge points from a note to what it
  * relates to. Typed edges and contradictions are listed under the graph.
  */
-export function renderMemoryGraph(view: MemoryGraphView, ctx: ViewContext): string[] {
-  const t = ctx.theme;
-  const g = ctx.glyphs;
+/** The memory graph as a plan view: the layout and the K1.7 selection model (`moveSelection`) reuse it. */
+export function memoryGraphPlan(view: MemoryGraphView, sep = "·"): OrchestrationView {
   const byTarget = new Map<string, string[]>();
   for (const edge of view.edges) byTarget.set(edge.from, [...(byTarget.get(edge.from) ?? []), edge.to]);
   const tasks: OrchestrationTaskView[] = view.nodes.map((node) => ({
     key: node.id,
-    role: `${KIND_TAG[node.kind] ?? node.kind} ${g.base.sep} ${node.status}${node.focus === true ? " (focus)" : ""}`,
+    role: `${KIND_TAG[node.kind] ?? node.kind} ${sep} ${node.status}${node.focus === true ? " (focus)" : ""}`,
     state: nodeState(node),
     // Edges run from what a note relates to (above) into the note (below).
     dependsOn: byTarget.get(node.id) ?? [],
   }));
+  return { kind: "orchestration", tasks, done: true };
+}
+
+export interface MemoryGraphOptions {
+  /** The selected note (interactive graph). */
+  readonly selected?: string | undefined;
+  /** Replaces the header hint on the right. */
+  readonly hint?: string | undefined;
+}
+
+export function renderMemoryGraph(view: MemoryGraphView, ctx: ViewContext, options: MemoryGraphOptions = {}): string[] {
+  const t = ctx.theme;
+  const g = ctx.glyphs;
   const header = [`${g.base.bullet} Memory graph`, `${view.nodes.length} note${view.nodes.length === 1 ? "" : "s"}`, `${view.edges.length} link${view.edges.length === 1 ? "" : "s"}`];
-  const lines = view.nodes.length === 0 ? [t.accent(header.join(` ${g.base.sep} `)), t.muted("  no notes in this scope yet")] : renderGraph({ kind: "orchestration", tasks, done: true }, ctx, { header, bare: true });
+  const lines =
+    view.nodes.length === 0
+      ? [t.accent(header.join(` ${g.base.sep} `)), t.muted("  no notes in this scope yet")]
+      : renderGraph(memoryGraphPlan(view, g.base.sep), ctx, { header, bare: true, selected: options.selected, hint: options.hint });
   lines.push(t.muted(`  ${truncate(clean(view.scope, 200), ctx.width - 4)}${view.hidden === undefined ? "" : ` ${g.base.sep} ${view.hidden} more not shown`}`));
   const typed = view.edges.filter((edge) => edge.type !== "link");
   const titles = new Map(view.nodes.map((node) => [node.id, node.title]));
@@ -126,5 +141,35 @@ export function renderMemoryGraph(view: MemoryGraphView, ctx: ViewContext): stri
   const contradicted = view.nodes.filter((node) => node.contradicted === true).length;
   if (contradicted > 0) lines.push(t.warning(`  ${g.base.warn} ${contradicted} note${contradicted === 1 ? "" : "s"} in a possible contradiction (marked as changes requested)`));
   for (const hint of view.hints ?? []) lines.push(t.muted(`  ${clean(hint, 200)}`));
+  return finish(lines, ctx);
+}
+
+/** A note opened from the interactive memory graph: head, frontmatter, relations, body and path. */
+export function renderMemoryNote(view: MemoryNoteView, ctx: ViewContext, hint?: string): string[] {
+  const t = ctx.theme;
+  const g = ctx.glyphs;
+  const sep = ` ${g.base.sep} `;
+  const lines = [t.accent(truncate(`${g.base.bullet} ${clean(view.id, 60)}${sep}${clean(view.noteKind, 20)} ${clean(view.status, 20)}`, ctx.width))];
+  if (hint !== undefined) lines.push(t.muted(`  ${truncate(hint, ctx.width - 2)}`));
+  lines.push(`  ${t.bold(truncate(clean(view.title, 200), ctx.width - 2))}`);
+  const labelWidth = Math.min(12, Math.max(4, ...view.frontmatter.map(([label]) => displayWidth(label))));
+  for (const [label, value] of view.frontmatter) lines.push(`  ${t.muted(padEnd(clean(label, 20), labelWidth))} ${truncate(clean(value, 200), Math.max(8, ctx.width - labelWidth - 3))}`);
+  if (view.relations.length > 0) {
+    lines.push(`  ${t.bold("Relations")}`);
+    for (const relation of view.relations.slice(0, 16)) {
+      const type = relation.type.replaceAll("_", " ");
+      const edge = relation.direction === "out" ? `${type} ${clean(relation.id, 40)}` : `${clean(relation.id, 40)} ${type} this`;
+      const text = `    ${g.base.bullet} ${edge}${relation.title === undefined ? "" : `  ${clean(relation.title, 80)}`}`;
+      lines.push(relation.type === "contradicts" ? t.warning(truncate(text, ctx.width)) : truncate(text, ctx.width));
+    }
+    if (view.relations.length > 16) lines.push(t.muted(`    … ${view.relations.length - 16} more`));
+  }
+  const body = view.body.split(/\r?\n/);
+  if (view.body.trim() !== "") {
+    lines.push("");
+    for (const line of body.slice(0, 40)) for (const part of wrap(clean(line, 2000), ctx.width - 4)) lines.push(`  ${part}`);
+    if (body.length > 40) lines.push(t.muted(`  … ${body.length - 40} more lines`));
+  }
+  lines.push(t.muted(`  ${truncate(clean(view.path, 400), ctx.width - 2)}`));
   return finish(lines, ctx);
 }

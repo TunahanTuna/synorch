@@ -1,4 +1,4 @@
-import type { HarnessView, OrchestrationView, WorkerDelegationView } from "../../contracts/views.ts";
+import type { HarnessView, MemoryGraphView, MemoryNoteView, OrchestrationView, WorkerDelegationView } from "../../contracts/views.ts";
 import type { GlyphSet } from "../conversation-view.ts";
 import type { Styler } from "../style.ts";
 import { boardHint, PlainBoardTracker, renderBoardSummary, renderLiveBoard, selectionHint } from "./board.ts";
@@ -6,7 +6,7 @@ import { renderAction, renderEvidence, renderWhy } from "./cards.ts";
 import { renderDiff } from "./diff.ts";
 import { renderGraph } from "./graph.ts";
 import { createViewTheme, viewGlyphs, type ViewContext, type ViewGlyphs, type ViewTheme } from "./kit.ts";
-import { renderContext, renderMemoryGraph, renderMemoryLedger, renderMemoryProposal } from "./trust-cards.ts";
+import { memoryGraphPlan, renderContext, renderMemoryGraph, renderMemoryLedger, renderMemoryNote, renderMemoryProposal } from "./trust-cards.ts";
 import { renderUsage } from "./usage.ts";
 import { renderDelegation, renderUserToWorker, renderWorkerSnapshot } from "./worker.ts";
 
@@ -54,6 +54,8 @@ export function renderView(view: HarnessView, ctx: ViewContext): string[] {
       return renderMemoryProposal(view, ctx);
     case "memory-graph":
       return renderMemoryGraph(view, ctx);
+    case "memory-note":
+      return renderMemoryNote(view, ctx);
   }
 }
 
@@ -92,6 +94,34 @@ export class StaticViewComponent extends Styled implements ViewComponent {
   public render(width: number): string[] {
     if (this.cache?.width !== width) this.cache = { width, lines: this.draw(this.context(width, this.frozenAt)) };
     return this.cache.lines;
+  }
+}
+
+/**
+ * `/memory graph` in the TUI: the graph pinned to the transcript, navigable while `selecting`
+ * (K1.7 selection model); `note` shows the opened note card in place of the graph until Esc.
+ */
+export class MemoryGraphComponent extends Styled implements ViewComponent {
+  public readonly view: MemoryGraphView;
+  public readonly plan: OrchestrationView;
+  public selecting = false;
+  public selected: string | undefined;
+  public note: MemoryNoteView | undefined;
+
+  public constructor(view: MemoryGraphView, options: ViewStyleOptions) {
+    super(options);
+    this.view = view;
+    this.plan = memoryGraphPlan(view);
+  }
+
+  public invalidate(): void {}
+
+  public render(width: number): string[] {
+    const ctx = this.context(width, this.now());
+    const sep = ` ${this.glyphs.base.sep} `;
+    if (this.note !== undefined) return renderMemoryNote(this.note, ctx, this.selecting ? ["esc back to the graph", "o open in Obsidian"].join(sep) : undefined);
+    const hint = this.selecting ? ["arrows/hjkl move", "enter open", "o obsidian", "esc done"].join(sep) : undefined;
+    return renderMemoryGraph(this.view, ctx, { selected: this.selecting ? this.selected : undefined, hint });
   }
 }
 

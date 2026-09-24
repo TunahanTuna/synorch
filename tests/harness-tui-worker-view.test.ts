@@ -3,7 +3,7 @@ import { test } from "node:test";
 import xterm from "@xterm/headless";
 import type { Terminal } from "@earendil-works/pi-tui";
 import type { SessionHeaderView } from "../src/harness/contracts/index.ts";
-import type { WorkerAssignmentView, WorkerControl, WorkerSeam, WorkerStreamEvent } from "../src/harness/contracts/views.ts";
+import type { MemorySeam, WorkerAssignmentView, WorkerControl, WorkerSeam, WorkerStreamEvent } from "../src/harness/contracts/views.ts";
 import { GLYPH_SETS } from "../src/harness/tui/conversation-view.ts";
 import { PiTuiRenderer } from "../src/harness/tui/pi-tui-renderer.ts";
 import { PlainLineRenderer } from "../src/harness/tui/plain-line-renderer.ts";
@@ -265,4 +265,58 @@ test("plain mode prints a worker snapshot and delegation lines", async () => {
   assert.match(text, /Reading the HTTP client first\./);
   assert.match(text, /^[\x00-\x7f]*$/, "plain ascii output");
   await plain.stop("completed");
+});
+
+test("/memory graph is navigable: arrows move, Enter opens the note card, o opens Obsidian, Esc goes back", async () => {
+  const { tui, terminal, settle } = await mounted();
+  const calls: string[] = [];
+  const seam: MemorySeam = {
+    note: async (id) => {
+      calls.push(`note ${id}`);
+      return { kind: "memory-note", id, noteKind: "decision", status: "accepted", title: "Use pnpm", frontmatter: [["scope", "project"]], body: "We use pnpm everywhere.", relations: [{ direction: "in", type: "supports", id: "evd-lockfile" }], path: "/vault/decisions/dec-pnpm.md" };
+    },
+    open: async (id) => {
+      calls.push(`open ${id}`);
+      return `Opened in Obsidian: ${id}`;
+    },
+  };
+  try {
+    tui.connectMemory(seam);
+    tui.showView({
+      kind: "memory-graph",
+      nodes: [
+        { id: "dec-pnpm", kind: "decision", status: "accepted", title: "Use pnpm" },
+        { id: "evd-lockfile", kind: "evidence", status: "verified", title: "Lockfile present" },
+      ],
+      edges: [{ from: "evd-lockfile", to: "dec-pnpm", type: "supports" }],
+      scope: "project demo",
+    });
+    let screen = await settle();
+    assert.match(screen, /arrows\/hjkl move · enter open · o obsidian · esc done/);
+    assert.match(screen, /›\S? ?dec-pnpm/);
+    terminal.type(RIGHT);
+    screen = await settle();
+    assert.match(screen, /›\S? ?evd-lockfile/);
+    terminal.type("h");
+    terminal.type("\r");
+    await new Promise((resolve) => setImmediate(resolve));
+    screen = await settle();
+    assert.deepEqual(calls, ["note dec-pnpm"]);
+    assert.match(screen, /We use pnpm everywhere\./);
+    assert.match(screen, /evd-lockfile supports this/);
+    terminal.type("o");
+    await new Promise((resolve) => setImmediate(resolve));
+    screen = await settle();
+    assert.deepEqual(calls, ["note dec-pnpm", "open dec-pnpm"]);
+    assert.match(screen, /Opened in Obsidian: dec-pnpm/);
+    terminal.type(ESC);
+    screen = await settle();
+    assert.doesNotMatch(screen, /We use pnpm everywhere\./);
+    assert.match(screen, /Memory graph · 2 notes · 1 link/);
+    terminal.type(ESC);
+    screen = await settle();
+    assert.doesNotMatch(screen, /esc done/);
+  } finally {
+    await tui.stop("completed");
+  }
 });

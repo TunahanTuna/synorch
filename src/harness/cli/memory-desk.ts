@@ -1,6 +1,6 @@
 import path from "node:path";
 import { MEMORY_KINDS, proposalIdSchema, type MemoryDecisionOutcome, type MemoryKind, type MemoryProposal, type SessionEventDraft } from "../contracts/index.ts";
-import type { HarnessView, MemoryEntryView, MemoryLedgerView } from "../contracts/views.ts";
+import type { HarnessView, MemoryEntryView, MemoryLedgerView, MemoryNoteView, MemorySeam } from "../contracts/views.ts";
 import {
   ledgerSummary,
   memoryGraph,
@@ -259,4 +259,37 @@ export async function runMemoryDesk(host: MemoryDeskHost, argument: string): Pro
     default:
       host.print(USAGE);
   }
+}
+
+/** The interactive memory graph's seam (TUI): the note card on Enter and the Obsidian hand-off on `o`. */
+export function memorySeam(host: MemoryDeskHost): MemorySeam {
+  return {
+    async note(id: string): Promise<MemoryNoteView | undefined> {
+      const note = await host.store.get(id as never).catch(() => undefined);
+      if (note === undefined) return undefined;
+      const fm = note.frontmatter;
+      const index = (await host.store.index().catch(() => undefined))?.notes ?? [];
+      const titles = new Map(index.map((entry) => [entry.id, entry.title]));
+      const relations: MemoryNoteView["relations"][number][] = [
+        ...fm.relations.map((relation) => ({ direction: "out" as const, type: relation.type, id: relation.target, title: titles.get(relation.target) })),
+        ...index.flatMap((entry) => entry.relations.filter((relation) => relation.target === fm.id).map((relation) => ({ direction: "in" as const, type: relation.type, id: entry.id, title: entry.title }))),
+      ];
+      const frontmatter: [string, string][] = [
+        ["scope", `${fm.scope}${fm.branch === undefined ? "" : ` ${fm.branch}`}`],
+        ["confidence", String(fm.confidence)],
+        ["owner", String(fm.owner)],
+        ...(fm.reviewed_at === undefined ? [] : [["reviewed", fm.reviewed_at] as [string, string]]),
+        ...(fm.source_ref === undefined ? [] : [["source", fm.source_ref] as [string, string]]),
+        ...(fm.tags === undefined || fm.tags.length === 0 ? [] : [["tags", fm.tags.join(", ")] as [string, string]]),
+      ];
+      return { kind: "memory-note", id: fm.id, noteKind: fm.kind, status: fm.status, title: note.title, frontmatter, body: note.body, relations, path: host.store.absolutePath(note.path) };
+    },
+    async open(id: string): Promise<string> {
+      const note = await host.store.get(id as never).catch(() => undefined);
+      if (note === undefined) return `No memory note ${id}.`;
+      const file = host.store.absolutePath(note.path);
+      const opened = (await host.obsidian.available()) && (await host.obsidian.open(obsidianOpenUri(file)));
+      return opened ? `Opened in Obsidian: ${id}` : `Obsidian is not installed here · ${file}`;
+    },
+  };
 }

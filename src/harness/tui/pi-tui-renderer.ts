@@ -77,12 +77,13 @@ import { imagePathFromPaste, readClipboardImage, type ClipboardImage } from "./i
 import { DEFAULT_COMMAND_PALETTE, mergeCommands, requiresArgument } from "./input/commands.ts";
 import { WorkspaceFileIndex } from "./input/file-index.ts";
 import { isMouseSequence, MOUSE_DISABLE_SEQUENCE, MOUSE_ENABLE_SEQUENCE, parseSgrMouse, TranscriptViewport, type MouseInput } from "./input/mouse.ts";
-import type { HarnessView, OrchestrationTaskView, OrchestrationView, ViewHost, WorkerAssignmentView, WorkerSeam, WorkerStreamEvent } from "../contracts/views.ts";
+import type { HarnessView, MemorySeam, OrchestrationTaskView, OrchestrationView, ViewHost, WorkerAssignmentView, WorkerSeam, WorkerStreamEvent } from "../contracts/views.ts";
 import {
   cycleWorker,
   DelegationComponent,
   initialSelection,
   LiveBoardComponent,
+  MemoryGraphComponent,
   moveSelection,
   renderAssignment,
   renderWorkerHeader,
@@ -793,6 +794,9 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private selecting = false;
   private selectedKey: string | undefined;
   private workerPane: WorkerPane | undefined;
+  /** Interactive `/memory graph`: the session seam and the graph being navigated. */
+  private memorySeam: MemorySeam | undefined;
+  private memoryGraph: MemoryGraphComponent | undefined;
   private readonly inputHint = new Text("", 0, 0);
   private readonly localPaused = new Set<string>();
   private readonly localCancelled = new Set<string>();
@@ -1051,10 +1055,94 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       const line = new DelegationComponent(view, this.viewStyle(), () => this.expanded || this.expandedItems.has(id));
       this.delegationIds.set(line, id);
       this.transcript.addChild(line);
+    } else if (view.kind === "memory-graph" && view.nodes.length > 0) {
+      this.showMemoryGraph(view);
     } else {
       this.transcript.addChild(new StaticViewComponent(view, this.viewStyle()));
     }
     this.tui.requestRender();
+  }
+
+  public connectMemory(seam: MemorySeam | undefined): void {
+    this.memorySeam = seam;
+  }
+
+  /** The graph under selection is the newest one; an older one keeps its last frame. */
+  private showMemoryGraph(view: Extract<HarnessView, { kind: "memory-graph" }>): void {
+    if (this.memoryGraph !== undefined) this.memoryGraph.selecting = false;
+    const graph = new MemoryGraphComponent(view, this.viewStyle());
+    graph.selecting = true;
+    graph.selected = initialSelection(graph.plan);
+    this.memoryGraph = graph;
+    this.transcript.addChild(graph);
+  }
+
+  /** Keys of the memory graph under selection (K1.7 model). Undefined passes the key on. */
+  private onMemoryGraphKey(data: string, empty: boolean): { consume?: boolean } | undefined {
+    const graph = this.memoryGraph;
+    if (graph === undefined || !graph.selecting) return undefined;
+    const done = (): undefined => {
+      graph.selecting = false;
+      this.tui.requestRender();
+      return undefined;
+    };
+    if (!empty) return done();
+    const id = graph.selected;
+    if (matchesKey(data, "escape")) {
+      if (graph.note !== undefined) graph.note = undefined;
+      else graph.selecting = false;
+    } else if (data === "o") {
+      if (id !== undefined) this.openMemoryNote(id);
+    } else if (graph.note !== undefined) {
+      return done();
+    } else if (matchesKey(data, "up") || data === "k") graph.selected = moveSelection(graph.plan, "graph", id, "up");
+    else if (matchesKey(data, "down") || data === "j") graph.selected = moveSelection(graph.plan, "graph", id, "down");
+    else if (matchesKey(data, "left") || data === "h") graph.selected = moveSelection(graph.plan, "graph", id, "left");
+    else if (matchesKey(data, "right") || data === "l") graph.selected = moveSelection(graph.plan, "graph", id, "right");
+    else if (matchesKey(data, "tab")) graph.selected = moveSelection(graph.plan, "graph", id, "next");
+    else if (matchesKey(data, "shift+tab")) graph.selected = moveSelection(graph.plan, "graph", id, "previous");
+    else if (matchesKey(data, "enter") || data === "\r") {
+      if (id !== undefined) this.loadMemoryNote(graph, id);
+    } else return done();
+    this.tui.requestRender();
+    return { consume: true };
+  }
+
+  private loadMemoryNote(graph: MemoryGraphComponent, id: string): void {
+    const seam = this.memorySeam;
+    if (seam === undefined) {
+      this.appendLine({ level: "info", text: `/memory show ${id} prints this note` });
+      return;
+    }
+    seam.note(id).then(
+      (note) => {
+        if (note === undefined) this.appendLine({ level: "warning", text: `No memory note ${id}.` });
+        else if (graph.selecting && graph.selected === id) graph.note = note;
+        this.tui.requestRender();
+      },
+      (error: unknown) => {
+        this.appendLine({ level: "error", text: `Couldn't open ${id}: ${errorText(error)}` });
+        this.tui.requestRender();
+      },
+    );
+  }
+
+  private openMemoryNote(id: string): void {
+    const seam = this.memorySeam;
+    if (seam === undefined) {
+      this.appendLine({ level: "info", text: `/memory open ${id} opens it in Obsidian` });
+      return;
+    }
+    seam.open(id).then(
+      (outcome) => {
+        this.appendLine({ level: "info", text: outcome });
+        this.tui.requestRender();
+      },
+      (error: unknown) => {
+        this.appendLine({ level: "error", text: `Couldn't open ${id} in Obsidian: ${errorText(error)}` });
+        this.tui.requestRender();
+      },
+    );
   }
 
   /** `/graph`: pins the plan graph to the transcript. */
@@ -1339,6 +1427,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       else return undefined;
       return { consume: true };
     }
+    const memory = this.onMemoryGraphKey(data, empty);
+    if (memory !== undefined) return memory;
     if (this.board === undefined) return undefined;
     if (!this.selecting) {
       if (empty && matchesKey(data, "down")) {

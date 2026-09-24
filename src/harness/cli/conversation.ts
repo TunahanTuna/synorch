@@ -76,7 +76,7 @@ import {
 } from "./slash-commands.ts";
 import { resolveTerminalSettings, streamHasColors } from "./terminal.ts";
 import { buildContextView, buildEvidence, buildWhy } from "./transparency.ts";
-import { runMemoryDesk, type MemoryDeskHost } from "./memory-desk.ts";
+import { memorySeam, runMemoryDesk, type MemoryDeskHost } from "./memory-desk.ts";
 import { createSystemObsidianLauncher, ledgerSummary, readLedger, type MarkdownMemoryStore } from "../memory/index.ts";
 import { promptTrustForCommand } from "./trust.ts";
 import { UsageLedger } from "./usage-stats.ts";
@@ -1060,7 +1060,7 @@ class Conversation implements ConversationCommandHost {
 
   private memoryDesk(): MemoryDeskHost {
     const views = this.renderer.views;
-    return {
+    const host: MemoryDeskHost = {
       store: this.runtime.memory as MarkdownMemoryStore,
       projectId: this.runtime.projectId,
       branch: this.runtime.gitBranch,
@@ -1076,6 +1076,8 @@ class Conversation implements ConversationCommandHost {
         await this.append(type, data, "user");
       },
     };
+    views?.connectMemory?.(memorySeam(host));
+    return host;
   }
 
   /**

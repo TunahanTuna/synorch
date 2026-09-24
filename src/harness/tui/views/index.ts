@@ -6,7 +6,7 @@
 export { isActive, isFinished, isWaiting, PlainBoardTracker, presentTask, renderBoard, renderBoardSummary, renderLiveBoard, type TaskPresentation, type Tone } from "./board.ts";
 export { renderAction, renderEvidence, renderWhy } from "./cards.ts";
 export { lineDiff, renderDiff } from "./diff.ts";
-export { DelegationComponent, LiveBoardComponent, PlainViews, renderView, StaticViewComponent, UserToWorkerComponent, type ViewComponent, type ViewStyleOptions } from "./components.ts";
+export { DelegationComponent, LiveBoardComponent, MemoryGraphComponent, PlainViews, renderView, StaticViewComponent, UserToWorkerComponent, type ViewComponent, type ViewStyleOptions } from "./components.ts";
 export { graphLevels, layoutGraph, renderGraph, type GraphOptions } from "./graph.ts";
 export {
   cycleWorker,
@@ -36,4 +36,4 @@ export {
   type ViewTheme,
 } from "./kit.ts";
 export { renderUsage } from "./usage.ts";
-export { renderContext, renderMemoryGraph, renderMemoryLedger, renderMemoryProposal } from "./trust-cards.ts";
+export { memoryGraphPlan, renderContext, renderMemoryGraph, renderMemoryLedger, renderMemoryNote, renderMemoryProposal } from "./trust-cards.ts";

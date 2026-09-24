@@ -430,8 +430,31 @@ export interface MemoryGraphView {
   readonly hints?: readonly string[] | undefined;
 }
 
+/** One note opened from the interactive memory graph (Enter): frontmatter, body and relations. */
+export interface MemoryNoteView {
+  readonly kind: "memory-note";
+  readonly id: string;
+  readonly noteKind: string;
+  readonly status: string;
+  readonly title: string;
+  /** Selected frontmatter fields as label / value pairs. */
+  readonly frontmatter: readonly (readonly [string, string])[];
+  readonly body: string;
+  /** `out`: this note relates to `id`; `in`: `id` relates to this note. */
+  readonly relations: readonly { readonly direction: "out" | "in"; readonly type: string; readonly id: string; readonly title?: string | undefined }[];
+  readonly path: string;
+}
+
+/** What the interactive memory graph needs from the session: a note card and the Obsidian hand-off. */
+export interface MemorySeam {
+  note(id: string): Promise<MemoryNoteView | undefined>;
+  /** Opens the note in Obsidian; resolves to a one-line outcome for the transcript. */
+  open(id: string): Promise<string>;
+}
+
 export type HarnessView =
   | MemoryGraphView
+  | MemoryNoteView
   | OrchestrationView
   | UsageView
   | EvidenceView
@@ -462,4 +485,6 @@ export interface ViewHost {
   connectWorkers?(seam: WorkerSeam | undefined): void;
   openWorkerView?(taskKey: string): boolean;
   closeWorkerView?(): void;
+  /** Interactive `/memory graph` (TUI only): Enter opens a note card, `o` opens it in Obsidian. */
+  connectMemory?(seam: MemorySeam | undefined): void;
 }

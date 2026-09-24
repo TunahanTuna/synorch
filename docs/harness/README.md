@@ -24,7 +24,7 @@ Bu dosyalar **uygulama konfigürasyonu değil tasarım girdisidir**. Kabul edilm
 4. [Orkestrasyon ve sözleşmeler](./design/orchestration-contracts.md)
 5. [Oturum ve bağlam](./design/session-and-context.md), [sağlayıcılar ve yapılandırma](./design/providers-and-configuration.md)
 6. [Araçlar, izin ve güvenlik](./design/tools-and-security.md), [audit ve işletim](./design/audit-and-operations.md)
-7. [CLI deneyimi](./design/cli-experience.md) ve [TUI deneyimi spesifikasyonu](./design/tui-experience.md) ([UX referans araştırması](./research/ux/README.md))
+7. [CLI deneyimi](./design/cli-experience.md), [TUI deneyimi spesifikasyonu](./design/tui-experience.md) ve [terminal deneyimi cila brifi](./design/terminal-polish-brief.md) ([UX referans araştırması](./research/ux/README.md))
 8. [Aşamalı teslim](./delivery/roadmap.md) ve [doğrulama](./delivery/verification.md)
 9. [Geliştirme iş akışı](./workflow/README.md), [dokümantasyon planı](./workflow/documentation-plan.md), [görev oyun kitabı](./workflow/task-playbook.md) ve [yönetişim](./workflow/governance.md)
 10. [Kararlar (ADR-01…17)](./decisions/README.md) ve [ADR kuyruğu](./delivery/decisions.md)

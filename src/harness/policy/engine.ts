@@ -84,8 +84,9 @@ export interface PolicyEngineOptions {
   readonly workspaceTrusted?: () => boolean;
   /**
    * The session's current permission mode, from the composition root (a CLI flag, the user-scope
-   * `ui.permission_mode` or Shift+Tab). Workers (`implementer`, `debugger`) inherit only `full`;
-   * every other mode, and every read-only role or the orchestrator, keeps the default-deny policy.
+   * `ui.permission_mode` or Shift+Tab). Workers (`implementer`, `debugger`) inherit `auto` and
+   * `full` (ADR-08 revision 3 applies to workers: auto = autonomous inside the worktree); `ask`,
+   * `plan`, headless, every read-only role and the orchestrator keep the default-deny policy.
    */
   readonly permissionMode?: () => PermissionMode | undefined;
   /**
@@ -129,7 +130,7 @@ function computePolicy(inputs: PolicyInputs, workspaceTrusted: boolean, enginePe
   const user = readPolicyConfig(inputs.userConfig, "user");
   const workspace = readPolicyConfig(inputs.workspaceConfig, "workspace");
   const role = inputs.role;
-  const requested = role === "session" ? inputs.permissionMode : WORKER_FULL_ROLES.has(role) && enginePermission === "full" ? "full" : undefined;
+  const requested = role === "session" ? inputs.permissionMode : WORKER_PERMISSION_ROLES.has(role) && (enginePermission === "full" || enginePermission === "auto") ? enginePermission : undefined;
   const configured = strictestMode([inputs.mode, user.mode, workspace.mode]);
   // A configuration layer that asks (`policy.mode: ask`) narrows auto/full to ask (workers: no full); nothing widens.
   const permission: PermissionMode | undefined =
@@ -219,8 +220,8 @@ interface DecisionBuilder {
   destructive: boolean;
 }
 
-/** Roles that inherit `full` access from the session's permission mode; read-only roles and the orchestrator never do. */
-const WORKER_FULL_ROLES: ReadonlySet<AgentRole> = new Set(["implementer", "debugger"]);
+/** Roles that inherit `auto`/`full` from the session's permission mode; read-only roles and the orchestrator never do. */
+const WORKER_PERMISSION_ROLES: ReadonlySet<AgentRole> = new Set(["implementer", "debugger"]);
 
 function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, options: PolicyEngineOptions): PolicyDecision {
   const builder: DecisionBuilder = { decision: "allow", rail: undefined, reasons: [], liftable: true, destructive: false };

@@ -212,7 +212,7 @@ export interface Runtime {
    * binding (headless, JSONL, piped input) `ask_user` answers `approval_unavailable`.
    */
   bindUserPrompt(prompt: UserPrompt): () => void;
-  /** The approval broker for a session: the renderer's interactive broker in `ask` mode, the headless one otherwise. */
+  /** The approval broker for a session: the renderer's interactive broker in `ask` mode or under an interactive permission mode (workers' prompts reach the user, ADR-08 revision 3), the headless one otherwise. */
   brokerFor(interactive: ApprovalBroker | undefined): ApprovalBroker;
   createDriver(broker: ApprovalBroker): (events: EventStore) => AgentDriver;
   /**
@@ -915,7 +915,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       };
     },
     brokerFor(interactive) {
-      if (options.policyMode === "ask" && interactive !== undefined && interactive.availability !== "headless") return interactive;
+      // Workers follow the session's permission mode (ADR-08 revision 3): what asks in auto/full (outward writes, destructive commands) reaches the user.
+      if ((options.policyMode === "ask" || permission !== undefined) && interactive !== undefined && interactive.availability !== "headless") return interactive;
       return createHeadlessApprovalBroker({ mode: options.policyMode });
     },
     createDriver,

@@ -1473,8 +1473,8 @@ class Conversation implements ConversationCommandHost {
       this.note("info", `${g.bullet} Ask mode ${g.sep} Synorch asks before every edit and command`);
       this.pendingNotes.push("the user switched to ask mode: each edit and command is confirmed by the user first.");
     } else if (mode === "auto") {
-      this.note("info", `${g.bullet} Auto mode ${g.sep} edits and allowlisted commands run; anything risky asks you first`);
-      if (previous === "ask" || previous === "full") this.pendingNotes.push("the user switched to auto mode: edits and allowlisted commands run, anything else is asked for.");
+      this.note("info", `${g.bullet} Auto mode ${g.sep} edits and commands in this workspace run (workers too); pushes, publishing and destructive commands ask you first`);
+      if (previous === "ask" || previous === "full") this.pendingNotes.push("the user switched to auto mode: edits and any command inside the workspace run without asking (workers too); only outward actions (push, publish, deploy) and destructive commands are asked for.");
     } else this.note("info", `${g.bullet} Default-deny ${g.sep} commands outside the allowlist are refused`);
   }
 
@@ -2389,7 +2389,7 @@ const UNSET_SETTING = "(unset)";
 
 const MODE_MEANINGS: Readonly<Record<PermissionMode, string>> = {
   ask: "asks before every edit and command",
-  auto: "edits and allowlisted commands run; anything outside the allowlist asks you first",
+  auto: "edits and commands in this workspace run, workers included; pushes, publishing and destructive commands ask you first",
   full: "no prompts except destructive commands (force push, publish, recursive delete…); hard rails stay",
   plan: "read-only: reads and plans, no edits or commands",
 };

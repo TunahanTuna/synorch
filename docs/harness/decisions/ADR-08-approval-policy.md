@@ -103,3 +103,16 @@ Gerekçe (ürün sahibi): Opus'la web araması MCP üzerinden her site ve her ey
 - **Çift web aracı yok**: native modda Synorch'un `web_search`/`web_fetch` araçları MCP köprüsünde sunulmaz (`NATIVE_DUPLICATE_TOOLS`, `core/driver.ts`); Claude'un yerleşik WebSearch/WebFetch'i tek web aracıdır. OpenAI rotalarında barındırılan `web_search` açıkken Synorch'un `web_search`'ü istekten çıkarılır (`providers/responses.ts`, değişmedi).
 
 Doğrulama: `tests/harness-policy-permission-modes.test.ts` (auto otonom; git push oturumda bir kez; kalkan), `tests/harness-e2e-permission-modes.test.ts` (auto istemsiz çalışır, güven bildirimi, `trust.json` yazılmaz; ask "Always allow" akışı), `tests/harness-web-fetch.test.ts`, `tests/harness-claude-native.test.ts`.
+
+### 2026-09-25 ek — revizyon 3 işçilere de uygulanır
+
+Gerekçe (ürün sahibi, ekran görüntüsü): `auto` modunda bir orkestrasyon işçisi (implementer) `npm create vite@latest . -- --template react` komutunu "sandbox allowlist" nedeniyle çalıştıramadı ve oturum kullanıcıya `/allow npm create` yazmasını söyledi. "Allowlist yönetmek istemiyorum; bu olmamalı." Revizyon 3 yalnız `session` rolüne uygulanmıştı. Bu ek önceki bölümleri silmez.
+
+- **İşçiler oturumun izin modunu izler**: `implementer`/`debugger` (yazma kapsamı olan) `auto` ve `full`'u motordan miras alır (`PolicyEngineOptions.permissionMode`; `EffectivePolicy.permission_mode`, şema `session` dışında `auto`/`full` kabul eder). `auto`'da worktree içinde her komut (kurulum, iskele CLI'ları, build, test, dev sunucusu) allowlist reddi ve istem olmadan çalışır; `exec_confinement` `auto`/`full`'da bilgi amaçlıdır (kaldırılabilir retler `permission-auto` ile izne döner). `ask`, `plan`, headless ve salt-okur roller (explorer, reviewer, rca-only debugger) ile orchestrator eski varsayılan-ret allowlist'ini korur.
+- **İstemler kullanıcıya gider**: işçide `auto`'da sorulanlar (yıkıcı komut kuralları — force push, publish, çalışma alanı dışı silme —, dışa dönük yazmalar, ilk uzak push) etkileşimli oturumda kullanıcının onay arayüzüne yönlenir (`Runtime.brokerFor`: izin modu varken etkileşimli broker); headless'ta açık mesajla ret.
+- **Güven**: `auto`/`full` oturum güveni işçileri de kapsar (motorun `workspaceTrusted` kaynağı oturumun etkin güvenidir); işçi düzeyinde güven reddi yok.
+- **`/allow` önerisi**: yalnız konuşma ajanının kendi kısmi-sandbox allowlist reddinde önerilir; işçi reddinde, hard rail'de ve `auto`/`full`'da önerilmez — ret nedeni açıklanır (`transparency.ts`, `conversation-view.ts`, `harness:session` yönergesi).
+- **Plan zamanı doğrulama ön kontrolü** aynı motoru kullandığından aynı semantiği izler: `auto`/`full`'da allowlist dışı komut planı reddettirmez.
+- Hard rail'ler (git entegrasyon alt komutları, bağlı bağımlılık dizinli worktree'de bağımlılık değişikliği, modül enjeksiyonu, ayrılmış yollar, kapsam dışı yazma) her modda aynen kalır.
+
+Doğrulama: `tests/harness-policy-permission-modes.test.ts` ("workers follow the session's auto mode").

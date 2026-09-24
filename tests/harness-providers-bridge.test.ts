@@ -203,7 +203,13 @@ test("bridge maps `Login expired` to auth_expired with a claude /login hint", as
     const last = (await run("hi")).at(-1);
     assert.ok(last?.type === "error");
     assert.equal(last.error.code, "auth_expired");
-    assert.match(last.error.message, /claude \/login/);
+    assert.match(last.error.message, /`claude`, then `\/login`/);
+  });
+  await withSession("not-logged-in", async ({ run }) => {
+    const last = (await run("hi")).at(-1);
+    assert.ok(last?.type === "error");
+    assert.equal(last.error.code, "auth_expired");
+    assert.match(last.error.message, /`claude`, then `\/login`/);
   });
 });
 
@@ -282,7 +288,7 @@ test("SEC-M2 bridge env strips Bedrock, Vertex, base-url, OAuth-token and every 
 });
 
 test("SEC-M2 bridge refuses a turn whose auth source is not the subscription login unless the user opted in", async () => {
-  for (const source of ["ANTHROPIC_API_KEY", "apiKeyHelper", "/login managed key", "none"]) {
+  for (const source of ["ANTHROPIC_API_KEY", "apiKeyHelper", "/login managed key", "user", "project", "org", "temporary", "something-new"]) {
     await withSession("tool", async ({ run, bridge }) => {
       const events = await run("please read src/a.ts");
       const last = events.at(-1);
@@ -299,6 +305,14 @@ test("SEC-M2 bridge refuses a turn whose auth source is not the subscription log
     assert.ok(init?.type === "backend_init" && init.auth_source === "api-key", "the opt-in accepts and still reports the source");
     assert.equal(events.at(-1)?.type, "done");
   }, undefined, { env: { FAKE_CLAUDE_API_KEY_SOURCE: "apiKeyHelper" }, allowNonSubscriptionAuth: true });
+  for (const source of ["none", "oauth"]) {
+    await withSession("tool", async ({ run }) => {
+      const events = await run("please read src/a.ts");
+      const init = events.find((event) => event.type === "backend_init");
+      assert.ok(init?.type === "backend_init" && init.auth_source === "subscription", `${source} is the subscription login`);
+      assert.equal(events.at(-1)?.type, "done");
+    }, undefined, { env: { FAKE_CLAUDE_API_KEY_SOURCE: source } });
+  }
 });
 
 test("SEC-L3 MCP bridge drops a connection whose pre-auth line exceeds the cap", async () => {

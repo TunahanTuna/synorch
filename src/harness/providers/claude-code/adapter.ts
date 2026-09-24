@@ -97,10 +97,17 @@ export function buildClaudeArgs(input: ClaudeArgsInput): string[] {
   ];
 }
 
-/** `system/init.apiKeySource` → the auth source shown to the user. */
+const API_KEY_SOURCES = new Set(["user", "project", "org", "temporary", "ANTHROPIC_API_KEY", "apiKeyHelper", "/login managed key"]);
+
+/**
+ * `system/init.apiKeySource` → the auth source shown to the user. Claude Code logged in with a
+ * claude.ai subscription reports `none` (verified on 2.1.281): no API key is in use, and the bridge
+ * strips every key/token variable, so `none` and `oauth` mean the subscription login.
+ */
 export function authSourceOf(apiKeySource: string | undefined): "subscription" | "api-key" | "unknown" {
-  if (apiKeySource === "oauth") return "subscription";
-  if (apiKeySource === "ANTHROPIC_API_KEY" || apiKeySource === "apiKeyHelper" || apiKeySource === "/login managed key") return "api-key";
+  if (apiKeySource === "none" || apiKeySource === "oauth") return "subscription";
+  if (apiKeySource === undefined) return "unknown";
+  if (API_KEY_SOURCES.has(apiKeySource) || /key|helper|token/i.test(apiKeySource)) return "api-key";
   return "unknown";
 }
 
@@ -729,8 +736,8 @@ function trailingUserContent(input: BackendTurnInput): UserBlock[] | undefined {
 
 /** Recognizes `Login expired · Please run /login` and rate/billing failures in backend output. */
 export function classifyBackendText(text: string, fallback: ProviderError["code"], message: string): ProviderError {
-  if (/login expired|please run \/login|authentication_failed|oauth_org_not_allowed|invalid api key/i.test(text)) {
-    return providerError("auth_expired", `${message}. Run \`claude /login\` to sign in again.`);
+  if (/login expired|not logged in|please run \/login|authentication_failed|oauth_org_not_allowed|invalid api key/i.test(text)) {
+    return providerError("auth_expired", `${message}. ${CLAUDE_LOGIN_HINT}`);
   }
   if (/rate[_ ]limit|overloaded/i.test(text)) return providerError("rate_limited", message);
   if (/billing_error|out of extra usage|usage limit/i.test(text)) return providerError("quota_exhausted", message);

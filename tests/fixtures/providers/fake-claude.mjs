@@ -97,7 +97,7 @@ async function sendInit() {
     model,
     tools: scenario === "builtin" ? ["Bash", "Read", ...tools] : tools,
     mcp_servers: [{ name: "synorch", status: "connected" }],
-    apiKeySource: process.env.FAKE_CLAUDE_API_KEY_SOURCE ?? (process.env.ANTHROPIC_API_KEY ? "ANTHROPIC_API_KEY" : "oauth"),
+    apiKeySource: process.env.FAKE_CLAUDE_API_KEY_SOURCE ?? (process.env.ANTHROPIC_API_KEY ? "ANTHROPIC_API_KEY" : "none"),
   });
 }
 
@@ -119,6 +119,10 @@ async function onUser(message) {
   if (scenario === "builtin") return;
   if (scenario === "login-expired") {
     emit({ type: "result", subtype: "success", is_error: true, result: "Login expired · Please run /login", session_id: sessionId });
+    return;
+  }
+  if (scenario === "not-logged-in") {
+    emit({ type: "result", subtype: "success", is_error: true, result: "Not logged in · Please run /login", session_id: sessionId });
     return;
   }
   if (scenario === "hang") {

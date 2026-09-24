@@ -88,7 +88,7 @@ async function onUser(message) {
   const tools = listed.result.tools.map((tool) => tool.name);
   report.tools = tools;
   save();
-  emit({ type: "system", subtype: "init", session_id: sessionId, model, tools: tools.map((name) => `mcp__synorch__${name}`), mcp_servers: [{ name: "synorch", status: "connected" }], apiKeySource: "oauth" });
+  emit({ type: "system", subtype: "init", session_id: sessionId, model, tools: tools.map((name) => `mcp__synorch__${name}`), mcp_servers: [{ name: "synorch", status: "connected" }], apiKeySource: "none" });
 
   if (tools.includes("task_report") && report.turns === 1) {
     const target = process.env.FAKE_WORKER_PATH ?? "README.md";

@@ -157,8 +157,8 @@ export const effectivePolicySchema = z
       context.addIssue({ code: "custom", path: ["command_grants"], message: "command grants apply to the conversation agent only" });
     }
     if (policy.permission_mode !== undefined) {
-      if (policy.role !== "session" && policy.permission_mode !== "full") {
-        context.addIssue({ code: "custom", path: ["permission_mode"], message: "only the conversation agent has interactive permission modes; workers carry full access only" });
+      if (policy.role !== "session" && policy.permission_mode !== "full" && policy.permission_mode !== "auto") {
+        context.addIssue({ code: "custom", path: ["permission_mode"], message: "only the conversation agent has interactive permission modes; workers carry auto or full only (ADR-08 revision 3)" });
       }
       if (policy.mode !== policyModeForPermission(policy.permission_mode)) {
         context.addIssue({ code: "custom", path: ["mode"], message: `permission mode ${policy.permission_mode} computes in ${policyModeForPermission(policy.permission_mode)} mode` });
@@ -368,7 +368,7 @@ export interface PolicyInputs {
   readonly workspaceRoot: string;
   /** `/allow` prefixes from the user scope; used for the `session` role only. */
   readonly commandGrants?: readonly string[];
-  /** The interactive permission mode; `session` only (a worker inherits only `full` from the engine). */
+  /** The interactive permission mode; `session` only (implementer/debugger workers inherit `auto` and `full` from the engine, ADR-08 revision 3). */
   readonly permissionMode?: PermissionMode;
   readonly taskScope:
     | {

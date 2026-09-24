@@ -482,7 +482,7 @@ Konuşma ajanı (`session`) için Claude Code tarzı etkileşimli izin modları;
 
 - **Kaldırılabilir retler** (`PERMISSION_LIFTABLE_CODES`): `exec-not-allowlisted` (yalnız sandbox katmanı), `workspace-untrusted`, `external-write-not-allowlisted`, `network-denied`, `host-not-allowlisted`. Karar yalnız bunlarla reddedildiyse `auto` onu `ask`'e, `full` `allow`'a çevirir. Rail, ayrılmış yol, kaçış, git entegrasyonu (`commit`, `reset` …), node modül enjeksiyonu, yapılandırılmış etki reddi ve salt-okur roller hiçbir modda kaldırılmaz.
 - **Daraltma:** bir yapılandırma katmanı `policy.mode: ask` derse `auto`/`full` `ask` olur; repo katmanı `ui` anahtarını hiç ayarlayamaz. `auto`/`full`'da `external-write` etkisi `allow` hesaplanır (allowlist şartı şema refine'ından muaf), karar değerlendirmede verilir.
-- **İşçiler:** `implementer`/`debugger` yalnız `full`'u miras alır (motor seçeneği `permissionMode`); diğer modlar ve salt-okur roller/orchestrator varsayılan-ret kalır. Şema: `session` dışında yalnız `full`; `mode` = `policyModeForPermission(permission_mode)`; `plan` salt okurdur.
+- **İşçiler:** `implementer`/`debugger` `auto` ve `full`'u miras alır (motor seçeneği `permissionMode`; revizyon 3 işçilere de uygulanır, 2026-09-25): `auto`'da worktree içinde her komut sorusuz çalışır, yalnız dışa dönük/geri alınamaz eylemler kullanıcının onay arayüzüne sorulur (headless: ret). `ask`, `plan`, headless ve salt-okur roller/orchestrator varsayılan-ret kalır. Şema: `session` dışında yalnız `auto`/`full`; `mode` = `policyModeForPermission(permission_mode)`; `plan` salt okurdur.
 - **Onay isteği:** `ApprovalRequest.command` (redakte argv) ve `details: { why, consequence }` UX-03 eylem kartını besler. Seçimler: *Allow once* · *Always allow `<önek>`* (kullanıcı kapsamı `command-grants.json`, `command/allowed` ile denetlenir; git ve tek başına kabuk önerilmez) · *Deny* · *Deny and tell Synorch why* (`reason: "the user said: …"` modele iletilir). Tuşlar 1–9 veya oklar + Enter; Esc reddeder; TTY'de zaman aşımı yoktur.
 - **Güven:** `auto`/`ask`'te depo kodu çalıştıran ilk komut aynı akışta "trust this folder?" sorar; "Not now" o çağrının onayını kullanıcı adına `rejected` yapar (çift soru yok). `full` oturum boyunca güven ima eder, kalıcı değildir, kırmızı tek satırla söylenir.
 - **Headless** (`syn run`, JSONL, TTY yok): `--permission-mode` verilmezse varsayılan-ret. `--permission-mode auto` headless'ta soruları ret yapar; `syn run --permission-mode full` işçilere tam erişim verir.
@@ -513,7 +513,7 @@ Konuşma ajanı (`session`) için Claude Code tarzı etkileşimli izin modları;
     - { layer: role, source: session, digest: "sha256:6666666666666666666666666666666666666666666666666666666666666666" }
 ```
 
-Reddedilenler: `plan` modunda yazma/exec açık olamaz; bir işçi `auto` taşıyamaz (yalnız `full`).
+Reddedilenler: `plan` modunda yazma/exec açık olamaz; bir işçi `ask`/`plan` taşıyamaz (yalnız `auto` veya `full`, ADR-08 revizyon 3).
 
 ```yaml example=effective-policy invalid
 - schema_version: 1
@@ -545,6 +545,6 @@ Reddedilenler: `plan` modunda yazma/exec açık olamaz; bir işçi `auto` taşı
   network: { mode: deny, hosts: [] }
   sandbox: { backend: policy-only, enforcement: partial }
   require_full_sandbox: false
-  permission_mode: auto
+  permission_mode: ask
   layers: [{ layer: role, source: implementer, digest: "sha256:7777777777777777777777777777777777777777777777777777777777777777" }]
 ```

@@ -353,7 +353,8 @@ export function buildWhy(events: readonly SessionEvent[], argument: string, fact
     if (!howToChange.some((entry) => entry.command === command)) howToChange.push({ command, effect });
   };
   for (const reason of decision.reasons) {
-    if (reason.code === "exec-not-allowlisted" && action.command !== undefined) add(`/allow ${action.command.argv.slice(0, 2).join(" ")}`, "lets Synorch run commands starting with this prefix here");
+    // `/allow` extends only the conversation agent's partial-sandbox allowlist; a hard refusal (layer role) or a worker refusal is explained, never answered with /allow.
+    if (reason.code === "exec-not-allowlisted" && reason.layer === "sandbox" && action.role === "session" && decision.decision === "deny" && action.command !== undefined) add(`/allow ${action.command.argv.slice(0, 2).join(" ")}`, "lets Synorch run commands starting with this prefix here");
     if (reason.code === WORKSPACE_UNTRUSTED_CODE) add("/trust", "lets build and test commands run in this folder");
     if (reason.code === "approval-required" || reason.code === "permission-prompt") add("/permissions auto (or Shift+Tab)", "fewer questions: auto asks only for risky commands, full asks nothing (hard rails still apply)");
     if (reason.code === "exec-not-allowlisted" && facts.noPermissionMode) add("--permission-mode auto", "asks you instead of refusing commands outside the allowlist");

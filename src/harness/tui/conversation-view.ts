@@ -529,7 +529,7 @@ export class ConversationPresenter {
     const state = this.stateFor(event.data.tool_call_id);
     if (state === undefined || event.data.decision.decision !== "deny") return [];
     state.status = "denied";
-    state.summary = denialSummary(event.data.decision.reasons, event.data.action.command?.argv, this.options.glyphs);
+    state.summary = denialSummary(event.data.decision.reasons, event.data.action.role === "session" ? event.data.action.command?.argv : undefined, this.options.glyphs);
     return [{ op: "update", item: this.toolView(state) }];
   }
 
@@ -871,9 +871,10 @@ export function allowPrefixFor(argv: readonly string[]): string {
   return first !== undefined && !first.startsWith("-") ? `${program} ${first}` : program;
 }
 
-function denialSummary(reasons: readonly { readonly code: string; readonly message: string }[], argv: readonly string[] | undefined, g: GlyphSet): string {
+/** `argv` is given only for the conversation agent: `/allow` never applies to a worker, so its refusal is explained instead. */
+function denialSummary(reasons: readonly { readonly code: string; readonly layer?: string; readonly message: string }[], argv: readonly string[] | undefined, g: GlyphSet): string {
   const codes = new Set(reasons.map((reason) => reason.code));
-  if (argv !== undefined && argv.length > 0 && codes.has("exec-not-allowlisted") && !reasons.some((reason) => /changes the repository|refused:/.test(reason.message))) {
+  if (argv !== undefined && argv.length > 0 && reasons.some((reason) => reason.code === "exec-not-allowlisted" && reason.layer !== "role") && !reasons.some((reason) => /changes the repository|refused:/.test(reason.message))) {
     return `not allowed here ${g.sep} type /allow ${allowPrefixFor(argv)} to permit it`;
   }
   if (codes.has("workspace-untrusted")) return `runs repository code and this folder is not trusted ${g.sep} /trust to allow it`;

@@ -116,7 +116,26 @@ test("destructive commands ask in every interactive mode (full included), deny h
   assert.equal(decide("auto", exec(["git", "push", "origin", "main"])), "ask", "plain push asks in auto");
 });
 
-test("a repository layer that asks narrows auto and full to ask; workers inherit only full; read-only roles never", () => {
+test("workers follow the session's auto mode (revision 3 applies to workers): scaffolding and installs run, outward writes ask, read-only roles stay read-only", () => {
+  const engine = createPolicyEngine({ permissionMode: () => "auto" });
+  const worker = (role: AgentRole) =>
+    engine.compute({ mode: "autonomous", role, runId: createId("run"), taskId: createId("task"), workspaceRoot: "/w", taskScope: { owned: role === "reviewer" ? [] : ["**/*"], read: [], forbidden: [] }, userConfig: undefined, workspaceConfig: undefined, sandbox: PARTIAL, grants: [] });
+  const implementer = worker("implementer");
+  assert.equal(implementer.permission_mode, "auto");
+  assert.equal(implementer.exec_confinement, "allowlist", "confinement stays informational");
+  for (const argv of [["npm", "create", "vite@latest", ".", "--", "--template", "react"], ["npm", "install"], ["npx", "tsc", "--noEmit"], ["python", "gen.py"]]) {
+    assert.equal(engine.evaluate(exec(argv, "implementer"), implementer).decision, "allow", argv.join(" "));
+  }
+  assert.equal(engine.evaluate(exec(["git", "push", "origin", "main"], "implementer"), implementer).decision, "ask", "a remote push asks the user");
+  assert.equal(engine.evaluate(exec(["curl", "-X", "POST", "https://api.example.com/x"], "implementer"), implementer).decision, "ask", "an outward write asks");
+  assert.equal(engine.evaluate(exec(["npm", "publish"], "implementer"), implementer).decision, "ask", "publishing asks");
+  assert.equal(worker("reviewer").permission_mode, undefined);
+  assert.equal(engine.evaluate(exec(["npm", "install"], "reviewer"), worker("reviewer")).decision, "deny", "read-only roles never inherit");
+  const ask = createPolicyEngine({ permissionMode: () => "ask" });
+  assert.equal(ask.compute({ mode: "autonomous", role: "implementer", runId: createId("run"), taskId: createId("task"), workspaceRoot: "/w", taskScope: { owned: ["src/**"], read: [], forbidden: [] }, userConfig: undefined, workspaceConfig: undefined, sandbox: PARTIAL, grants: [] }).permission_mode, undefined);
+});
+
+test("a repository layer that asks narrows auto and full to ask; workers inherit auto and full; read-only roles never", () => {
   const narrowed = session("full", { workspaceConfig: { policy: { mode: "ask" } } }).policy;
   assert.equal(narrowed.permission_mode, "ask");
   assert.equal(narrowed.mode, "ask");
@@ -128,10 +147,10 @@ test("a repository layer that asks narrows auto and full to ask; workers inherit
   assert.equal(engine.evaluate(exec(["python", "gen.py"], "implementer"), worker("implementer")).decision, "allow");
   assert.equal(worker("reviewer").permission_mode, undefined);
   assert.equal(engine.evaluate(exec(["python", "gen.py"], "reviewer"), worker("reviewer")).decision, "deny");
-  assert.equal(createPolicyEngine({ permissionMode: () => "auto" }).compute({ mode: "autonomous", role: "implementer", runId: createId("run"), taskId: createId("task"), workspaceRoot: "/w", taskScope: { owned: ["src/**"], read: [], forbidden: [] }, userConfig: undefined, workspaceConfig: undefined, sandbox: PARTIAL, grants: [] }).permission_mode, undefined);
+  assert.equal(createPolicyEngine({ permissionMode: () => "auto" }).compute({ mode: "autonomous", role: "implementer", runId: createId("run"), taskId: createId("task"), workspaceRoot: "/w", taskScope: { owned: ["src/**"], read: [], forbidden: [] }, userConfig: undefined, workspaceConfig: undefined, sandbox: PARTIAL, grants: [] }).permission_mode, "auto");
 });
 
-test("the schema keeps modes honest: plan is read-only, workers carry only full, the mode matches", () => {
+test("the schema keeps modes honest: plan is read-only, workers carry only auto or full, the mode matches", () => {
   const { policy } = session("auto");
   assert.throws(() => effectivePolicySchema.parse({ ...policy, permission_mode: "plan" }), /plan mode is read-only/);
   assert.throws(() => effectivePolicySchema.parse({ ...policy, permission_mode: "ask" }), /computes in ask mode/);

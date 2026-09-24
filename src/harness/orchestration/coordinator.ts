@@ -205,9 +205,15 @@ interface TaskEntry {
 type TriageOutcome =
   | { readonly kind: "accept"; readonly waived: readonly string[]; readonly guidance: string | undefined; readonly waivedCommands?: readonly string[] }
   | { readonly kind: "retry"; readonly guidance: string | undefined; readonly verification?: readonly string[] }
+  /** The worker's artifact goes to harness verification and independent review with its caveats (live run 01M3ABTS). */
+  | { readonly kind: "review"; readonly guidance: string | undefined }
   | { readonly kind: "fail"; readonly guidance: string | undefined };
 
 interface PendingTriage {
+  /** Owned paths a writing task changed that nothing verified or reviewed yet: `review` is possible and preferred over `fail`. */
+  readonly reviewablePaths: readonly string[];
+  /** A `fail` over a reviewable artifact was answered once with the review offer; a second `fail` stands. */
+  failOffered: boolean;
   readonly key: string;
   readonly taskId: TaskId;
   readonly acceptable: boolean;
@@ -245,6 +251,19 @@ const SCOPE_NOTE =
   "Harness: an earlier review of this artifact reported criteria as unverifiable because of its read scope. Your read scope is the whole workspace (read-only): read whatever a criterion needs and check it with your own tool calls.";
 
 const NOTE_LIMIT = 1000;
+
+/**
+ * What the reviewer of a `partial` artifact is told (live run 01M3ABTS): the worker's own caveats,
+ * with the rule that a check the worker invented and the sandbox refused proves nothing either way.
+ */
+export function partialCaveats(completion: Pick<CompletionPacket, "status" | "summary" | "unresolved_risks" | "skipped_checks">): string[] {
+  return [
+    `Harness: the worker reported ${completion.status} but produced this change; the harness sent it to you to decide. Check every criterion yourself. A check the worker invented that the sandbox refused is neither evidence nor a defect.`,
+    `Worker summary: ${completion.summary}`.slice(0, NOTE_LIMIT),
+    ...completion.unresolved_risks.slice(0, 5).map((risk) => `Worker caveat: ${risk}`.slice(0, NOTE_LIMIT)),
+    ...completion.skipped_checks.slice(0, 5).map((check) => `Worker skipped check: ${check.check}: ${check.reason}`.slice(0, NOTE_LIMIT)),
+  ];
+}
 
 /**
  * What the next attempt learns from the previous one (never an identical retry): its status and
@@ -513,7 +532,11 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
           if (validation.ok) {
             const approval = request.policyMode === "ask" ? "the runtime now asks the user in its own interface" : "the runtime now approves it under the autonomous policy (audited)";
             const moved = validation.notes ?? [];
-            return { ok: true, text: `plan accepted${moved.length > 0 ? ` with harness changes (${moved.join(" ")})` : ""}; ${approval}. Do not ask for approval in text. End your turn now.` };
+            const hints = validation.warnings ?? [];
+            return {
+              ok: true,
+              text: `plan accepted${moved.length > 0 ? ` with harness changes (${moved.join(" ")})` : ""}${hints.length > 0 ? `; harness warnings (non-blocking): ${hints.join(" ")}` : ""}; ${approval}. Do not ask for approval in text. End your turn now.`,
+            };
           }
           planRejections += 1;
           lastRejection = validation.issues;
@@ -549,6 +572,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
           plan = validation.plan;
           planDigestValue = validation.digest;
           for (const note of validation.notes ?? []) notice("info", note);
+          for (const warning of validation.warnings ?? []) notice("warning", `plan: ${warning}`);
         } else {
           // A turn whose plan_propose calls were rejected in-turn already counted them; its last rejection is the useful feedback.
           const rejectedInTurn = planRejections > rejectionsBefore;
@@ -808,7 +832,14 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
         if (deps.planner.triage === undefined || deps.delegation === undefined) return fallback;
         const record = workers.attempt(attemptId);
         const acceptable = packet.write_mode !== "owned-paths" && (record?.changeSet?.changes.length ?? 0) === 0;
+        // Only a report that never reached verification or review can be sent there.
+        const reviewablePaths =
+          packet.write_mode === "owned-paths" && problems.length === 0 && review === undefined && (completion.status === "partial" || completion.status === "needs_context")
+            ? (record?.changeSet?.changes ?? []).map((change) => change.path)
+            : [];
         const pending: PendingTriage = {
+          reviewablePaths,
+          failOffered: false,
           key: entry.key,
           taskId: entry.taskId,
           acceptable,
@@ -854,6 +885,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
                 skippedChecks: completion.skipped_checks.map((check) => `${check.check}: ${check.reason}`),
                 unresolvedRisks: completion.unresolved_risks,
                 acceptable,
+                ...(reviewablePaths.length === 0 ? {} : { reviewablePaths }),
                 retriesLeft,
                 tasks: [...entries.values()].map(taskLine),
                 route: orchestratorRoute.route,
@@ -872,7 +904,12 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
           const extra = spawned.splice(0);
           if (extra.length > 0) await applyRevision([], extra, `follow-up tasks from the triage of ${entry.key}`);
         });
-        return pending.decision ?? fallback;
+        const decided: TriageOutcome = pending.decision ?? (reviewablePaths.length > 0 ? { kind: "review", guidance: undefined } : fallback);
+        notice(
+          "info",
+          `triage of ${entry.key} (${completion.status}): ${decided.kind}${pending.decision === undefined ? " (no decision; harness default)" : ""}${reviewablePaths.length > 0 ? `; produced ${reviewablePaths.join(", ")}${pending.failOffered ? ", review was offered before fail" : ""}` : ""}${decided.guidance === undefined ? "" : ` - ${decided.guidance}`}`.slice(0, 1000),
+        );
+        return decided;
       };
 
       /**
@@ -1083,12 +1120,20 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
             return "failed";
           }
           let waived: readonly string[] | undefined;
-          if (completion.status === "partial" || completion.status === "needs_context") {
+          // Live run 01M3ABTS: a worker that wrote its owned file but reported partial (its own extra check was
+          // refused) goes to harness verification and independent review with its caveats; the reviewer decides.
+          const produced = packet.write_mode === "owned-paths" ? (workers.attempt(handle.attemptId)?.changeSet?.changes ?? []).map((change) => change.path) : [];
+          let partialArtifact = completion.status === "partial" && produced.length > 0;
+          if (partialArtifact) notice("info", `${entry.key} reported partial but produced ${produced.join(", ")}: it goes to verification and independent review with the worker's caveats`);
+          if (!partialArtifact && (completion.status === "partial" || completion.status === "needs_context")) {
             const claimedContext = completion.status === "needs_context";
             if (claimedContext) await move(entry, "needs_context", completion.summary);
             const decision = await triageReport(entry, packet, completion, handle.attemptId, limits.budgets.triage_retries - retries);
             const notes = retryNotes(completion, packet.acceptance_criteria, decision.guidance);
-            if (decision.kind === "accept") {
+            if (decision.kind === "review") {
+              partialArtifact = true;
+              if (claimedContext) await move(entry, "running", "triage: the orchestrator sent the produced change to review");
+            } else if (decision.kind === "accept") {
               waived = decision.waived;
               if (claimedContext) await move(entry, "running", "triage: the orchestrator accepted the findings");
             } else if (decision.kind === "retry" && retries < limits.budgets.triage_retries) {
@@ -1109,14 +1154,24 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
               await move(entry, claimedContext ? "cancelled" : "failed", `attempt ${completion.status}: ${completion.summary} | ${why}`);
               return "failed";
             }
-          } else if (completion.status !== "completed") {
+          } else if (!partialArtifact && completion.status !== "completed") {
             await move(entry, "failed", `attempt ${completion.status}: ${completion.summary}`);
             if (await retry("retrying after a failed attempt", retryNotes(completion, packet.acceptance_criteria, undefined))) continue;
             return "failed";
           }
 
-          await move(entry, "verifying", waived === undefined ? "completion received" : `triage accepted the findings${waived.length > 0 ? `; waived ${waived.join(", ")}` : ""}`);
-          let verification = await workers.verify(handle.attemptId, waived === undefined ? undefined : { waivedCriteria: waived });
+          const verifyAttempt = (options?: { readonly waivedCriteria?: readonly string[]; readonly waivedCommands?: readonly string[] }) =>
+            workers.verify(handle.attemptId, partialArtifact ? { ...options, partialArtifact: true } : options);
+          await move(
+            entry,
+            "verifying",
+            partialArtifact
+              ? `${completion.status} report with a produced change; the reviewer decides`
+              : waived === undefined
+                ? "completion received"
+                : `triage accepted the findings${waived.length > 0 ? `; waived ${waived.join(", ")}` : ""}`,
+          );
+          let verification = await verifyAttempt(waived === undefined ? undefined : { waivedCriteria: waived });
           let waivedCommands: readonly string[] = [];
           if (verification.decision === "revise" && waived === undefined) {
             // ADR-18 D2: the in-session repairs are spent (the worker manager repaired within its budget); the work
@@ -1128,7 +1183,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
             const decision = await triageReport(entry, packet, completion, handle.attemptId, limits.budgets.triage_retries - retries, verification.problems, { planCaused, verificationOnly });
             if (decision.kind === "accept" && decision.waivedCommands !== undefined) {
               waivedCommands = decision.waivedCommands;
-              verification = await workers.verify(handle.attemptId, { waivedCommands });
+              verification = await verifyAttempt({ waivedCommands });
               entry.notes.push(...waivedCommands.map((command) => `verification "${command}" could not run and was waived by the orchestrator in triage${decision.guidance === undefined ? "" : ` (${decision.guidance})`}`.slice(0, NOTE_LIMIT)));
             } else if (decision.kind === "retry" && decision.verification !== undefined && retries < limits.budgets.triage_retries) {
               const artifactBytes = workers.attempt(handle.attemptId)?.changeSet?.artifactBytes;
@@ -1165,7 +1220,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
               continue;
             } else if (decision.kind === "accept") {
               waived = decision.waived;
-              verification = await workers.verify(handle.attemptId, { waivedCriteria: waived });
+              verification = await verifyAttempt({ waivedCriteria: waived });
             } else if (decision.kind === "retry" && retries < limits.budgets.triage_retries) {
               entry.failure = "verification_failed";
               await move(entry, "failed", `verification revise: ${verification.problems.slice(0, 5).join("; ")}`);
@@ -1192,7 +1247,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
           }
           const record = workers.attempt(handle.attemptId);
           const artifact = record?.changeSet;
-          if (!reviewRequired(packet)) {
+          if (!reviewRequired(packet) && !partialArtifact) {
             if (artifact !== undefined && artifact.changes.length > 0) {
               try {
                 await workers.integrate(handle.attemptId, artifact.artifactDigest, signal);
@@ -1227,7 +1282,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
               extraVerification: configurations.flatMap((task) => task.verification),
               ...(waived === undefined ? {} : { waivedCriteria: waived }),
               maxSteps: reviewerStepLimit(packet.limits.max_steps, limits.stepFloors),
-              ...(widened ? { notes: [SCOPE_NOTE] } : {}),
+              ...(widened || partialArtifact ? { notes: [...(widened ? [SCOPE_NOTE] : []), ...(partialArtifact ? partialCaveats(completion) : [])] } : {}),
             });
             const reviewerRoute = await deps.router.resolve({ tier: reviewerPacket.model_tier, role: "reviewer", ...(record?.route === undefined ? {} : { implementer: record.route }) }, signal);
             const reviewHandle = await workers.dispatchReview(reviewerPacket, handle.attemptId, signal, { route: reviewerRoute });
@@ -1409,14 +1464,25 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
             return { ok: true, text: `decision for ${pending.key} recorded: accept; the verification command(s) that could not run are waived (${pending.planCaused.join("; ")}) and the change goes to independent review. End your turn now.` };
           }
           if (input.decision === "accept") {
-            if (!pending.acceptable) return deny("invalid_arguments", `accept is only for read-only tasks that changed nothing; ${pending.key} completes only through verification and review. Choose retry or fail.`);
+            if (!pending.acceptable) return deny("invalid_arguments", `accept is only for read-only tasks that changed nothing; ${pending.key} completes only through verification and review. Choose ${pending.reviewablePaths.length > 0 ? "review, " : ""}retry or fail.`);
             const unknown = waive.filter((id) => !pending.criteria.includes(id));
             if (unknown.length > 0) return deny("invalid_arguments", `unknown criteria ${unknown.join(", ")}; ${pending.key} has ${pending.criteria.join(", ")}`);
             if (waive.length >= pending.criteria.length) return deny("invalid_arguments", "at least one criterion must stay evidenced; if nothing useful was found, choose retry or fail");
             pending.decision = { kind: "accept", waived: waive, guidance: input.guidance };
           } else if (input.decision === "retry") {
-            if (pending.retriesLeft <= 0) return deny("invalid_arguments", `no retries are left for ${pending.key}; choose accept or fail`);
+            if (pending.retriesLeft <= 0) return deny("invalid_arguments", `no retries are left for ${pending.key}; choose ${pending.reviewablePaths.length > 0 ? "review" : "accept"} or fail`);
             pending.decision = { kind: "retry", guidance: input.guidance };
+          } else if (input.decision === "review") {
+            if (pending.reviewablePaths.length === 0) return deny("invalid_arguments", `review is only for a writing task whose unverified change is waiting; ${pending.key} has none. Choose accept, retry or fail.`);
+            pending.decision = { kind: "review", guidance: input.guidance };
+            return { ok: true, text: `decision for ${pending.key} recorded: review; ${pending.reviewablePaths.join(", ")} goes to harness verification and independent review with the worker's caveats as notes. End your turn now.` };
+          } else if (pending.reviewablePaths.length > 0 && !pending.failOffered) {
+            // Live run 01M3ABTS: a correct index.html was failed because the worker's own extra check was refused.
+            pending.failOffered = true;
+            return deny(
+              "invalid_arguments",
+              `${pending.key} produced ${pending.reviewablePaths.join(", ")} in its owned paths. Prefer decision review: the change goes to harness verification and an independent reviewer who decides (a check the worker invented and the sandbox refused is not a reason to fail). Call task_triage again with review, or with fail again to confirm.`,
+            );
           } else {
             pending.decision = { kind: "fail", guidance: input.guidance };
           }

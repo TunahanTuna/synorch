@@ -100,6 +100,11 @@ export interface TriageInput {
   readonly unresolvedRisks: readonly string[];
   /** Whether `accept` is possible (read-only task that changed nothing). */
   readonly acceptable: boolean;
+  /**
+   * The writing task changed these owned paths and nothing verified or reviewed them yet: `review`
+   * sends the change to harness verification and independent review (preferred over `fail`).
+   */
+  readonly reviewablePaths?: readonly string[];
   readonly retriesLeft: number;
   readonly tasks: readonly string[];
   readonly route: ModelRoute;
@@ -163,6 +168,9 @@ export function renderTriagePrompt(input: TriageInput): string {
       `Call task_triage exactly once for task ${input.task.key}:`,
       acceptLine,
       `- retry: one more attempt (${input.retriesLeft} left) with your guidance; only when a new attempt can succeed.`,
+      ...((input.reviewablePaths ?? []).length > 0
+        ? [`- review: the worker produced ${(input.reviewablePaths ?? []).join(", ")}; send it to harness verification and independent review with the worker's caveats as notes (the reviewer decides). Prefer this over fail when the change may already meet the criteria; a check the worker invented and the sandbox refused is not a reason to fail.`]
+        : []),
       "- fail: stop this task (its dependents are cancelled); add replacement work with task_spawn if the goal still needs it.",
       "You never implement anything yourself. Do not ask the user. End your turn after deciding.",
     ].join("\n"),

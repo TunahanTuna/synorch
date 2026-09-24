@@ -20,7 +20,7 @@ export interface DelegationCaller {
 
 export interface TriageDecision {
   readonly task: string;
-  readonly decision: "accept" | "retry" | "fail";
+  readonly decision: "accept" | "retry" | "review" | "fail";
   readonly waive_criteria?: readonly string[] | undefined;
   readonly guidance?: string | undefined;
   /** Replacement verification commands (with `retry`, only for plan-caused verification problems). */

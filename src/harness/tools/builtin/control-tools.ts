@@ -130,7 +130,7 @@ export function createControlTools(callbacks: ControlCallbacks): Tool[] {
     controlTool("task_status", "Report the state of one task, or of every task in the run.", ["orchestrator"], taskStatusInput, callbacks.taskStatus),
     controlTool(
       "task_triage",
-      "Decide a worker's report while the harness consults you: accept (read-only tasks only; waive_criteria lists criteria the role could not meet, they go to dependent tasks as notes; for plan-caused verification problems it waives the commands that could not run), retry (guidance reaches the next attempt; with verification = replacement commands for a plan-caused verification problem) or fail.",
+      "Decide a worker's report while the harness consults you: accept (read-only tasks only; waive_criteria lists criteria the role could not meet, they go to dependent tasks as notes; for plan-caused verification problems it waives the commands that could not run), retry (guidance reaches the next attempt; with verification = replacement commands for a plan-caused verification problem), review (a writing task that produced changes in its owned paths: the change goes to harness verification and independent review with the worker's caveats as notes; prefer it over fail) or fail.",
       ["orchestrator"],
       taskTriageInput,
       callbacks.taskTriage,

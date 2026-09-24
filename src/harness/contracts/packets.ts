@@ -122,7 +122,7 @@ export const planProposalSchema = z.strictObject(planProposalShape);
 export type PlanProposal = z.infer<typeof planProposalSchema>;
 
 /** The orchestrator's decision on a triaged worker report (`task_triage`, triage consultation only). */
-export const TRIAGE_DECISIONS = ["accept", "retry", "fail"] as const;
+export const TRIAGE_DECISIONS = ["accept", "retry", "review", "fail"] as const;
 
 /**
  * Input of the `task_triage` tool. `verification` (replacement verification commands) goes only

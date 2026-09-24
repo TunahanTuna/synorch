@@ -407,11 +407,17 @@ export function renderWorkerMessage(packet: TaskContextPacket, notes: readonly s
       : packet.write_mode === "rca-only"
         ? "Root-cause analysis only: do not change files; report root_cause."
         : "Read-only: do not change files.";
+  const commands = packet.verification.commands;
   return [
     `Task ${packet.task_id} (${packet.role}): ${packet.objective}`,
-    "Your task packet is in the system context; use it first and read only inside its scope.",
+    "Your task packet is in the system context; use it first. You may read any file in the workspace (e.g. another task's files you must match); the packet's decisions list the other tasks and any shared contract.",
     scope,
     ...(notes.length === 0 ? [] : [`Notes for this attempt (from the previous attempt and the orchestrator):\n${notes.map((note) => `- ${note}`).join("\n")}`]),
+    ...(packet.write_mode === "owned-paths" || packet.role === "debugger"
+      ? [
+          `The harness runs ${commands.length > 0 ? `the verification (${commands.join("; ")})` : "the verification"} itself after your report and an independent reviewer checks the criteria: do not invent extra exec checks (inline scripts, ad-hoc parsers). If a check you tried is refused, list it in skipped_checks; that alone never makes the report partial. Report completed when your change meets the criteria, citing your reads/writes as evidence.`,
+        ]
+      : []),
     "If the packet is insufficient or a cited source changed, stop and report status needs_context.",
     WORKER_REPORT_INSTRUCTIONS,
   ].join("\n\n");

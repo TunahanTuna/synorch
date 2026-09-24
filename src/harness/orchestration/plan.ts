@@ -27,7 +27,8 @@ import { isLiteralPattern, matchesAny } from "./paths.ts";
 
 export type PlanValidation =
   /** `notes`: what validation changed in the candidate (cross-task criteria moved to the integration review). */
-  | { readonly ok: true; readonly plan: Plan; readonly digest: Digest; readonly notes?: readonly string[] }
+  /** `warnings`: non-blocking hints for the orchestrator (e.g. a sibling task's files named without a dependency). */
+  | { readonly ok: true; readonly plan: Plan; readonly digest: Digest; readonly notes?: readonly string[]; readonly warnings?: readonly string[] }
   | { readonly ok: false; readonly issues: readonly string[] };
 
 export interface PlanExpectations {
@@ -54,13 +55,76 @@ export function validatePlan(candidate: unknown, expected: PlanExpectations): Pl
   if (plan.plan_id !== expected.planId) issues.push(`plan_id: expected ${expected.planId}`);
   if (plan.version !== expected.version) issues.push(`version: expected ${expected.version}`);
   issues.push(...roleCapabilityIssues(plan));
+  issues.push(...undefinedContractIssues(plan));
   if (issues.length > 0) return { ok: false, issues };
+  const warnings = siblingDependencyWarnings(plan);
+  const hints = warnings.length === 0 ? {} : { warnings };
   const placement = placeCrossTaskCriteria(plan);
   if (placement.issues.length > 0) return { ok: false, issues: placement.issues };
-  if (placement.notes.length === 0) return { ok: true, plan, digest: planDigest(plan) };
+  if (placement.notes.length === 0) return { ok: true, plan, digest: planDigest(plan), ...hints };
   const moved = planSchema.safeParse(placement.plan);
   if (!moved.success) return { ok: false, issues: moved.error.issues.map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`) };
-  return { ok: true, plan: moved.data, digest: planDigest(moved.data), notes: placement.notes };
+  return { ok: true, plan: moved.data, digest: planDigest(moved.data), notes: placement.notes, ...hints };
+}
+
+/** A reference to a shared contract/spec the plan relies on ("the approved class/anchor contract", "shared design tokens"). */
+const CONTRACT_REFERENCE =
+  /(?<![\p{L}])(?:approved|agreed|shared|given|provided|common|onaylanan|onaylanmış|onaylı|verilen|ortak|paylaşılan|belirlenen)\s+(?:[\p{L}/-]+\s+){0,3}?(?:contract|spec|specification|design tokens|tokens|kontrat\p{L}*|sözleşme\p{L}*)/iu;
+const CONTRACT_WORD = /(?:contract|spec|specification|tokens?|kontrat|sözleşme)/iu;
+/** Concrete names a definition lists: `.class`, `#anchor`, `--token`, `code`. */
+const DEFINITION_TOKEN = /(?:^|[\s(,:])(?:[.#][A-Za-z][\w-]*|--[\w-]+)|`[^`]+`/g;
+
+function definesContract(text: string): boolean {
+  return CONTRACT_WORD.test(text) && (text.match(DEFINITION_TOKEN) ?? []).length >= 3;
+}
+
+/**
+ * Live run 01M3ABTS: tasks were told to follow "the approved class/anchor contract", which could
+ * live only in the orchestrator's conversation. A plan whose tasks reference a shared contract must
+ * define it where a packet carries it: the plan's assumptions or a task's objective/criteria listing
+ * its concrete names (selectors, anchors, tokens). Every packet carries the assumptions and the
+ * other tasks' objectives and criteria (`planContext`).
+ */
+export function undefinedContractIssues(plan: Pick<Plan, "tasks" | "assumptions" | "goal">): string[] {
+  const texts = [plan.goal, ...plan.assumptions, ...plan.tasks.flatMap((task) => [task.objective, ...task.acceptance_criteria.map((criterion) => criterion.statement)])];
+  if (texts.some(definesContract)) return [];
+  const issues: string[] = [];
+  for (const task of plan.tasks) {
+    const places: [string, string][] = [["objective", task.objective], ...task.acceptance_criteria.map((criterion): [string, string] => [criterion.id, criterion.statement])];
+    for (const [where, text] of places) {
+      const reference = CONTRACT_REFERENCE.exec(text)?.[0];
+      if (reference === undefined) continue;
+      issues.push(
+        `${task.key} ${where} references "${reference}", which the plan never defines: workers see only their packet, not your conversation. Put the contract itself (its concrete names: classes, anchors, tokens, fields) in the plan's assumptions or in the criteria of the tasks that use it.`,
+      );
+      break;
+    }
+  }
+  return issues;
+}
+
+/**
+ * Non-blocking hint (live run 01M3ABTS): a task whose objective or criteria name a file another
+ * task owns, without a dependency between them, runs in parallel against a file that may not exist
+ * yet. Suggest a dependency or a shared contract note in the assumptions.
+ */
+export function siblingDependencyWarnings(plan: Plan): string[] {
+  const warnings: string[] = [];
+  for (const task of plan.tasks) {
+    if (task.owned_paths.length === 0) continue;
+    const dependencies = transitiveDependencies(plan, task.key);
+    const texts = [task.objective, ...task.acceptance_criteria.map((criterion) => criterion.statement)];
+    const tokens = [...new Set(texts.flatMap(pathTokens))].filter((token) => !ownsToken(task, token));
+    for (const other of plan.tasks) {
+      if (other.key === task.key || other.owned_paths.length === 0 || dependencies.has(other.key) || transitiveDependencies(plan, other.key).has(task.key)) continue;
+      const named = tokens.filter((token) => ownsToken(other, token));
+      if (named.length === 0) continue;
+      warnings.push(
+        `${task.key} names ${named.join(", ")} (owned by ${other.key}) but runs in parallel with it: make ${task.key} depend on ${other.key}, or state the shared contract (the names both must use) in the plan's assumptions so both packets carry it.`,
+      );
+    }
+  }
+  return warnings;
 }
 
 /**
@@ -78,7 +142,7 @@ export function isIntegrationReview(task: Pick<PlanTask, "role" | "depends_on">)
 /** Paths nobody reads through a workspace-wide read scope: git internals, the Synorch control dir, env files. */
 export const WORKSPACE_READ_EXCLUSIONS: readonly string[] = [".git/**", ".synorch/**", "**/.env", "**/.env.*"];
 
-/** Explorers and reviewers read the whole workspace (read-only); their write scope stays empty. */
+/** Every role reads the whole workspace; writes stay limited to owned_paths (none for explorers and reviewers). */
 export function workspaceReadScope(paths: readonly string[]): string[] {
   return [...new Set([...paths, "**"])];
 }
@@ -287,11 +351,40 @@ export function runStepLimit(plan: Pick<Plan, "budget" | "tasks">, floors: StepF
   return Math.max(plan.budget.max_steps, guaranteed + integration);
 }
 
+function clip(text: string, limit = 600): string {
+  return text.length > limit ? `${text.slice(0, limit - 3)}...` : text;
+}
+
+/**
+ * What a worker needs from the plan beyond its own task (live run 01M3ABTS: the shared class
+ * contract lived in a criterion that was moved to the integration review, and the sibling CSS task
+ * never saw it): its own criteria moved to an integration review (still its to implement), and the
+ * other tasks' objectives, owned paths and criteria so parallel workers can coordinate.
+ */
+export function planContext(plan: Pick<Plan, "tasks">, task: PlanTask): string[] {
+  const prefix = `(from ${task.key}) `;
+  const moved = plan.tasks
+    .filter((other) => isIntegrationReview(other) && other.depends_on.includes(task.key))
+    .flatMap((reviewer) =>
+      reviewer.acceptance_criteria
+        .filter((criterion) => criterion.statement.startsWith(prefix))
+        .map((criterion) => `Shared contract (yours to implement; the integration review ${reviewer.key} checks it against the other tasks): ${clip(criterion.statement.slice(prefix.length), 2000)}`),
+    );
+  const others = plan.tasks
+    .filter((other) => other.key !== task.key && other.role !== "reviewer")
+    .slice(0, 12)
+    .map((other) => {
+      const relation = task.depends_on.includes(other.key) ? "a dependency, completed before you" : other.depends_on.includes(task.key) ? "depends on you" : "runs in parallel with you";
+      const criteria = other.acceptance_criteria.map((criterion) => `${criterion.id}: ${clip(criterion.statement, 400)}`).join(" | ");
+      return `Other task ${other.key} (${other.role}, ${relation}; owns ${other.owned_paths.join(", ") || "nothing"}): ${clip(other.objective)}${criteria === "" ? "" : ` Its criteria: ${criteria}`}`;
+    });
+  return [...moved, ...others];
+}
+
 /** Compiles the full v2 packet for one plan task; the schema re-validates every authority rule. */
 export function compileTaskPacket(input: CompilePacketInput): TaskContextPacket {
   const { plan, task } = input;
   const perTaskSteps = perTaskStepLimit(plan, input.stepFloor ?? MIN_TASK_STEPS);
-  const reader = task.owned_paths.length === 0 && (task.role === "explorer" || task.role === "reviewer");
   const stopConditions = [
     "A change outside owned_paths is required",
     "A cited source changed since the packet was created",
@@ -312,11 +405,15 @@ export function compileTaskPacket(input: CompilePacketInput): TaskContextPacket 
     isolation: isolationFor(task, input.preferWorktree),
     objective: task.objective,
     why: { user_goal: plan.goal, plan_reference: `${plan.plan_id}@${plan.version}#${task.key}` },
-    scope: reader
-      ? { owned_paths: [], read_paths: workspaceReadScope(task.read_paths), forbidden_paths: withReadExclusions(input.forbiddenPaths) }
-      : { owned_paths: task.owned_paths, read_paths: task.read_paths, forbidden_paths: input.forbiddenPaths },
+    // Every role reads the whole workspace (live run 01M3ABTS: an implementer could not read the
+    // sibling's style.css it had to match); writes stay limited to owned_paths.
+    scope: {
+      owned_paths: task.owned_paths,
+      read_paths: workspaceReadScope(task.read_paths),
+      forbidden_paths: withReadExclusions(input.forbiddenPaths, task.owned_paths),
+    },
     known_facts: [],
-    decisions: [...plan.assumptions.map((assumption) => `Assumption: ${assumption}`), ...input.findings],
+    decisions: [...plan.assumptions.map((assumption) => `Assumption: ${assumption}`), ...planContext(plan, task), ...input.findings],
     relevant_symbols: [],
     acceptance_criteria: task.acceptance_criteria,
     verification: { commands: task.verification },

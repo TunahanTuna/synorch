@@ -744,7 +744,8 @@ export function createTestRuntime(options: TestRuntimeOptions): TestRuntime {
     },
     budgetGate,
     ...(options.delegation === undefined ? {} : { delegation: options.delegation }),
-    ...(options.limits === undefined ? {} : { limits: options.limits }),
+    // Scripted runs default to the strict review mode so they exercise the review machinery; pass `review: "proportional"` for the default runtime behaviour.
+    limits: { review: "always", ...options.limits },
     ...(options.preferWorktree === undefined ? {} : { preferWorktree: options.preferWorktree }),
     ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
   });

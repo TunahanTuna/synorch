@@ -81,7 +81,8 @@ export function roleCapabilityIssues(plan: Plan): string[] {
       for (const key of task.depends_on) {
         const dependency = byKey.get(key);
         if (dependency === undefined) continue;
-        if (dependency.role === "reviewer" || dependency.risk === "trivial") {
+        // An integration review (2+ dependencies) may cover trivial tasks: it checks the combined result.
+        if (dependency.role === "reviewer" || (dependency.risk === "trivial" && task.depends_on.length < 2)) {
           issues.push(
             `${at}: it depends on ${key}, which is ${dependency.role === "reviewer" ? "another reviewer task" : "trivial"} and gets no independent review; raise ${key}'s risk to standard or drop the reviewer task`,
           );

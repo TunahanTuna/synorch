@@ -41,7 +41,7 @@ export interface PlanExpectations {
  * `planSchema`, the identity the coordinator expects (a plan for another run is rejected) and the
  * role capability rules (`roleCapabilityIssues`: e.g. no verification command on an explorer).
  */
-export function validatePlan(candidate: unknown, expected: PlanExpectations): PlanValidation {
+export function validatePlan(candidate: unknown, expected: PlanExpectations, options: { readonly proportionalReview?: boolean } = {}): PlanValidation {
   const parsed = planSchema.safeParse(candidate);
   if (!parsed.success) {
     return {
@@ -49,7 +49,8 @@ export function validatePlan(candidate: unknown, expected: PlanExpectations): Pl
       issues: parsed.error.issues.map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`),
     };
   }
-  const plan = parsed.data;
+  const pruned = options.proportionalReview === false ? { plan: parsed.data, notes: [] as string[] } : dropUnwarrantedReviewers(parsed.data);
+  const plan = pruned.plan;
   const issues: string[] = [];
   if (plan.run_id !== expected.runId) issues.push(`run_id: expected ${expected.runId}`);
   if (plan.plan_id !== expected.planId) issues.push(`plan_id: expected ${expected.planId}`);
@@ -61,10 +62,68 @@ export function validatePlan(candidate: unknown, expected: PlanExpectations): Pl
   const hints = warnings.length === 0 ? {} : { warnings };
   const placement = placeCrossTaskCriteria(plan);
   if (placement.issues.length > 0) return { ok: false, issues: placement.issues };
-  if (placement.notes.length === 0) return { ok: true, plan, digest: planDigest(plan), ...hints };
+  const notes = [...pruned.notes, ...placement.notes];
+  if (placement.notes.length === 0) return { ok: true, plan, digest: planDigest(plan), ...(notes.length === 0 ? {} : { notes }), ...hints };
   const moved = planSchema.safeParse(placement.plan);
   if (!moved.success) return { ok: false, issues: moved.error.issues.map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`) };
-  return { ok: true, plan: moved.data, digest: planDigest(moved.data), notes: placement.notes, ...hints };
+  return { ok: true, plan: moved.data, digest: planDigest(moved.data), notes, ...hints };
+}
+
+/** Plan tasks that write (implementers, debuggers): the ones an independent review could look at. */
+export function writingTaskCount(plan: Pick<Plan, "tasks">): number {
+  return plan.tasks.filter((task) => task.role !== "reviewer" && task.role !== "explorer").length;
+}
+
+/**
+ * P0-A review proportionality: whether a writing task's independent review is worth its cost.
+ * Trivial work never; high-risk work always; standard work only in a plan of several writing tasks
+ * whose artifact edits or deletes existing files. A single-task plan, a tool-generated scaffold or
+ * any artifact of new files only closes on the harness verification alone.
+ */
+export function reviewWarranted(
+  task: Pick<PlanTask, "risk" | "role">,
+  context: { readonly writingTasks: number; readonly changes?: readonly { readonly before: unknown }[] },
+): boolean {
+  if (task.role === "reviewer" || task.risk === "trivial") return false;
+  if (task.risk === "high-risk") return true;
+  if (context.writingTasks <= 1) return false;
+  return context.changes === undefined || context.changes.some((change) => change.before !== null);
+}
+
+/**
+ * Reviewer tasks the planner adds for one dependency configure that dependency's per-task review.
+ * When that review is not warranted (`reviewWarranted` before any artifact: the dependency is
+ * trivial, or it is the plan's only writing task and not high-risk) the reviewer task is dropped
+ * instead of rejecting the plan (one fewer planning round-trip): its verification commands move to
+ * the dependency, tasks that depended on it depend on the dependency instead, and a note says so.
+ */
+export function dropUnwarrantedReviewers(plan: Plan): { readonly plan: Plan; readonly notes: readonly string[] } {
+  const writingTasks = writingTaskCount(plan);
+  const byKey = new Map(plan.tasks.map((task) => [task.key, task]));
+  const dropped = new Map<string, PlanTask>();
+  for (const task of plan.tasks) {
+    if (task.role !== "reviewer" || task.depends_on.length !== 1) continue;
+    const dependency = byKey.get(task.depends_on[0] ?? "");
+    if (dependency === undefined || dependency.role === "reviewer" || dependency.role === "explorer") continue;
+    if (reviewWarranted(dependency, { writingTasks })) continue;
+    dropped.set(task.key, dependency);
+  }
+  if (dropped.size === 0 || dropped.size === plan.tasks.length) return { plan, notes: [] };
+  const extraVerification = new Map<string, string[]>();
+  for (const [key, dependency] of dropped) {
+    const reviewer = byKey.get(key);
+    if (reviewer === undefined) continue;
+    extraVerification.set(dependency.key, [...(extraVerification.get(dependency.key) ?? []), ...reviewer.verification]);
+  }
+  const tasks = plan.tasks
+    .filter((task) => !dropped.has(task.key))
+    .map((task) => {
+      const depends = [...new Set(task.depends_on.map((key) => dropped.get(key)?.key ?? key))].filter((key) => key !== task.key);
+      const extra = extraVerification.get(task.key) ?? [];
+      return { ...task, depends_on: depends, verification: [...new Set([...task.verification, ...extra])] };
+    });
+  const notes = [...dropped].map(([key, dependency]) => `Dropped reviewer task ${key}: ${dependency.key} is ${dependency.risk === "trivial" ? "trivial" : "the plan's only writing task"}, so the harness verification closes it without an independent review.`);
+  return { plan: { ...plan, tasks, assumptions: [...plan.assumptions, ...notes] }, notes };
 }
 
 /** A reference to a shared contract/spec the plan relies on ("the approved class/anchor contract", "shared design tokens"). */
@@ -574,6 +633,7 @@ export function compileReviewerPacket(input: ReviewerPacketInput): TaskContextPa
     known_facts: [],
     decisions: [
       `The artifact under review is pinned at ${input.artifactDigest}; it must not change during review.`,
+      "Generated outputs (node_modules, dist, build, caches and other gitignored files) are not part of the artifact: never raise findings about them; your own builds and tests may create them without changing the pinned artifact.",
       "Read scope: the whole workspace, read-only (not only the changed files). Criteria about other tasks' files or the combined result belong to the plan's integration review, not to this review.",
       ...(input.notes ?? []),
     ],

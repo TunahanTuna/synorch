@@ -51,7 +51,7 @@ import { commandMentioned } from "./capabilities.ts";
 import { createBudgetTracker, type BudgetGateSlot, type BudgetTracker } from "./budget.ts";
 import { createControlPlaneWriter, type ControlPlaneWriter } from "./control-plane.ts";
 import type { DelegationResult, DelegationSlot } from "./delegation.ts";
-import { mayComplete, reviewRequired } from "./evidence.ts";
+import { mayComplete } from "./evidence.ts";
 import { isLiteralPattern } from "./paths.ts";
 import {
   applyDelta,
@@ -63,8 +63,10 @@ import {
   isIntegrationReview,
   refreshPacketSources,
   reviewerStepLimit,
+  reviewWarranted,
   runStepLimit,
   validatePlan,
+  writingTaskCount,
   type PacketSource,
   type PlanValidation,
   type StepFloors,
@@ -130,9 +132,17 @@ export interface CoordinatorLimits {
   readonly maxSpawnedTasks: number;
   /** Guaranteed step floors per worker and reviewer attempt, and the finish-now warning distance. */
   readonly stepFloors: StepFloors;
+  /**
+   * P0-A: `proportional` (default) reviews only where it adds value (`reviewWarranted`), drops
+   * unwarranted per-task reviewer tasks, accepts a verified task whose review found only minor issues
+   * or produced no valid verdict (standard risk) with notes; `always` is the strict ADR-09 behaviour
+   * (every standard/high-risk writing task closes only through an accepting review).
+   */
+  readonly review: "proportional" | "always";
 }
 
 export const DEFAULT_COORDINATOR_LIMITS: CoordinatorLimits = {
+  review: "proportional",
   concurrency: DEFAULT_CONCURRENCY,
   maxPlanAttempts: 2,
   maxPlanRevisions: 2,
@@ -498,7 +508,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
        * (untrusted workspace, required full sandbox) are noticed once, not rejected.
        */
       const checkPlan = (candidate: unknown, expected: { runId: RunId; planId: Plan["plan_id"]; version: number }, include?: (task: PlanTask) => boolean): PlanValidation => {
-        const validation = validatePlan(candidate, expected);
+        const validation = validatePlan(candidate, expected, { proportionalReview: limits.review === "proportional" });
         if (!validation.ok) return validation;
         const preflight = preflightVerification(validation.plan.tasks, preflightContext, include);
         for (const refusal of preflight.environment) {
@@ -1017,8 +1027,8 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
           // passed its own independent review, run with this task's tier, extra criteria and verification.
           const covered = entry.plan.depends_on.join(", ");
           await move(entry, "running", `no attempt: reviewer task configures the independent review of ${covered}`);
-          await move(entry, "verifying", `dependencies ${covered} completed through an accepting independent review`);
-          entry.summary = `covered by the independent review of ${covered}`;
+          await move(entry, "verifying", `dependencies ${covered} completed (through their independent review where one was warranted)`);
+          entry.summary = `covered by the checks of ${covered}`;
           await move(entry, "completed", entry.summary);
           return "completed";
         }
@@ -1247,7 +1257,9 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
           }
           const record = workers.attempt(handle.attemptId);
           const artifact = record?.changeSet;
-          if (!reviewRequired(packet) && !partialArtifact) {
+          const writingTasks = writingTaskCount(approvedPlan);
+          const warranted = limits.review === "always" ? packet.risk !== "trivial" : reviewWarranted(packet, { writingTasks, changes: artifact?.changes ?? [] });
+          if (!warranted && !partialArtifact) {
             if (artifact !== undefined && artifact.changes.length > 0) {
               try {
                 await workers.integrate(handle.attemptId, artifact.artifactDigest, signal);
@@ -1257,7 +1269,11 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
                 return "failed";
               }
             }
-            await move(entry, "completed", "verified; trivial risk needs no review");
+            await move(
+              entry,
+              "completed",
+              packet.risk === "trivial" ? "verified; trivial risk needs no review" : `verified; no independent review needed (${writingTasks <= 1 ? "single-task plan" : "new files only"})`,
+            );
             return "completed";
           }
 
@@ -1271,6 +1287,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
           let problems: readonly string[] = [];
           let findingsEvidence: Parameters<typeof createDeltaPacket>[0]["evidence"] = [];
           let blocker = false;
+          let noteOnly = false;
           let widened = false;
           for (let review = 1; review <= limits.maxReviewAttempts; review += 1) {
             const reviewerPacket = compileReviewerPacket({
@@ -1307,10 +1324,17 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
                 review -= 1;
                 continue;
               }
+              const criteriaProblems = problems.filter((problem) => problem !== "the reviewer requested changes").length;
               if (result.review !== undefined) {
                 problems = [...problems, ...result.review.findings.map((finding) => `${finding.id} (${finding.severity}): ${finding.summary}`)];
               }
               blocker = result.review?.findings.some((finding) => finding.severity === "blocker") ?? false;
+              // P0-A: the harness verification passed; a revise verdict with every criterion met and only
+              // minor/info findings is not worth a revision round: accept with the findings as notes.
+              if (limits.review === "proportional" && outcome === "revise" && criteriaProblems === 0 && !(result.review?.findings ?? []).some((finding) => finding.severity === "blocker" || finding.severity === "major")) {
+                noteOnly = true;
+                outcome = "accept";
+              }
               break;
             }
             notice("warning", `review ${review} of ${entry.key} is invalid: ${problems.slice(0, 3).join("; ")}`);
@@ -1323,8 +1347,25 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
               await move(entry, "failed", `integration failed: ${error instanceof Error ? error.message : String(error)}`);
               return "failed";
             }
-            await move(entry, "completed", "review accepted and artifact integrated");
+            if (noteOnly) {
+              entry.notes.push(...problems.slice(0, 10).map((problem) => `minor review finding (not blocking): ${problem}`.slice(0, NOTE_LIMIT)));
+              await move(entry, "completed", `verified; review found only minor issues, accepted with notes: ${problems.slice(0, 3).join("; ")}`.slice(0, 1000));
+            } else await move(entry, "completed", "review accepted and artifact integrated");
             return "completed";
+          }
+          if (limits.review === "proportional" && outcome === "invalid" && packet.risk !== "high-risk" && !partialArtifact) {
+            // P0-A: the harness verification passed and no reviewer produced a valid verdict (a harness or
+            // reviewer problem, not a finding about the work): accept standard work with a note instead of failing it.
+            try {
+              await workers.integrate(handle.attemptId, artifact.artifactDigest, signal);
+              entry.integrated = artifact.changes.map((change) => change.path);
+              entry.notes.push(`no valid independent review (${problems.slice(0, 2).join("; ")}); accepted on the harness verification`.slice(0, NOTE_LIMIT));
+              notice("warning", `${entry.key}: no valid review (${problems.slice(0, 2).join("; ")}); accepted on the passing harness verification`);
+              await move(entry, "completed", `verified; no valid review, accepted on the harness verification: ${problems.slice(0, 3).join("; ")}`.slice(0, 1000));
+              return "completed";
+            } catch {
+              // Falls through to the failure below (the artifact no longer matches its pin).
+            }
           }
           if (outcome === "revise" || outcome === "block") {
             // The harness checks passed (a task reaches review only after verification): a revise or block

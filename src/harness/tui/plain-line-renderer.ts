@@ -133,15 +133,22 @@ export class PlainLineRenderer implements TerminalRenderer, ViewHost {
   }
 
   public showView(view: HarnessView): void {
-    if (!this.stopped) for (const line of this.plainViews().view(view)) this.writeLine(line);
+    if (this.stopped) return;
+    // Queued notices first, so a view prints after the lines that came before it.
+    this.queue.flush();
+    for (const line of this.plainViews().view(view)) this.writeLine(line);
   }
 
   public showGraph(view: OrchestrationView): void {
-    if (!this.stopped) for (const line of this.plainViews().graph(view)) this.writeLine(line);
+    if (this.stopped) return;
+    this.queue.flush();
+    for (const line of this.plainViews().graph(view)) this.writeLine(line);
   }
 
   public setBoard(view: OrchestrationView | undefined): void {
-    if (!this.stopped) for (const line of this.plainViews().board(view)) this.writeLine(line);
+    if (this.stopped) return;
+    this.queue.flush();
+    for (const line of this.plainViews().board(view)) this.writeLine(line);
   }
 
   public async start(header: SessionHeaderView): Promise<void> {

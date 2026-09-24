@@ -54,7 +54,7 @@ import {
 } from "../contracts/index.ts";
 import { createBudgetGateSlot, type BudgetGateSlot } from "./budget.ts";
 import type { DelegationSlot } from "./delegation.ts";
-import { createCoordinator, type CoordinatorDependencies } from "./coordinator.ts";
+import { createCoordinator, type CoordinatorDependencies, type OrchestrationCoordinator } from "./coordinator.ts";
 import { createWorkerFactory } from "./factories.ts";
 import { runGit } from "./git.ts";
 import { matchesAny } from "./paths.ts";
@@ -371,6 +371,8 @@ export type TurnScript = (context: ScriptContext) => Promise<TurnOutcome["outcom
 export interface ScriptedDriverFactory {
   (events: EventStore): AgentDriver;
   readonly turns: { readonly input: TurnInput; readonly context: ContextBuildResult | undefined }[];
+  /** Every text handed to a driver's `steer` (K1.7 per-worker messages), in order. */
+  readonly steers: string[];
 }
 
 /**
@@ -380,8 +382,11 @@ export interface ScriptedDriverFactory {
  */
 export function createScriptedDriverFactory(script: TurnScript, options: { readonly context?: ContextBuilder } = {}): ScriptedDriverFactory {
   const turns: { input: TurnInput; context: ContextBuildResult | undefined }[] = [];
+  const steers: string[] = [];
   const factory = ((events: EventStore): AgentDriver => ({
-    steer() {},
+    steer(text) {
+      steers.push(text);
+    },
     async runTurn(input, signal) {
       const actor =
         input.role === "orchestrator"
@@ -480,6 +485,7 @@ export function createScriptedDriverFactory(script: TurnScript, options: { reado
     },
   })) as ScriptedDriverFactory;
   Object.defineProperty(factory, "turns", { value: turns });
+  Object.defineProperty(factory, "steers", { value: steers });
   return factory;
 }
 
@@ -689,7 +695,7 @@ export interface TestRuntimeOptions {
 }
 
 export interface TestRuntime {
-  readonly coordinator: Coordinator;
+  readonly coordinator: OrchestrationCoordinator;
   readonly sessions: MemorySessionStore;
   readonly blobs: BlobStore & { readonly size: () => number };
   readonly driver: ScriptedDriverFactory;

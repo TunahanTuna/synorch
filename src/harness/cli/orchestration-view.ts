@@ -28,6 +28,8 @@ interface TaskEntry {
   checks: { passed: number; total: number };
   integratedPaths: string[];
   review: { verdict: ReviewVerdictView; revisions: number } | undefined;
+  /** K1.7: the user paused the running attempt (cleared by resume, cancel or a new attempt). */
+  paused: boolean;
 }
 
 const TOOL_VERBS: Readonly<Record<string, string>> = {
@@ -59,6 +61,8 @@ export class OrchestrationTracker {
   private readonly attempts = new Map<string, string>();
   private readonly attemptSessions = new Map<string, string>();
   private readonly verification: string[] = [];
+  /** K1.7: what the user told workers directly (noted in the result block). */
+  private readonly userMessages: string[] = [];
   public stopArmed = false;
 
   public constructor(goal: string, reason: string | undefined, now: () => number = Date.now) {
@@ -117,6 +121,7 @@ export class OrchestrationTracker {
           checks: { passed: 0, total: 0 },
           integratedPaths: [],
           review: undefined,
+          paused: false,
         });
         if (this.phase === "planning" || this.phase === "awaiting-approval") this.phase = "running";
         return true;
@@ -127,6 +132,7 @@ export class OrchestrationTracker {
         task.state = event.data.to;
         if (event.data.to === "running" || event.data.to === "verifying" || event.data.to === "reviewing") task.startedAtMs ??= this.now();
         if (TERMINAL_TASK_STATES.includes(event.data.to)) {
+          task.paused = false;
           task.endedAtMs ??= this.now();
           task.activity = undefined;
           if (event.data.to !== "completed") task.reason = event.data.reason?.slice(0, 160);
@@ -140,6 +146,7 @@ export class OrchestrationTracker {
         const task = this.tasks.get(event.data.task_id);
         if (task === undefined) return false;
         task.reviewer = event.data.role === "reviewer";
+        task.paused = false;
         if (!task.reviewer) {
           task.attempts += 1;
           task.model = event.data.route.model_id;
@@ -147,6 +154,17 @@ export class OrchestrationTracker {
         task.startedAtMs ??= this.now();
         task.activity = task.reviewer ? `independent review · ${event.data.route.model_id}` : task.attempts > 1 ? "revising" : "starting";
         return true;
+      }
+      case "attempt/user_control": {
+        const task = this.tasks.get(event.data.task_id);
+        if (task === undefined) return false;
+        task.paused = event.data.action === "pause";
+        return true;
+      }
+      case "task/user_message": {
+        const task = this.tasks.get(event.data.task_id);
+        this.userMessages.push(`to ${task?.key ?? "a worker"}: ${event.data.text.replace(/\s+/g, " ").slice(0, 200)}`);
+        return false;
       }
       case "attempt/verification_ran": {
         const task = this.tasks.get(event.data.task_id);
@@ -227,6 +245,7 @@ export class OrchestrationTracker {
       dependsOn: task.dependsOn,
       review: task.review === undefined ? undefined : { verdict: task.review.verdict, revisions: task.review.revisions },
       checks: task.checks.total === 0 ? undefined : { ...task.checks },
+      ...(task.paused ? { paused: true } : {}),
     }));
     const done = this.phase === "done" || this.phase === "failed" || this.phase === "cancelled";
     return {
@@ -290,6 +309,7 @@ export class OrchestrationTracker {
       paths.length === 0 ? "Changed: no files integrated into the workspace." : `Changed (${paths.length} files, integrated into the workspace): ${paths.slice(0, 20).join(", ")}${paths.length > 20 ? ", …" : ""}`,
       this.verification.length === 0 ? "Checks: none run by Synorch." : `Checks run by Synorch: ${this.verification.slice(-8).join("; ")}`,
       reviews.length === 0 ? "Review: no independent review recorded." : `Independent review: ${reviews.join("; ")}`,
+      ...(this.userMessages.length === 0 ? [] : [`The user messaged workers directly: ${this.userMessages.slice(-5).join("; ")}`]),
       `Coordinator summary: ${outcome.summary.replace(/\s+/g, " ").trim()}`,
     ];
     // The ids stay last and are never cut: /evidence and /tasks find the run's session through them after a resume.

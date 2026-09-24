@@ -299,6 +299,69 @@ export interface OrchestrationWorkerManager extends WorkerManager {
   integrate(attemptId: AttemptId, expectedArtifact: Digest, signal: AbortSignal): Promise<void>;
   revert(attemptId: AttemptId, signal: AbortSignal): Promise<readonly string[]>;
   dispose(attemptId: AttemptId): Promise<void>;
+  /**
+   * K1.7 per-worker control. `steer` queues a user message for the attempt's driver (delivered at
+   * its next step boundary); `pause` holds the attempt's next model step until `resume`; `cancel`
+   * aborts it through the normal cancellation path. Each returns false when the attempt is not
+   * running (unknown, or already finished).
+   */
+  steer(attemptId: AttemptId, text: string): boolean;
+  pause(attemptId: AttemptId): boolean;
+  resume(attemptId: AttemptId): boolean;
+  cancel(attemptId: AttemptId, reason: string): boolean;
+  /** The live control state of a running attempt; undefined once it finished. */
+  live(attemptId: AttemptId): { readonly paused: boolean } | undefined;
+}
+
+/** K1.7: user control of one running attempt; `wall` is the running turn's wall-time timer (paused with the attempt). */
+interface AttemptControl {
+  paused: boolean;
+  readonly steers: string[];
+  wall: PausableTimer | undefined;
+}
+
+/** A one-shot timer whose clock stops while paused. */
+class PausableTimer {
+  #remaining: number;
+  #startedAt = 0;
+  #timer: NodeJS.Timeout | undefined;
+  readonly #fire: () => void;
+
+  public constructor(ms: number, fire: () => void, paused: boolean) {
+    this.#remaining = ms;
+    this.#fire = fire;
+    if (!paused) this.resume();
+  }
+
+  public pause(): void {
+    if (this.#timer === undefined) return;
+    clearTimeout(this.#timer);
+    this.#timer = undefined;
+    this.#remaining = Math.max(0, this.#remaining - (Date.now() - this.#startedAt));
+  }
+
+  public resume(): void {
+    if (this.#timer !== undefined) return;
+    this.#startedAt = Date.now();
+    this.#timer = setTimeout(this.#fire, this.#remaining);
+    this.#timer.unref?.();
+  }
+
+  public clear(): void {
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#timer = undefined;
+  }
+}
+
+/** What the worker manager needs of a driver to pause it (the fixed driver implements it). */
+interface PausableDriver {
+  pause(): void;
+  resume(): void;
+}
+
+function pausable(driver: AgentDriver | undefined): (AgentDriver & PausableDriver) | undefined {
+  const candidate = driver as (AgentDriver & Partial<PausableDriver>) | undefined;
+  return typeof candidate?.pause === "function" && typeof candidate.resume === "function" ? (candidate as AgentDriver & PausableDriver) : undefined;
 }
 
 const REVIEW_BRIEF_CONTENT_LIMIT = 48 * 1024;
@@ -512,6 +575,8 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
   // One driver per attempt: a backend-owned loop (Claude Code bridge) keeps its session across the
   // attempt's follow-up turns (finish-now, report-only, corrections) instead of starting cold (K1.5).
   const drivers = new Map<AttemptId, AgentDriver>();
+  /** K1.7: user control of each running attempt; applied to its driver when the driver is created. */
+  const controls = new Map<AttemptId, AttemptControl>();
   const pendingStores = new Map<AttemptId, EventStore>();
   /** Packets as the coordinator issued them (main-tree digests): the in-flight freshness gate compares against these. */
   const baselines = new Map<AttemptId, TaskContextPacket>();
@@ -677,6 +742,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     baselines.set(attemptId, issued);
     const controller = linkSignals(signal);
     controllers.set(attemptId, controller);
+    controls.set(attemptId, { paused: false, steers: [], wall: undefined });
     pendingStores.set(attemptId, events);
     return { record, controller };
   };
@@ -696,11 +762,9 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
   ): Promise<Execution> => {
     const events = pendingStores.get(record.attemptId);
     if (events === undefined) throw harnessError("internal", `attempt ${record.attemptId} has no session`);
-    const timer = setTimeout(
-      () => controller.abort(new Error("wall-time limit reached")),
-      record.packet.limits.max_wall_time_seconds * 1000,
-    );
-    timer.unref?.();
+    const attemptControl = controls.get(record.attemptId);
+    const timer = new PausableTimer(record.packet.limits.max_wall_time_seconds * 1000, () => controller.abort(new Error("wall-time limit reached")), attemptControl?.paused === true);
+    if (attemptControl !== undefined) attemptControl.wall = timer;
     let outcome: TurnOutcome | undefined;
     let error: unknown;
     try {
@@ -723,12 +787,18 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       if (driver === undefined) {
         driver = deps.createDriver(events);
         drivers.set(record.attemptId, driver);
+        const control = controls.get(record.attemptId);
+        if (control !== undefined) {
+          for (const text of control.steers.splice(0)) driver.steer(text);
+          if (control.paused) pausable(driver)?.pause();
+        }
       }
       outcome = await driver.runTurn(input, controller.signal);
     } catch (caught) {
       error = caught;
     } finally {
-      clearTimeout(timer);
+      timer.clear();
+      if (attemptControl?.wall === timer) attemptControl.wall = undefined;
     }
     const recorded = await readEvents(events);
     const log = await buildAttemptLog(record.sessionId, recorded, deps.blobs);
@@ -788,6 +858,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     const events = pendingStores.get(record.attemptId);
     pendingStores.delete(record.attemptId);
     controllers.delete(record.attemptId);
+    controls.delete(record.attemptId);
     drivers.delete(record.attemptId);
     await events?.close().catch(() => undefined);
   };
@@ -1180,6 +1251,9 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     return toolOk(`review recorded with ${problems.length} unresolved evidence problem(s); unresolved pointers are dropped and a met verdict without independent evidence counts as unverifiable. End your turn now.`);
   };
 
+  const liveControl = (attemptId: AttemptId): AttemptControl | undefined =>
+    controllers.has(attemptId) && !finished.has(attemptId) ? controls.get(attemptId) : undefined;
+
   const manager: OrchestrationWorkerManager = {
     async dispatch(packet, signal, options) {
       const { record, controller } = await prepare(packet, signal, options, undefined);
@@ -1408,6 +1482,41 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     async dispose(attemptId) {
       const record = records.get(attemptId);
       if (record !== undefined) await record.workspace.dispose();
+    },
+    steer(attemptId, text) {
+      const control = liveControl(attemptId);
+      if (control === undefined || text.trim() === "") return false;
+      const driver = drivers.get(attemptId);
+      if (driver === undefined) control.steers.push(text);
+      else driver.steer(text);
+      return true;
+    },
+    pause(attemptId) {
+      const control = liveControl(attemptId);
+      if (control === undefined) return false;
+      control.paused = true;
+      pausable(drivers.get(attemptId))?.pause();
+      control.wall?.pause();
+      return true;
+    },
+    resume(attemptId) {
+      const control = liveControl(attemptId);
+      if (control === undefined) return false;
+      control.paused = false;
+      pausable(drivers.get(attemptId))?.resume();
+      control.wall?.resume();
+      return true;
+    },
+    cancel(attemptId, reason) {
+      const controller = liveControl(attemptId) === undefined ? undefined : controllers.get(attemptId);
+      if (controller === undefined) return false;
+      // A paused driver wakes on abort; the attempt then ends through the normal cancellation path.
+      controller.abort(new Error(reason));
+      return true;
+    },
+    live(attemptId) {
+      const control = liveControl(attemptId);
+      return control === undefined ? undefined : { paused: control.paused };
     },
   };
   return manager;

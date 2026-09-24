@@ -74,6 +74,7 @@ import {
   reportCallbacks,
   type BudgetGateSlot,
   type CoordinatorLimits,
+  type OrchestrationCoordinator,
   type VerificationRunner,
 } from "../orchestration/index.ts";
 import { classifyCommand, classifyVerificationCommand, createHeadlessApprovalBroker, createPolicyEngine, createWorkspaceTrustStore } from "../policy/index.ts";
@@ -209,7 +210,8 @@ export interface Runtime {
   permissionMode(): PermissionMode | undefined;
   /** Switches the permission mode (Shift+Tab, /permissions); workers started later inherit `full` only. */
   setPermissionMode(mode: PermissionMode | undefined): void;
-  createCoordinator(broker: ApprovalBroker): Coordinator;
+  /** The coordinator plus its worker directory (K1.7: list, assignments, per-worker control). */
+  createCoordinator(broker: ApprovalBroker): OrchestrationCoordinator;
   /** The route rules as the router sees them now: `/model` session routes first, then the configured ones (K1.5). */
   routeRules(): readonly RouteRule[];
   /**

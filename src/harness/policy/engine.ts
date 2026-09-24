@@ -100,6 +100,11 @@ export interface PolicyEngineOptions {
    * more, even in full access mode.
    */
   readonly webContentRead?: () => boolean;
+  /**
+   * Owner revision 3 (2026-09-24): true once the user approved a plain `git push` in this session.
+   * `auto` then pushes without asking again (force pushes and history rewrites still ask).
+   */
+  readonly gitPushApproved?: () => boolean;
 }
 
 /**
@@ -232,7 +237,7 @@ function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, optio
   };
 
   evaluatePaths(action, policy, options, deny);
-  const { effect, confinement } = evaluateCommand(action, policy, deny);
+  const { effect, confinement, external } = evaluateCommand(action, policy, deny);
   if (action.egress_findings !== undefined) {
     deny("platform", "secret-egress", `the outbound request carries what looks like a secret (${action.egress_findings.join(", ")})`.slice(0, 500), "secret-egress");
   }
@@ -259,7 +264,7 @@ function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, optio
     builder.reasons.push({ code: confinement.code, layer: confinement.layer, message: confinement.message.slice(0, 500) });
   }
 
-  liftByPermission(builder, policy, isReadOnlyWorker(action.role, policy));
+  liftByPermission(builder, policy, isReadOnlyWorker(action.role, policy), external, options);
 
   if (builder.decision === "allow" && effect === "external-write" && options.webContentRead?.() === true) {
     // Owner decision 2026-09-24 (K4): web content read in this turn may carry injected instructions.
@@ -287,11 +292,12 @@ function evaluateAction(action: NormalizedAction, policy: EffectivePolicy, optio
 type Deny = (layer: PolicyLayer, code: string, message: string, rail?: HardRail) => void;
 
 /**
- * ADR-08 revision (2026-09-24): in `auto` a decision denied only by liftable reasons becomes a prompt
- * (`ask`), in `full` it is allowed. Hard rails, reserved paths, escapes, git integration, module
+ * ADR-08 revision 3 (2026-09-24): in `auto` a decision denied only by liftable reasons is allowed,
+ * except an outward-facing external write, which asks (a plain git push only once per session);
+ * in `full` it is allowed. Hard rails, reserved paths, escapes, git integration, module
  * injection, configured effect denials and read-only roles are never lifted.
  */
-function liftByPermission(builder: DecisionBuilder, policy: EffectivePolicy, readOnly: boolean): void {
+function liftByPermission(builder: DecisionBuilder, policy: EffectivePolicy, readOnly: boolean, external: readonly string[], options: PolicyEngineOptions): void {
   const mode = policy.permission_mode;
   if (readOnly || builder.decision !== "deny" || !builder.liftable) return;
   if (builder.destructive) {
@@ -307,8 +313,21 @@ function liftByPermission(builder: DecisionBuilder, policy: EffectivePolicy, rea
   }
   if ((mode !== "auto" && mode !== "full") || builder.rail !== undefined) return;
   if (mode === "auto") {
-    builder.decision = "ask";
-    builder.reasons.push({ code: "permission-prompt", layer: "approval", message: "auto mode asks you before anything outside the allowlist runs" });
+    // Owner revision 3 (2026-09-24): auto acts autonomously inside the workspace (any command, installs,
+    // background processes, repository code); only outward-facing writes ask. A plain git push asks once per session.
+    const outward = builder.reasons.some((reason) => reason.code === "external-write-not-allowlisted");
+    const pushApproved = external.length > 0 && external.every((code) => code === "git-push") && options.gitPushApproved?.() === true;
+    if (outward && !pushApproved) {
+      builder.decision = "ask";
+      builder.reasons.push({ code: "permission-prompt", layer: "approval", message: "auto mode asks before an action that sends data or changes things outside this machine" });
+      return;
+    }
+    builder.decision = "allow";
+    builder.reasons.push({
+      code: "permission-auto",
+      layer: "user",
+      message: outward ? "auto mode: git push was approved earlier in this session" : "auto mode: allowed without a prompt; it runs with your user permissions",
+    });
     return;
   }
   builder.decision = "allow";
@@ -353,12 +372,14 @@ interface CommandEvaluation {
   readonly effect: ToolEffect;
   /** The exec allowlist verdict when one narrows this command (not a writer under a full sandbox). */
   readonly confinement: ExecAllowlistDecision | undefined;
+  /** External-write rule codes the command matched (`git-push`, `http-write`…). */
+  readonly external: readonly string[];
 }
 
 function evaluateCommand(action: NormalizedAction, policy: EffectivePolicy, deny: Deny): CommandEvaluation {
   if (action.command === undefined) {
     if (action.destructive) deny("platform", "destructive-action", `${action.tool_name} is marked destructive`, "destructive-command");
-    return { effect: action.effect, confinement: undefined };
+    return { effect: action.effect, confinement: undefined, external: [] };
   }
   const classification = classifyCommand(action.command.argv, {
     cwd: action.command.cwd,
@@ -384,7 +405,7 @@ function evaluateCommand(action: NormalizedAction, policy: EffectivePolicy, deny
     commandGrants: policy.command_grants ?? [],
   });
   const effect = classification.effect === "external-write" && action.effect === "exec" ? "external-write" : action.effect;
-  return { effect, confinement };
+  return { effect, confinement, external: classification.external.map((entry) => entry.code) };
 }
 
 /** Explorer and reviewer, and a debugger whose packet owns no paths (root-cause analysis only). */
@@ -468,8 +489,8 @@ export function hostMatches(host: string, pattern: string): boolean {
 
 /**
  * K4.1 network policy for `network-read` (web_search / web_fetch), by permission mode (owner
- * decisions 2026-09-24): `ask` prompts every call (effect matrix), `auto` searches freely and asks
- * at a fetch of a domain outside the allowlist ("always allow this domain"), `full` is free, `plan`
+ * decisions 2026-09-24, revision 3): `ask` prompts every call (effect matrix), `auto` and `full`
+ * search and fetch any public domain without a prompt, `plan`
  * searches freely and asks at a new-domain fetch, headless allows only the allowlist. Workers use
  * the session's mode. Hard rails (SSRF, secret egress) are enforced before and inside the tool.
  */
@@ -484,8 +505,10 @@ function evaluateNetworkRead(action: NormalizedAction, policy: EffectivePolicy, 
   const granted = [...(policy.network.mode === "allowlist" ? policy.network.hosts : []), ...(options.webDomains?.() ?? [])];
   const blocked = policy.network.mode === "allow" ? [] : action.network_hosts.filter((host) => !granted.some((pattern) => hostMatches(host, pattern)));
   if (blocked.length === 0) return;
-  if (mode === "full") {
-    builder.reasons.push({ code: "permission-full-access", layer: "user", message: `full access mode: fetching ${blocked.join(", ")} without a prompt` });
+  if (mode === "full" || mode === "auto") {
+    // Owner revision 3 (2026-09-24): auto reads any public domain without a prompt; SSRF and secret egress stay hard rails.
+    const code = mode === "full" ? "permission-full-access" : "permission-auto";
+    builder.reasons.push({ code, layer: "user", message: `${mode === "full" ? "full access" : "auto"} mode: fetching ${blocked.join(", ")} without a prompt` });
     return;
   }
   if (mode === undefined) {

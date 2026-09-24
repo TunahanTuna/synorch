@@ -33,8 +33,9 @@ export interface ClaudeNativeApprovalOptions {
   readonly redact?: (text: string) => string;
   readonly now?: () => Date;
   /**
-   * K4.1: Claude's WebSearch/WebFetch follow Synorch's network policy: search is free outside ask
-   * mode, a fetch of a domain outside the allowed list asks ("always allow this domain"), and a
+   * K4.1: Claude's WebSearch/WebFetch follow Synorch's network policy: auto and full read any
+   * domain freely (owner revision 3), plan searches freely and asks at a fetch of a domain outside
+   * the allowed list ("always allow this domain"), ask asks every time, and a
    * query or URL carrying a secret is refused in every mode (secret-egress rail).
    */
   readonly web?: { readonly domains: () => readonly string[]; readonly environment: Readonly<Record<string, string | undefined>> };
@@ -110,7 +111,7 @@ export function createClaudeNativeApprovals(options: ClaudeNativeApprovalOptions
       const outbound = toolName === "WebSearch" ? String(input.query ?? "") : typeof input.url === "string" ? input.url.replace(/^[a-z]+:\/\/[^/]+/i, "") : "";
       const findings = egressFindings(outbound, options.web.environment);
       if (findings !== undefined) return deny(`hard rail secret-egress: the ${toolName === "WebSearch" ? "query" : "URL"} carries ${findings.join(", ")}`);
-      if (mode === "full") return allow("full access: web reads are allowed without asking");
+      if (mode === "full" || mode === "auto") return allow(`${mode === "full" ? "full access" : "auto mode"}: web reads are allowed without asking`);
       if (mode !== "ask" && mode !== undefined && toolName === "WebSearch") return allow("web search is allowed in this mode");
       if (mode !== "ask" && mode !== undefined && webHost !== undefined && options.web.domains().some((pattern) => hostMatches(webHost, pattern))) return allow(`${webHost} is an allowed web domain`);
     }

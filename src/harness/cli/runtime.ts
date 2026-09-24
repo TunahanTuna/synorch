@@ -226,6 +226,8 @@ export interface Runtime {
   permissionMode(): PermissionMode | undefined;
   /** Switches the permission mode (Shift+Tab, /permissions); workers started later inherit `full` only. */
   setPermissionMode(mode: PermissionMode | undefined): void;
+  /** ADR-08 owner revision 3: the user approved a plain `git push`; auto pushes without asking for the rest of the session. */
+  approveGitPushForSession(): void;
   /** The coordinator plus its worker directory (K1.7: list, assignments, per-worker control). */
   createCoordinator(broker: ApprovalBroker): OrchestrationCoordinator;
   /** The route rules as the router sees them now: `/model` session routes first, then the configured ones (K1.5). */
@@ -627,8 +629,10 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const stored = trustStore.status(workspaceRoot);
   let trustState: WorkspaceTrustState = !stored.trusted && options.trustWorkspace === true ? { ...stored, trusted: true, source: "flag", reason: undefined } : stored;
   let permission: PermissionMode | undefined = options.permissionMode;
-  // Full access implies trust for this runtime only; leaving full access returns to the recorded trust.
-  const effectiveTrust = (): WorkspaceTrustState => (trustState.trusted || permission !== "full" ? trustState : { ...trustState, trusted: true, source: "session", reason: undefined });
+  let gitPushApproved = false;
+  // Full access and auto (owner revision 3) imply trust for this runtime only, never saved; leaving them returns to the recorded trust.
+  const effectiveTrust = (): WorkspaceTrustState =>
+    trustState.trusted || (permission !== "full" && permission !== "auto") ? trustState : { ...trustState, trusted: true, source: "session", reason: undefined };
   const trust: RuntimeTrust = {
     file: trustStore.file,
     state: effectiveTrust,
@@ -655,6 +659,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       permissionMode: () => permission,
       webDomains: () => webSession.domains(),
       webContentRead: () => webSession.contentRead(),
+      gitPushApproved: () => gitPushApproved,
     }),
     canonical.roles,
   );
@@ -946,6 +951,9 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     permissionMode: () => permission,
     setPermissionMode(mode) {
       permission = mode;
+    },
+    approveGitPushForSession() {
+      gitPushApproved = true;
     },
     createCoordinator(broker) {
       const driverFor = createDriver(broker);

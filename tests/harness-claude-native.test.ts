@@ -123,11 +123,11 @@ test("native args: full toolset, mapped permission mode, one --add-dir, user set
     maxTurns: 3,
     sessionId: "abc",
     resume: false,
-    native: { permissionMode: "acceptEdits", addDir: "/work" },
+    native: { permissionMode: "auto", addDir: "/work" },
   });
   const at = (name: string) => args[args.indexOf(name) + 1];
   assert.ok(!args.includes("--tools"), "native mode never disables the built-ins");
-  assert.equal(at("--permission-mode"), "acceptEdits");
+  assert.equal(at("--permission-mode"), "auto");
   assert.equal(at("--add-dir"), "/work");
   assert.equal(at("--setting-sources"), "user");
   assert.ok(args.includes("--strict-mcp-config"));
@@ -135,7 +135,7 @@ test("native args: full toolset, mapped permission mode, one --add-dir, user set
   assert.ok(!args.includes("--bare"));
   assert.deepEqual(
     [undefined, "ask", "auto", "full", "plan"].map((mode) => claudePermissionMode(mode as never)),
-    ["manual", "manual", "acceptEdits", "bypassPermissions", "plan"],
+    ["manual", "manual", "auto", "bypassPermissions", "plan"],
   );
   assert.deepEqual(["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Read", "Grep"].map(claudeToolEffect), [
     "exec",
@@ -155,7 +155,7 @@ test("native session: built-ins are expected, observed and never forwarded as Sy
   assert.deepEqual(checkStreamGrammar(events), []);
   const argv = report.argv;
   assert.ok(!argv.includes("--tools"));
-  assert.equal(argv[argv.indexOf("--permission-mode") + 1], "acceptEdits");
+  assert.equal(argv[argv.indexOf("--permission-mode") + 1], "auto");
   assert.equal(argv[argv.indexOf("--add-dir") + 1], directory);
 
   const init = events.find((event) => event.type === "backend_init");
@@ -298,17 +298,22 @@ test("native approvals follow the permission mode: full allows, plan refuses cha
   assert.deepEqual(answer, { allow: false, reason: "the user said: not now" });
 });
 
-test("native web tools follow Synorch's network policy: search free in auto, a new domain asks with hosts, allowed domains pass, secrets are refused", async () => {
+test("native web tools follow Synorch's network policy: auto reads any domain, plan asks at a new domain with hosts, allowed domains pass, secrets are refused", async () => {
   const signal = new AbortController().signal;
   const context = recordingContext();
   const broker = scriptedBroker("allowed-once");
+  let mode: "auto" | "plan" = "auto";
   const handler = createClaudeNativeApprovals({
     broker,
-    permissionMode: () => "auto",
+    permissionMode: () => mode,
     commandGrants: async () => [],
     web: { domains: () => ["*.python.org"], environment: { MY_SERVICE_TOKEN: "abcdefghijklmnop-secret" } },
   });
   assert.equal((await handler("WebSearch", { query: "vitest latest" }, context, signal)).allow, true);
+  assert.equal((await handler("WebFetch", { url: "https://docs.python.org/3/", prompt: "x" }, context, signal)).allow, true);
+  assert.equal((await handler("WebFetch", { url: "https://blog.example.com/post", prompt: "x" }, context, signal)).allow, true);
+  assert.equal(broker.requests.length, 0, "auto never asks for a web read (owner revision 3)");
+  mode = "plan";
   assert.equal((await handler("WebFetch", { url: "https://docs.python.org/3/", prompt: "x" }, context, signal)).allow, true);
   assert.equal(broker.requests.length, 0);
   assert.equal((await handler("WebFetch", { url: "https://blog.example.com/post", prompt: "x" }, context, signal)).allow, true);

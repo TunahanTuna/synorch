@@ -22,14 +22,14 @@ function script(times: number) {
   return createScriptedAdapter(steps, { adapterId: "perm-script" });
 }
 
-test("auto mode asks for a command outside the allowlist; Always allow persists; deny with a reason tells the model", async () => {
+test("ask mode asks for a command; Always allow persists; deny with a reason tells the model", async () => {
   const sandbox = await createSandbox({ "gen.mjs": GEN });
   try {
     await writeFile(path.join(sandbox.home, "config.yaml"), ROUTE);
     const model = script(2);
     const input = ["generate", "4", "use the npm script", "generate again", "2", "/permissions", "/exit", ""].join("\n");
     const io = capture({ cwd: sandbox.workspace, stdin: new ScriptedInput(input, true), stdinIsTTY: true });
-    const code = await runHarnessCommand(["agent", "--plain"], io.io, overridesFor(sandbox, { adapters: [model] }));
+    const code = await runHarnessCommand(["agent", "--plain", "--permission-mode", "ask"], io.io, overridesFor(sandbox, { adapters: [model] }));
     const stdout = io.stdout();
     assert.equal(code, 0, io.stderr());
     assert.match(stdout, /Allow Synorch to run this command\? node gen\.mjs/);
@@ -39,13 +39,30 @@ test("auto mode asks for a command outside the allowlist; Always allow persists;
     assert.equal(await readFile(path.join(sandbox.workspace, "out.txt"), "utf8"), "generated\n", "allowed after the second prompt");
     const grants = JSON.parse(await readFile(path.join(sandbox.home, "command-grants.json"), "utf8")) as { workspaces: Record<string, string[]> };
     assert.deepEqual(Object.values(grants.workspaces), [["node gen.mjs"]]);
-    assert.match(stdout, /Mode +auto/);
+    assert.match(stdout, /Mode +ask/);
     assert.match(stdout, /Always allowed +node gen\.mjs/);
 
     const log = await readSession(sandbox.home, /--resume (ses_\S+)\)/.exec(io.stderr())?.[1] ?? "");
     assert.deepEqual(eventsOf(log, "tool/policy_decided").map((event) => event.data.decision.decision), ["ask", "ask"]);
     assert.deepEqual(eventsOf(log, "approval/decided").map((event) => event.data.decision.outcome), ["rejected", "allowed-for-scope"]);
     assert.equal(eventsOf(log, "command/allowed")[0]?.data.prefix, "node gen.mjs", "the grant is audited");
+  } finally {
+    await sandbox.cleanup();
+  }
+});
+
+test("auto mode (owner revision 3) runs the command without a prompt, trusts the folder for the session with one notice, saves nothing", async () => {
+  const sandbox = await createSandbox({ "gen.mjs": GEN });
+  try {
+    await writeFile(path.join(sandbox.home, "config.yaml"), ROUTE);
+    const auto = capture({ cwd: sandbox.workspace, stdin: new ScriptedInput(["generate", "/exit", ""].join("\n"), true), stdinIsTTY: true });
+    assert.equal(await runHarnessCommand(["agent", "--plain", "--permission-mode", "auto"], auto.io, overridesFor(sandbox, { adapters: [script(1)] })), 0, auto.stderr());
+    assert.doesNotMatch(auto.stdout(), /Allow Synorch to run this command/);
+    assert.match(`${auto.stdout()}${auto.stderr()}`, /Auto mode: trusting this folder for this session/);
+    assert.equal(await readFile(path.join(sandbox.workspace, "out.txt"), "utf8"), "generated\n");
+    await assert.rejects(readFile(path.join(sandbox.home, "trust.json"), "utf8"), "auto trusts for the session only");
+    const log = await readSession(sandbox.home, /--resume (ses_\S+)\)/.exec(auto.stderr())?.[1] ?? "");
+    assert.deepEqual(eventsOf(log, "tool/policy_decided").map((event) => event.data.decision.decision), ["allow"]);
   } finally {
     await sandbox.cleanup();
   }

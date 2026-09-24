@@ -103,7 +103,7 @@ test("a direct edit: status glyphs and stats on one line, the diff preview, and 
       "",
       "● Fixed: add subtracted instead of adding.",
       "",
-      "✓ Changed src/add.mjs (+1 −1) · Tests: 12 passed · /diff for details",
+      "✓ Changed src/add.mjs (+1 −1) · Tests: 12 passed · /diff /evidence",
     ].join("\n"),
   );
   assert.doesNotMatch(shown, /tool_|toolCall|\{"|->/, "no ids, JSON or state transitions");
@@ -122,7 +122,7 @@ test("an edit without a test run says so instead of implying a pass; a failed re
   tui.render(event("turn/ended", { turn_id: createId("turn"), outcome: "completed" }));
   const shown = await screen(tui, terminal);
   assert.match(shown, /^✗ Read missing\.mjs\n {2}⎿ file not found$/m);
-  assert.match(shown, /^! Changed src\/add\.mjs \(\+1 −1\) · Tests: not run · \/diff for details$/m);
+  assert.match(shown, /^! Changed src\/add\.mjs \(\+1 −1\) · Tests: not run · \/diff \/evidence$/m);
   assert.doesNotMatch(shown, /C:\\tmp/);
   await tui.stop("completed");
 });
@@ -182,7 +182,7 @@ test("40 columns: rows fit, the footer drops fields instead of cutting the mode;
   editTurn(ascii.tui);
   const plain = await screen(ascii.tui, ascii.terminal);
   assert.match(plain, /^\+ Edit src\/add\.mjs {2}\+1 -1$/m);
-  assert.match(plain, /^\+ Changed src\/add\.mjs \(\+1 -1\) - Tests: 12 passed - \/diff for details$/m);
+  assert.match(plain, /^\+ Changed src\/add\.mjs \(\+1 -1\) - Tests: 12 passed - \/diff \/evidence$/m);
   assert.doesNotMatch(plain, /[^\x00-\x7f]/, "ASCII glyph set: no non-ASCII character on screen");
   await ascii.tui.stop("completed");
 });

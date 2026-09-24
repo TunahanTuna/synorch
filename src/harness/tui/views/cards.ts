@@ -86,6 +86,10 @@ export function renderEvidence(view: EvidenceView, ctx: ViewContext): string[] {
     for (const proof of criterion.proofs) {
       const shown = proofLine(proof, ctx);
       lines.push(`    ${t.muted(g.base.result)} ${paint(t, shown.tone, shown.glyph)} ${truncate(shown.text, Math.max(8, width - 8 - displayWidth(g.base.result)))}`);
+      if (proof.kind === "command" && proof.excerpt !== undefined) {
+        const excerpt = proof.excerpt.split(/\r?\n/).map((line) => clean(line, 200)).filter((line) => line.trim() !== "").slice(-3);
+        for (const line of excerpt) lines.push(t.muted(`        ${truncate(line, Math.max(8, width - 10))}`));
+      }
     }
   }
   const label = (name: string) => t.muted(padEnd(name, 8));
@@ -94,11 +98,17 @@ export function renderEvidence(view: EvidenceView, ctx: ViewContext): string[] {
     const verdict = view.review.verdict === undefined ? "" : `${verdictWord(view.review.verdict)}`;
     const text = [independent ? "independently reviewed" : "not independently reviewed", [verdict, who === "" ? "" : `by ${who}`].filter((part) => part !== "").join(" ")].filter((part) => part !== "").join(sep);
     lines.push(`  ${label("Review")} ${text}`);
+    for (const finding of (view.review.findings ?? []).slice(0, 6)) lines.push(`  ${label("")} ${t.muted(g.base.bullet)} ${truncate(clean(finding, 240), Math.max(8, width - 14))}`);
+    if ((view.review.findings ?? []).length > 6) lines.push(`  ${label("")} ${t.muted(`… ${(view.review.findings ?? []).length - 6} more findings`)}`);
   }
+  if (view.diffstat !== undefined) lines.push(`  ${label("Diff")} ${view.diffstat.files} file${view.diffstat.files === 1 ? "" : "s"} ${t.success(`+${view.diffstat.added}`)} ${t.error(`-${view.diffstat.removed}`)}`);
   const paths = (view.changedPaths ?? []).map((path) => clean(path, 80));
   if (paths.length > 0) lines.push(`  ${label("Changed")} ${paths.slice(0, 3).join(", ")}${paths.length > 3 ? `, +${paths.length - 3}  /diff` : ""}`);
   if (view.risk !== undefined) lines.push(`  ${label("Risk")} ${t.warning(clean(view.risk, 200))}`);
   if (view.next !== undefined) lines.push(`  ${label("Next")} ${clean(view.next, 200)}`);
+  if (view.others !== undefined && view.others.length > 0) {
+    lines.push(`  ${label("Also")} ${t.muted(truncate(view.others.map((other) => clean(other, 60)).join(sep), Math.max(8, width - 12)))}`);
+  }
   return finish(lines, ctx);
 }
 
@@ -158,11 +168,11 @@ export function renderWhy(view: WhyView, ctx: ViewContext): string[] {
   const g = ctx.glyphs;
   const width = ctx.width;
   const decision = DECISION[view.decision];
-  const question = view.decision === "deny" ? "Why was this denied?" : view.decision === "ask" ? "Why does this need approval?" : "Why was this allowed?";
+  const question = view.question ?? (view.decision === "deny" ? "Why was this denied?" : view.decision === "ask" ? "Why does this need approval?" : "Why was this allowed?");
   const lines = [`${t.accent(`${g.base.bullet} ${question}`)} ${truncate(clean(view.subject, 200), Math.max(8, width - displayWidth(question) - 4))}`];
   const label = (name: string) => t.muted(padEnd(name, 9));
   lines.push(`  ${label("Decision")} ${paint(t, decision.tone, decision.word)}`);
-  if (view.reasons.length === 0) lines.push(`  ${label("Rule")} ${t.muted("no rule recorded")}`);
+  if (view.reasons.length === 0 && view.question === undefined) lines.push(`  ${label("Rule")} ${t.muted("no rule recorded")}`);
   view.reasons.forEach((reason, index) => {
     const source = clean(reason.source, 80);
     lines.push(`  ${label(index === 0 ? "Layer" : "")} ${reason.layer}${source === "" ? "" : ` ${g.base.sep} ${source}`}`);
@@ -175,6 +185,11 @@ export function renderWhy(view: WhyView, ctx: ViewContext): string[] {
     });
   } else if (view.decision === "deny") {
     lines.push(`  ${label("Change")} ${t.muted("this rule cannot be changed from the session")}`);
+  }
+  for (const fact of view.facts ?? []) lines.push(`  ${label(clean(fact.label, 9))} ${t.muted(truncate(clean(fact.text, 300), Math.max(8, width - 13)))}`);
+  if (view.recent !== undefined && view.recent.length > 0) {
+    lines.push(`  ${label("Recent")} ${t.muted("/why <n> explains one")}`);
+    for (const entry of view.recent.slice(0, 6)) lines.push(`  ${label("")} ${t.muted(truncate(clean(entry, 160), Math.max(8, width - 13)))}`);
   }
   return finish(lines, ctx);
 }

@@ -241,6 +241,50 @@ export class MarkdownMemoryStore implements MemoryStore {
     };
   }
 
+  /**
+   * The decision desk's "edit": rewrites a still-open proposal's note text (title and body) before
+   * it is decided. The proposal stays pending; its rationale and evidence are kept.
+   */
+  public async amendProposal(proposalId: ProposalId, change: { readonly title?: string | undefined; readonly body?: string | undefined }): Promise<MemoryProposal> {
+    const current = await this.proposal(proposalId);
+    if (current === undefined) throw usage(`unknown or unreadable proposal ${proposalId}`, "syn memory review");
+    if (current.state !== "pending" && current.state !== "deferred") throw usage(`proposal ${proposalId} was already ${current.state}`);
+    if (current.kind !== "note") throw usage("only note proposals carry text to edit");
+    const { title, body } = splitTitle(current.body ?? "");
+    const nextTitle = (change.title ?? title ?? current.note?.id ?? "note").replace(/[\r\n]+/g, " ").trim();
+    const nextBody = (change.body ?? body).trim();
+    const parsed = memoryProposalSchema.safeParse(redactValue({ ...current, state: "pending", decision: undefined, body: `# ${nextTitle}${nextBody === "" ? "" : `\n\n${nextBody}`}` }));
+    if (!parsed.success) throw usage(`invalid proposal edit: ${formatZodIssues(parsed.error)}`);
+    await writeAtomic(this.proposalFile(proposalId), stringify(parsed.data, { lineWidth: 0 }));
+    return parsed.data;
+  }
+
+  /**
+   * Correction control (UX-08): the user edits or retires a note of any kind. The note becomes the
+   * user's (`owner: human`, reviewed today); the write refuses when the file changed since `expectedDigest`.
+   */
+  public async correct(
+    id: MemoryId,
+    change: { readonly title?: string | undefined; readonly body?: string | undefined; readonly status?: string | undefined },
+    expectedDigest: string,
+  ): Promise<MemoryNote> {
+    const current = await this.get(id);
+    if (current === undefined) throw usage(`no memory note ${id}`, "/memory");
+    const date = this.now().toISOString().slice(0, 10);
+    const status = change.status ?? current.frontmatter.status;
+    if (!MEMORY_STATUSES[current.frontmatter.kind].includes(status)) {
+      throw usage(`${status} is not a ${current.frontmatter.kind} status (${MEMORY_STATUSES[current.frontmatter.kind].join(", ")})`);
+    }
+    return this.writeNote(
+      {
+        frontmatter: { ...current.frontmatter, status, owner: "human", updated_at: date, reviewed_at: date },
+        title: change.title ?? current.title,
+        body: change.body ?? current.body,
+      },
+      expectedDigest,
+    );
+  }
+
   public async reindex(): Promise<{ readonly notes: number; readonly broken_links: number }> {
     const index = await this.rebuildIndex();
     return { notes: index.notes.length, broken_links: index.broken_links.length };
@@ -251,6 +295,11 @@ export class MarkdownMemoryStore implements MemoryStore {
     const index = await buildIndex(this.root);
     if (await this.rootExists()) await writeIndex(this.root, index);
     return index;
+  }
+
+  /** The derived index (rebuilt when the notes changed): the memory graph reads relations and links from it. */
+  public async index(): Promise<MemoryIndex> {
+    return this.loadIndex();
   }
 
   public async candidates(id?: string): Promise<readonly MemoryCandidate[]> {

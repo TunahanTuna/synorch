@@ -331,7 +331,18 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
         includeInactive: false,
         limit: deps.memory.limit ?? 5,
       });
-      for (const memory of recalled) {
+      // The conversation and the orchestrator always see the project's active decisions and preferences (the ledger), even when no word matches.
+      const ledger =
+        input.role === "session" || input.role === "orchestrator"
+          ? await deps.memory.store
+              .search({ projectId: deps.memory.projectId, branch: deps.memory.branch, text: undefined, kinds: ["decision", "preference"], includeInactive: false, limit: deps.memory.limit ?? 5 })
+              .catch(() => [])
+          : [];
+      const seen = new Set(recalled.map((memory) => memory.note.frontmatter.id));
+      const always = ledger
+        .filter((memory) => !seen.has(memory.note.frontmatter.id) && !memory.stale && (memory.note.frontmatter.status === "accepted" || memory.note.frontmatter.status === "active"))
+        .map((memory) => ({ ...memory, reason: `always recalled: an active ${memory.note.frontmatter.kind} of this project; ${memory.reason}` }));
+      for (const memory of [...recalled, ...always]) {
         if (isInactiveMemory(memory)) continue;
         memories.push(memory);
         blocks.push({ id: `memory:${memory.note.frontmatter.id}`, source: "memory", trust: "untrusted", text: renderMemory(memory), truncated: false, optional: true });

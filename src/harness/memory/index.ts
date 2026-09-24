@@ -17,3 +17,17 @@ export { createSystemObsidianLauncher, obsidianOpenUri, type ObsidianLauncher } 
 export { redactSecrets, REDACTED } from "./redaction.ts";
 export { candidateToProposal, findCandidates, INACTIVE_STATUSES, type MemoryCandidate } from "./relations.ts";
 export { KIND_DIRECTORIES, readGitBranch, resolveMemoryRoot } from "./vault.ts";
+export {
+  buildProposal,
+  ledgerSummary,
+  memorySlugId,
+  proposalConflicts,
+  proposalSubject,
+  readLedger,
+  RETIRED_STATUS,
+  type LedgerEntry,
+  type MemoryLedger,
+  type ProposalInput,
+  type ProposalOrigin,
+} from "./desk.ts";
+export { buildMemoryGraph, MEMORY_GRAPH_LIMIT, memoryGraph, type MemoryGraphFilter } from "./graph.ts";

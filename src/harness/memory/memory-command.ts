@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import path from "node:path";
 import { parseArgs } from "node:util";
 import {
   deriveProjectId,
@@ -19,10 +20,12 @@ import { createMemoryStore, isMemoryKind, parseMemoryId, type MarkdownMemoryStor
 import type { MemoryCandidate } from "./relations.ts";
 import { createSystemObsidianLauncher, obsidianOpenUri, type ObsidianLauncher } from "./obsidian.ts";
 import { readGitBranch, resolveMemoryRoot } from "./vault.ts";
+import { memoryGraph } from "./graph.ts";
+import type { MemoryGraphView } from "../contracts/views.ts";
 
 /** `syn memory status|search|show|related|review|accept|reject|open|reindex` (contracts/cli-and-jsonl.md). */
 
-export const MEMORY_SUBCOMMANDS = ["status", "search", "show", "related", "review", "accept", "reject", "open", "reindex"] as const;
+export const MEMORY_SUBCOMMANDS = ["status", "search", "show", "related", "review", "accept", "reject", "open", "reindex", "graph"] as const;
 
 const USAGE = `Usage: syn memory <command> [options]
 
@@ -36,6 +39,7 @@ Commands:
   reject <proposal-id>        Reject a proposal (--reason <text>)
   open <id> [--in obsidian]   Open in Obsidian via obsidian:// URI; prints the note when Obsidian is absent
   reindex                     Rebuild the derived index from the notes
+  graph                       The notes as a graph (--around <id>, --depth <n>, --kind <kind>, --all, --obsidian)
 
 Common options: --root <dir> (vault), --branch <name> (defaults to the checked-out branch)
 `;
@@ -50,6 +54,8 @@ export interface MemoryCommandOptions {
   readonly root?: ((projectId: string) => string) | undefined;
   /** Receives every decision's audit payloads so the caller can append them as session events. */
   readonly onDecision?: ((outcome: MemoryDecisionOutcome) => Promise<void>) | undefined;
+  /** Draws `syn memory graph` (the CLI composition root passes the terminal graph renderer); plain adjacency text otherwise. */
+  readonly renderGraph?: ((view: MemoryGraphView) => string) | undefined;
 }
 
 interface Context {
@@ -62,6 +68,7 @@ interface Context {
   readonly obsidian: ObsidianLauncher;
   readonly now: () => Date;
   readonly onDecision: ((outcome: MemoryDecisionOutcome) => Promise<void>) | undefined;
+  readonly renderGraph: ((view: MemoryGraphView) => string) | undefined;
 }
 
 interface ParsedValues {
@@ -73,6 +80,9 @@ interface ParsedValues {
   readonly reason?: string | undefined;
   readonly in?: string | undefined;
   readonly help?: boolean | undefined;
+  readonly around?: string | undefined;
+  readonly depth?: string | undefined;
+  readonly obsidian?: boolean | undefined;
 }
 
 export function createMemoryCommand(options: MemoryCommandOptions = {}): CommandHandler {
@@ -92,6 +102,9 @@ export function createMemoryCommand(options: MemoryCommandOptions = {}): Command
           reason: { type: "string" },
           in: { type: "string" },
           help: { type: "boolean", short: "h" },
+          around: { type: "string" },
+          depth: { type: "string" },
+          obsidian: { type: "boolean" },
         },
       });
     } catch (error: unknown) {
@@ -124,6 +137,7 @@ export function createMemoryCommand(options: MemoryCommandOptions = {}): Command
       obsidian: options.obsidian ?? createSystemObsidianLauncher(io.env, platform),
       now,
       onDecision: options.onDecision,
+      renderGraph: options.renderGraph,
     };
     try {
       return await HANDLERS[subcommand as (typeof MEMORY_SUBCOMMANDS)[number]](context);
@@ -151,6 +165,7 @@ const HANDLERS: { readonly [K in (typeof MEMORY_SUBCOMMANDS)[number]]: (context:
   reject: (context) => decide(context, "rejected"),
   open,
   reindex,
+  graph,
 };
 
 function fail(context: Context, message: string, code: ExitCode = EXIT_CODES.usage): ExitCode {
@@ -285,7 +300,7 @@ function describeProposal(proposal: MemoryProposal): string {
   return [
     `${proposal.proposal_id}  [${proposal.kind}${proposal.state === "deferred" ? ", deferred" : ""}] ${subject}`,
     `    ${proposal.rationale}`,
-    `    evidence: ${evidence} · by ${proposal.created_by.run_id} at ${proposal.created_at}`,
+    `    evidence: ${evidence} · by ${proposal.created_by.run_id ?? proposal.created_by.role ?? "?"} at ${proposal.created_at}`,
   ].join("\n");
 }
 
@@ -335,6 +350,42 @@ async function reindex(context: Context): Promise<ExitCode> {
   for (const link of index.broken_links) lines.push(`  broken ${link.kind}: ${link.from} -> ${link.target}`);
   for (const item of index.invalid) lines.push(`  invalid note: ${item.path}: ${item.message}`);
   for (const item of index.duplicates) lines.push(`  duplicate id ${item.id}: ${item.paths.join(", ")}`);
+  context.io.stdout(`${lines.join("\n")}\n`);
+  return EXIT_CODES.success;
+}
+
+async function graph(context: Context): Promise<ExitCode> {
+  if (context.values.obsidian === true) {
+    const uri = obsidianOpenUri(path.join(context.store.root, "README.md"));
+    if ((await context.obsidian.available()) && (await context.obsidian.open(uri))) {
+      context.io.stdout(`opened the vault in Obsidian: press Ctrl+G (Cmd+G) there for its graph view\n`);
+      return EXIT_CODES.success;
+    }
+    context.io.stdout(`Obsidian is not available; the vault is ${context.store.root}\n`);
+    return EXIT_CODES.success;
+  }
+  const kinds: MemoryKind[] = [];
+  for (const kind of context.values.kind ?? []) {
+    if (!isMemoryKind(kind)) return fail(context, `unknown kind '${kind}' (${MEMORY_KINDS.join(", ")})`);
+    kinds.push(kind);
+  }
+  const depth = context.values.depth === undefined ? 2 : Number(context.values.depth);
+  if (!Number.isInteger(depth) || depth < 1) return fail(context, "--depth must be a positive integer");
+  const view = await memoryGraph(context.store, {
+    projectId: context.projectId,
+    branch: context.branch,
+    kinds,
+    ...(context.values.around === undefined ? {} : { around: context.values.around }),
+    depth,
+    all: context.values.all === true,
+  });
+  if (context.renderGraph !== undefined) {
+    context.io.stdout(`${context.renderGraph(view)}\n`);
+    return EXIT_CODES.success;
+  }
+  const lines = [`memory graph: ${view.nodes.length} notes, ${view.edges.length} links (${view.scope})`];
+  for (const node of view.nodes) lines.push(`  ${node.id} [${node.kind} ${node.status}]${node.contradicted === true ? " (possible contradiction)" : ""} ${node.title}`);
+  for (const edge of view.edges) lines.push(`  ${edge.from} --${edge.type}--> ${edge.to}`);
   context.io.stdout(`${lines.join("\n")}\n`);
   return EXIT_CODES.success;
 }

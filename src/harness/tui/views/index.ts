@@ -36,3 +36,4 @@ export {
   type ViewTheme,
 } from "./kit.ts";
 export { renderUsage } from "./usage.ts";
+export { renderContext, renderMemoryGraph, renderMemoryLedger, renderMemoryProposal } from "./trust-cards.ts";

@@ -6,7 +6,6 @@ import {
   deriveProjectId,
   EVENT_VERSIONS,
   HarnessError,
-  memoryProposalSchema,
   providerIdSchema,
   ProviderFailure,
   type AgentDriver,
@@ -61,7 +60,7 @@ import {
   type ContextBuilder,
 } from "../context/index.ts";
 import { createAgentDriver, recoverSession } from "../core/index.ts";
-import { createMemoryStore, readGitBranch, resolveMemoryRoot } from "../memory/index.ts";
+import { buildProposal, createMemoryStore, readGitBranch, resolveMemoryRoot } from "../memory/index.ts";
 import {
   createBudgetGateSlot,
   createCoordinator,
@@ -578,33 +577,13 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         return { status: "ok", text: `The user answered: ${answer === "" ? "(empty answer)" : answer}`.slice(0, 16 * 1024), truncated: false, redactions: 0 };
       },
       async memoryPropose(input, context) {
-        const content = input.content;
-        const parsed = memoryProposalSchema.safeParse({
-          schema_version: 1,
-          proposal_id: createId("proposal"),
-          kind: input.kind,
-          ...(content.note === undefined ? {} : { note: content.note }),
-          ...(typeof content.body === "string" ? { body: content.body } : {}),
-          ...(input.target === undefined ? {} : { target: input.target }),
-          ...(content.relation === undefined ? {} : { relation: content.relation }),
-          ...(typeof content.new_status === "string" ? { new_status: content.new_status } : {}),
-          rationale: input.rationale,
-          evidence: [{ kind: "tool-call", ref: context.toolCallId, produced_by: context.role === "reviewer" ? "reviewer" : context.role === "orchestrator" ? "orchestrator" : "worker" }],
-          created_by: { run_id: context.runId, ...(context.taskId === undefined ? {} : { task_id: context.taskId }) },
-          created_at: new Date().toISOString(),
-          state: "pending",
-        });
-        if (!parsed.success) {
-          return {
-            status: "error",
-            text: "",
-            truncated: false,
-            redactions: 0,
-            error: { code: "invalid_arguments", message: parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ").slice(0, 2000) },
-          };
+        // K2 decision desk: `{ kind, title, body }` is enough; a conversation turn (no run) proposes as `session`.
+        const parsed = buildProposal(input, { projectId, branch: gitBranch, runId: context.runId, taskId: context.taskId, role: context.role, toolCallId: context.toolCallId, now: new Date() });
+        if (!parsed.ok) {
+          return { status: "error", text: "", truncated: false, redactions: 0, error: { code: "invalid_arguments", message: parsed.message } };
         }
-        await memory.propose(parsed.data);
-        return { status: "ok", text: `proposal ${parsed.data.proposal_id} queued for review (syn memory review)`, truncated: false, redactions: 0 };
+        await memory.propose(parsed.proposal);
+        return { status: "ok", text: `proposal ${parsed.proposal.proposal_id} queued for the user's review (/memory review); it is not memory until accepted`, truncated: false, redactions: 0 };
       },
     },
   });

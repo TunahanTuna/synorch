@@ -405,7 +405,7 @@ export class ConversationPresenter {
     return ops;
   }
 
-  /** `Changed src/a.ts (+8 −3) · Tests: 12 passed · /diff for details`; undefined when nothing changed or ran. */
+  /** `Changed src/a.ts (+8 −3) · Tests: 12 passed · /diff /evidence`; undefined when nothing changed or ran. */
   private resultLine(outcome: string): ViewOp | undefined {
     const g = this.options.glyphs;
     const files = [...this.ledger.files.entries()];
@@ -429,7 +429,7 @@ export class ConversationPresenter {
       tone = "error";
     }
     if ((outcome === "cancelled" || outcome === "failed") && tone === "ok") tone = "warning";
-    if (files.length > 0) parts.push("/diff for details");
+    parts.push(files.length > 0 ? "/diff /evidence" : "/evidence");
     const item: ConversationItem = { kind: "result", id: this.nextId(), text: parts.join(` ${g.sep} `), tone };
     this.lastItem = item.id;
     return { op: "append", item };

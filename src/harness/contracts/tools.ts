@@ -158,6 +158,31 @@ export interface ProcessResult {
 export interface SandboxRunner {
   probe(): Promise<SandboxReport>;
   run(spec: ProcessSpec, signal: AbortSignal): Promise<ProcessResult>;
+  /**
+   * K4.2: starts `spec` without waiting for it (dev servers, watchers, long test runs). The same
+   * sandbox wrapping, environment and PATH rules as `run`; `timeoutMs` still bounds its lifetime.
+   * Optional: a runner without it cannot run background processes.
+   */
+  start?(spec: ProcessSpec): BackgroundChild;
+}
+
+/** How a background child ended (`exited` also covers a signal of its own). */
+export interface BackgroundExit {
+  readonly termination: ProcessTermination;
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+  readonly spawnError: string | undefined;
+}
+
+/** A child started by `SandboxRunner.start`: streamed output, its exit, and a whole-tree kill. */
+export interface BackgroundChild {
+  readonly pid: number | undefined;
+  onOutput(listener: (chunk: string, stream: "stdout" | "stderr") => void): void;
+  readonly exited: Promise<BackgroundExit>;
+  /** Terminates the child and every descendant (taskkill /T /F on Windows, the process group elsewhere). */
+  kill(): Promise<void>;
+  /** Synchronous best-effort tree kill for process exit handlers. */
+  killSync(): void;
 }
 
 /**

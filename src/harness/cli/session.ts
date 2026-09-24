@@ -232,6 +232,8 @@ async function openSession(
     events,
     questions,
     dispose: () => {
+      // K4.2: background processes of the run's workers never outlive the session.
+      runtime.processes.killAllSync();
       unbind();
       unsubscribe();
       stopNotices();

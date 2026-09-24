@@ -14,6 +14,7 @@ import {
 } from "../../contracts/index.ts";
 import { childEnvironment, isBlockedEnvName } from "../environment.ts";
 import { resolveWorkspacePath } from "../workspace-path.ts";
+import { backgroundStartResult, ownerOf, type BackgroundProcessManager } from "./process-bg.ts";
 import { messageOf } from "./read-tools.ts";
 import { actionOf, builtinMetadata, defineTool, errorResult, GRANT_MATCH, NormalizedMemo, okResult, readableByPolicy, scopeViolationResult } from "./shared.ts";
 
@@ -36,7 +37,13 @@ export type CommandClassifierHint = (
 export interface ProcessToolOptions {
   readonly environment: Readonly<Record<string, string | undefined>>;
   readonly classifyCommand: CommandClassifierHint | undefined;
+  /** K4.2: where `exec {background: true}` registers its children; without it background mode is refused. */
+  readonly background?: BackgroundProcessManager;
 }
+
+/** A background process lives until stopped or the session ends, unless `timeout_ms` bounds it. */
+const BACKGROUND_LIFETIME_MS = 12 * 60 * 60 * 1000;
+const BACKGROUND_SETTLE_MS = 1_500;
 
 const STDIN_SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "cmd", "powershell", "pwsh"]);
 
@@ -50,6 +57,8 @@ const execInput = z
       .refine((env) => Object.keys(env).every((name) => !isBlockedEnvName(name)), "env may not set loader, shell-hook, credential or path variables"),
     stdin: z.string().max(1024 * 1024).optional(),
     timeout_ms: z.int().min(100).max(600_000).optional(),
+    background: z.boolean().default(false),
+    name: z.string().trim().min(1).max(60).optional(),
   })
   .superRefine((input, context) => {
     const program = programOf(input.argv[0] ?? "");
@@ -63,7 +72,8 @@ type ExecInput = z.infer<typeof execInput>;
 export function createExecTool(options: ProcessToolOptions): Tool<ExecInput> {
   const metadata = builtinMetadata({
     name: "exec",
-    description: "Run a program with argv (no shell string), cwd, environment and timeout inside the sandbox.",
+    description:
+      "Run a program with argv (no shell string), cwd, environment and timeout inside the sandbox. background: true starts it without waiting (dev servers, watchers, long test runs) and returns a handle (p1) for process_output / process_wait / process_kill; name labels it (\"dev server\").",
     effect: "exec",
     idempotent: false,
     network: "optional",
@@ -99,6 +109,24 @@ export function createExecTool(options: ProcessToolOptions): Tool<ExecInput> {
         }
         if (!(await stat(cwd.absolute)).isDirectory()) return errorResult("invalid_arguments", `${cwd.relative} is not a directory`);
         const argv = input.argv as [string, ...string[]];
+        if (input.background) {
+          const manager = options.background;
+          const start = context.sandbox.start?.bind(context.sandbox);
+          if (manager === undefined || start === undefined) return errorResult("execution_failed", "background processes are not available in this runtime; run it in the foreground");
+          const child = start({
+            argv,
+            cwd: cwd.absolute,
+            env: childEnvironment(options.environment, input.env),
+            stdin: input.stdin,
+            timeoutMs: input.timeout_ms ?? BACKGROUND_LIFETIME_MS,
+            outputLimitBytes: metadata.output_limit_bytes,
+            writeRoots: writeRoots(context),
+            network: context.policy.network.mode === "deny" ? "deny" : "allow",
+            untrustedRoots: [context.workspaceRoot],
+          });
+          const info = manager.register(child, { name: input.name, command: argv.join(" ").slice(0, 200), cwd: cwd.relative, owner: ownerOf(context), role: context.role });
+          return await backgroundStartResult(manager, info, context, BACKGROUND_SETTLE_MS);
+        }
         const result = await context.sandbox.run(
           {
             argv,

@@ -1,6 +1,6 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { performance } from "node:perf_hooks";
-import type { ProcessResult } from "../contracts/index.ts";
+import type { BackgroundChild, BackgroundExit, ProcessResult } from "../contracts/index.ts";
 import { planLaunch, type LaunchPlan } from "./windows-launch.ts";
 
 export interface ProcessOptions {
@@ -118,6 +118,97 @@ export async function runProcess(argv: readonly [string, ...string[]], options: 
     if (signal.aborted) onAbort();
     else signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+/**
+ * K4.2: starts one argv like `runProcess` (same launch plan, piped stdio, explicit environment)
+ * but returns at once with streamed output. `timeoutMs` bounds the child's lifetime; the caller
+ * kills the tree when the session ends.
+ */
+export function startProcess(argv: readonly [string, ...string[]], options: ProcessOptions): BackgroundChild {
+  const listeners: ((chunk: string, stream: "stdout" | "stderr") => void)[] = [];
+  let child: ChildProcess | undefined;
+  let timedOut = false;
+  let killed = false;
+  const exited = (async (): Promise<BackgroundExit> => {
+    let launch: LaunchPlan;
+    try {
+      launch = await planLaunch(argv, { cwd: options.cwd, env: options.env, ...(options.untrustedRoots === undefined ? {} : { untrustedRoots: options.untrustedRoots }) });
+    } catch (error: unknown) {
+      return { termination: "spawn-failed", exitCode: null, signal: null, spawnError: error instanceof Error ? error.message : String(error) };
+    }
+    if (killed) return { termination: "cancelled", exitCode: null, signal: null, spawnError: undefined };
+    return new Promise<BackgroundExit>((resolve) => {
+      let spawned: ChildProcess;
+      try {
+        spawned = spawn(launch.file, [...launch.args], {
+          cwd: options.cwd,
+          env: { ...launch.env },
+          stdio: ["pipe", "pipe", "pipe"],
+          shell: false,
+          windowsHide: true,
+          windowsVerbatimArguments: launch.verbatim,
+          detached: process.platform !== "win32",
+        });
+      } catch (error: unknown) {
+        resolve({ termination: "spawn-failed", exitCode: null, signal: null, spawnError: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+      child = spawned;
+      let spawnError: string | undefined;
+      let settled = false;
+      const emit =
+        (stream: "stdout" | "stderr") =>
+        (chunk: Buffer): void => {
+          const text = chunk.toString("utf8");
+          for (const listener of listeners) listener(text, stream);
+        };
+      spawned.stdout?.on("data", emit("stdout"));
+      spawned.stderr?.on("data", emit("stderr"));
+      spawned.stdin?.on("error", () => undefined);
+      spawned.stdin?.end(options.stdin ?? "");
+      const timer = setTimeout(() => {
+        timedOut = true;
+        void killTree(spawned);
+      }, options.timeoutMs);
+      timer.unref?.();
+      const finish = (exitCode: number | null, exitSignal: string | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const neverStarted = spawnError !== undefined && spawned.pid === undefined;
+        resolve({ termination: neverStarted ? "spawn-failed" : killed ? "cancelled" : timedOut ? "timeout" : "exited", exitCode, signal: exitSignal, spawnError });
+      };
+      spawned.on("error", (error: Error) => {
+        spawnError = error.message;
+        if (spawned.pid === undefined) finish(null, null);
+      });
+      spawned.on("close", (code: number | null, closeSignal: NodeJS.Signals | null) => finish(code, closeSignal));
+    });
+  })();
+  return {
+    get pid() {
+      return child?.pid;
+    },
+    onOutput(listener) {
+      listeners.push(listener);
+    },
+    exited,
+    async kill() {
+      killed = true;
+      if (child !== undefined) await killTree(child);
+    },
+    killSync() {
+      killed = true;
+      const pid = child?.pid;
+      if (pid === undefined || child?.exitCode !== null) return;
+      if (process.platform === "win32") {
+        spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+        return;
+      }
+      signalGroup(pid, "SIGKILL");
+    },
+  };
 }
 
 /** Terminates a child and every descendant it started. */

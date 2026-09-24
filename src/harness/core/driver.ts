@@ -14,6 +14,8 @@ import {
   type ApprovalBridge,
   type AssistantMessage,
   type BackendSession,
+  IMAGE_MAX_BYTES,
+  IMAGE_MEDIA_TYPES,
   type BlobRef,
   type BlobStore,
   type ContentPart,
@@ -68,6 +70,14 @@ export async function withImageData(blobs: BlobStore, request: ModelRequest): Pr
     messages.push({ ...message, content });
   }
   return { ...request, messages };
+}
+
+/** Adapters that turn `image` message parts into provider image input (K4.2 tool images). */
+const IMAGE_INPUT_ADAPTERS: ReadonlySet<string> = new Set(["openai-chatgpt", "openai-responses", "anthropic-messages", "scripted"]);
+
+function toolImage(blob: BlobRef | undefined): Extract<ContentPart, { type: "image" }>["blob"] | undefined {
+  if (blob === undefined || !(IMAGE_MEDIA_TYPES as readonly string[]).includes(blob.media_type) || blob.size_bytes > IMAGE_MAX_BYTES || blob.size_bytes < 1) return undefined;
+  return blob as Extract<ContentPart, { type: "image" }>["blob"];
 }
 
 /** Prefix under which a backend-owned loop sees Synorch's tools (MCP server `synorch`). */
@@ -228,6 +238,17 @@ class FixedAgentDriver implements PausableAgentDriver {
       }
       return this.#endStep(step, "settled", "continue");
     }
+    // K4.2: images read by tools (read_file on a png) reach the model as a user image part after the batch's results.
+    const images: { readonly call: ToolCallRef; readonly image: Extract<ContentPart, { type: "image" }>["blob"] }[] = [];
+    const flushImages = async (): Promise<void> => {
+      if (images.length === 0) return;
+      const content: ContentPart[] = images.flatMap(({ call, image }): ContentPart[] => [
+        { type: "text", text: `[image returned by ${call.name}]` },
+        { type: "image", blob: image },
+      ]);
+      images.length = 0;
+      await this.#recordMessage(step.log, { role: "user", content }, step.requestId);
+    };
     for (const [index, call] of calls.entries()) {
       if (signal.aborted) {
         for (const skipped of calls.slice(index)) {
@@ -241,7 +262,10 @@ class FixedAgentDriver implements PausableAgentDriver {
         continue;
       }
       const result = await this.#invokeRecorded(step, call, signal);
-      await this.#recordToolResult(step, call, { isError: result.result.status === "error", text: renderToolResultText(result.ref, result.result), blob: result.result.blob });
+      const image = toolImage(result.result.blob);
+      const imageNote = image === undefined ? "" : IMAGE_INPUT_ADAPTERS.has(step.input.route.adapter_id) ? "" : `\n(the ${step.input.route.adapter_id} route does not take image input; the image was not shown to you)`;
+      if (image !== undefined && imageNote === "") images.push({ call, image });
+      await this.#recordToolResult(step, call, { isError: result.result.status === "error", text: `${renderToolResultText(result.ref, result.result)}${imageNote}`, blob: result.result.blob });
       if (result.endsTurn === true) {
         // A terminal control tool succeeded (ADR-20): the rest of the batch is not run and no further request is sent.
         for (const skipped of calls.slice(index + 1)) {
@@ -250,6 +274,7 @@ class FixedAgentDriver implements PausableAgentDriver {
         return this.#endStep(step, "settled", "completed");
       }
     }
+    await flushImages();
     if (signal.aborted) return this.#endStep(step, "aborted", "cancelled");
     return this.#endStep(step, "settled", "continue");
   }

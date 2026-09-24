@@ -11,17 +11,18 @@ export type ClaudeCodeMode = (typeof CLAUDE_CODE_MODES)[number];
 export const DEFAULT_CLAUDE_CODE_MODE: ClaudeCodeMode = "native";
 
 /** Claude Code's `--permission-mode` choices this bridge uses (verified against `claude --help`, 2.1.282). */
-export type ClaudePermissionMode = "manual" | "acceptEdits" | "bypassPermissions" | "plan";
+export type ClaudePermissionMode = "manual" | "auto" | "bypassPermissions" | "plan";
 
 /**
- * Synorch permission mode → Claude `--permission-mode`: ask→manual (Claude's default mode),
- * auto→acceptEdits, full→bypassPermissions, plan→plan. Headless (no mode) is `manual`, and every
+ * Synorch permission mode → Claude `--permission-mode` (ADR-08 owner revision 3): ask→manual
+ * (Claude's default mode), auto→auto (Claude's own classifier decides; only its escalations reach
+ * Synorch's card), full→bypassPermissions, plan→plan. Headless (no mode) is `manual`, and every
  * prompt then reaches Synorch's headless broker, which refuses it (fail closed).
  */
 export function claudePermissionMode(mode: PermissionMode | undefined): ClaudePermissionMode {
   switch (mode) {
     case "auto":
-      return "acceptEdits";
+      return "auto";
     case "full":
       return "bypassPermissions";
     case "plan":

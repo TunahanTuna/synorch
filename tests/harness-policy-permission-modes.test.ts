@@ -49,13 +49,33 @@ function decide(mode: PermissionMode | undefined, subject: NormalizedAction, tru
   return engine.evaluate(subject, policy).decision;
 }
 
-test("auto turns allowlist refusals into prompts; default-deny (headless) still refuses", () => {
+test("auto acts autonomously (owner revision 3): any workspace command runs, outward writes ask; default-deny (headless) still refuses", () => {
   assert.equal(decide(undefined, exec(["python", "tools/gen.py"])), "deny");
-  assert.equal(decide("auto", exec(["python", "tools/gen.py"])), "ask");
-  assert.equal(decide("auto", exec(["pnpm", "test"])), "ask", "an untrusted build command asks instead of being refused");
-  assert.equal(decide("auto", exec(["pnpm", "test"]), true), "allow", "allowlisted and trusted runs without a prompt");
+  assert.equal(decide("auto", exec(["python", "tools/gen.py"])), "allow", "no allowlist prompts in auto");
+  assert.equal(decide("auto", exec(["pnpm", "test"])), "allow", "repository code runs without a trust prompt");
+  assert.equal(decide("auto", exec(["pnpm", "add", "zod"])), "allow", "installs run in auto");
+  assert.equal(decide("auto", exec(["rm", "-rf", "dist"])), "allow", "deleting inside the workspace runs");
   assert.equal(decide("auto", exec(["git", "push", "origin", "main"])), "ask", "an external write asks");
+  assert.equal(decide("auto", exec(["curl", "-X", "POST", "https://api.example.com/x"])), "ask", "an HTTP write asks");
   assert.equal(decide("auto", write("src/a.ts")), "allow", "edits run in auto");
+});
+
+test("auto: a plain git push asks once per session, then runs; force push still asks", () => {
+  let approved = false;
+  const engine = createPolicyEngine({ gitPushApproved: () => approved });
+  const { policy } = session("auto");
+  assert.equal(engine.evaluate(exec(["git", "push", "origin", "main"]), policy).decision, "ask");
+  approved = true;
+  assert.equal(engine.evaluate(exec(["git", "push", "origin", "main"]), policy).decision, "allow");
+  assert.equal(engine.evaluate(exec(["git", "push", "--force", "origin", "main"]), policy).decision, "ask");
+  assert.equal(engine.evaluate(exec(["npm", "publish"]), policy).decision, "ask");
+});
+
+test("auto: the web-content shield still asks before an outward action after a web read", () => {
+  const engine = createPolicyEngine({ gitPushApproved: () => true, webContentRead: () => true });
+  const { policy } = session("auto");
+  assert.equal(engine.evaluate(exec(["git", "push", "origin", "main"]), policy).decision, "ask");
+  assert.equal(engine.evaluate(exec(["pnpm", "test"]), policy).decision, "allow", "local commands are not shielded");
 });
 
 test("full allows everything in the workspace without prompts; ask asks for edits and commands; plan is read-only", () => {

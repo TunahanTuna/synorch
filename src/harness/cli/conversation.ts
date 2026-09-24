@@ -46,7 +46,7 @@ import type { DiffFileView, DiffView, OrchestrationTaskView, WorkerControl, Work
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageTokens, reconstructHistory } from "../context/index.ts";
 import { WorkerStreamHub, type OrchestrationCoordinator, type WorkerControlResult, type WorkerDirectory } from "../orchestration/index.ts";
-import { createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/index.ts";
+import { classifyCommand, createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/index.ts";
 import { bindBackgroundStatus, describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
 import { DEFAULT_WEB_DOMAINS, describeProcess } from "../tools/index.ts";
 import type { ParsedCommand } from "./args.ts";
@@ -134,6 +134,13 @@ function diffLines(view: DiffView): string[] {
   if (view.files.length > 0) lines.push("Changed by Synorch (not independently reviewed):", ...view.files.map((file) => `  ${file.path} +${file.added} -${file.removed}${file.change === "modified" ? "" : ` (${file.change})`}`));
   if (view.integrated !== undefined && view.integrated.length > 0) lines.push("Integrated by workers (checked by Synorch):", ...view.integrated.map((entry) => `  ${entry.path}${entry.reviewed ? " · independently reviewed" : ""}`));
   return lines;
+}
+
+/** A `git push` with no destructive form (no force, no history rewrite): approving one lets auto push for the session. */
+function isPlainGitPush(argv: readonly string[] | undefined): boolean {
+  if (argv === undefined || argv.length === 0) return false;
+  const classified = classifyCommand(argv, { cwd: ".", writeScope: ["**"], forbidden: [] });
+  return classified.findings.length === 0 && classified.external.length > 0 && classified.external.every((entry) => entry.code === "git-push");
 }
 
 function strings(value: unknown): string[] | undefined {
@@ -695,7 +702,9 @@ class Conversation implements ConversationCommandHost {
 
   /** "Always allow <prefix>" persists a grant; "Allow all edits" switches to auto mode. */
   private async afterDecision(request: ApprovalRequest, decision: ApprovalDecision): Promise<void> {
-    if (decision.decided_by !== "user" || decision.outcome !== "allowed-for-scope" || request.subject_kind !== "action") return;
+    if (decision.decided_by !== "user" || request.subject_kind !== "action") return;
+    if ((decision.outcome === "allowed-once" || decision.outcome === "allowed-for-scope") && isPlainGitPush(request.command)) this.runtime.approveGitPushForSession();
+    if (decision.outcome !== "allowed-for-scope") return;
     const prefix = suggestedCommandPrefix(request.command);
     if (prefix !== undefined) {
       await this.addGrant(prefix, "prompt");
@@ -741,6 +750,12 @@ class Conversation implements ConversationCommandHost {
   /** The trust question at the first repo-code command; resolves true when the user just declined it for this call. */
   private async trustGate(request: ToolCallRequest, signal: AbortSignal): Promise<boolean> {
     const runtime = this.runtime;
+    if (!this.trustAsked && runtime.permissionMode() === "auto" && !runtime.trust.recorded().trusted && runtime.sandbox.enforcement !== "full") {
+      // Owner revision 3: auto trusts the folder for this session without a question; one notice, nothing saved.
+      this.trustAsked = true;
+      this.renderer.render({ kind: "notice", level: "info", message: "Auto mode: trusting this folder for this session (not saved) so commands run without asking; /trust saves it." });
+      return false;
+    }
     if (this.trustAsked || runtime.trust.state().trusted || runtime.sandbox.enforcement === "full") return false;
     if (this.renderer.approvals.availability !== "interactive") return false;
     const argv = strings(request.arguments.argv);

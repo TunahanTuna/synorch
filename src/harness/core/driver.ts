@@ -84,6 +84,8 @@ function toolImage(blob: BlobRef | undefined): Extract<ContentPart, { type: "ima
 
 /** Prefix under which a backend-owned loop sees Synorch's tools (MCP server `synorch`). */
 export const BRIDGE_TOOL_PREFIX = "mcp__synorch__";
+/** Synorch tools a native backend replaces with its own built-ins (Claude Code WebSearch/WebFetch); never offered on its bridge. */
+export const NATIVE_DUPLICATE_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch"]);
 
 /** What a backend permission handler knows about the turn, and how it audits into the turn's log. */
 export interface BackendApprovalContext {
@@ -334,16 +336,19 @@ class FixedAgentDriver implements PausableAgentDriver {
         return { isError: true, text: "the session store is unavailable; the tool call was not executed" };
       }
     };
+    const native = adapter.nativeTools === true;
+    // Native backends (Claude Code native mode) bring their own WebSearch/WebFetch: Synorch's web tools stay off the bridge.
+    const hidden = (name: string): boolean => native && NATIVE_DUPLICATE_TOOLS.has(name);
     const tools: ToolBridge = {
       serverName: "synorch",
-      list: () => this.#deps.tools.visibleTo(input.role, input.policy).filter((tool) => input.reportOnly === undefined || tool.name === input.reportOnly),
+      list: () => this.#deps.tools.visibleTo(input.role, input.policy).filter((tool) => !hidden(tool.name) && (input.reportOnly === undefined || tool.name === input.reportOnly)),
       call: (call, callSignal) => {
+        if (hidden(bridgeToolName(call.name))) return Promise.resolve({ isError: true, text: `${call.name} is not offered here; use Claude Code's built-in WebSearch/WebFetch` });
         const run = chain.then(() => runBridgeCall(call, callSignal));
         chain = run.catch(() => undefined);
         return run;
       },
     };
-    const native = adapter.nativeTools === true;
     const approvals: ApprovalBridge = {
       decide: async (toolName, toolInput, decideSignal) => {
         if (toolName.startsWith(BRIDGE_TOOL_PREFIX)) {

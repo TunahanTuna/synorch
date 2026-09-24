@@ -63,6 +63,13 @@
 - MCP client (harici araçlar, gateway altında).
 - Zamanda yolculuk: oturumun herhangi bir anından fork.
 
+### K4 — Yetenekler: internet ve araç seti (ürün sahibi isteği, 2026-09-24) ⭐
+Ürün sahibi harness'la konuşurken internete çıkamadığını ve bazı yeteneklerin eksik olduğunu fark etti: "yetenekli bir aracımız olsun". Önce araştırma + bağlam, sonra uygulama.
+- **K4.0 Yetenek boşluğu araştırması:** bizim araç setimizi Claude Code, Codex CLI, Oh My Pi/pi, Hermes ile karşılaştır (web arama, web fetch/okuma, tarayıcı otomasyonu, görsel görüntüleme, todo/plan aracı, alt ajan/görev aracı, LSP/diagnostics, arka plan süreçleri ve uzun komutlar, notebook, paket kurulumu, dosya glob/arama, git işlemleri, MCP). Çıktı: `docs/harness/research/capabilities/` + önceliklendirilmiş liste. Ürün sahibi isterse ChatGPT ile ek bağlam (YAML) üretir; ikisi birleştirilir.
+- **K4.1 İnternet:** `web_search` (sağlayıcı yerleşik arama aracı varsa onu — OpenAI Responses `web_search`, Anthropic web search/fetch — yoksa yapılandırılabilir arama sağlayıcısı) ve `web_fetch` (URL → okunur metin/markdown, boyut sınırı, önbellek). Ağ politikası izin modlarına bağlı: auto'da yeni alan adı için onay kartı ("bu alan adı için her zaman izin ver"), full'da serbest, headless'ta allowlist. Web içeriği güvenilmeyen veri olarak işaretlenir (prompt injection koruması); sır sızdırma rayları geçerli.
+- **K4.2 Eksik araçlar:** araştırmanın P0/P1 çıktıları (ör. arka plan komut + çıktı izleme, todo/plan aracı, görsel okuma, LSP/diagnostics, glob).
+- **K4.3 İsteğe bağlı:** tarayıcı otomasyonu (Playwright/CDP) ve MCP üzerinden harici yetenekler (K3 MCP client ile birleşir).
+
 ### Sadeleştirme (K1.5–K3 boyunca)
 - Eski toplu yol: `syn agent --legacy` ve batch `syn run` → yeni çekirdeğe katla; orkestrasyonu `--orchestrate` ile tut.
 - Explorer yalnız orkestrasyonda (session ajanı keşfi kendisi yapar).

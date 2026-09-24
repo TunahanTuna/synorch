@@ -102,6 +102,55 @@ export const WORKSPACE_NAME_LENGTH = 12;
 
 const DEPENDENCY_NAMES: ReadonlySet<string> = new Set(DEPENDENCY_LINK_DIRECTORIES);
 
+/**
+ * Generated output directories (P0-A): dependency installs, build output and tool caches. Outside a
+ * git root (where `git check-ignore` cannot answer) a scoped snapshot never walks them, so they never
+ * enter an artifact, its digest, the changed ⊆ owned check, a review or an integration; inside a git
+ * root the ignore rules decide instead (a tracked `build/` stays visible).
+ */
+export const GENERATED_DIRECTORY_NAMES: ReadonlySet<string> = new Set([
+  ...DEPENDENCY_LINK_DIRECTORIES,
+  "dist",
+  "build",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+  ".turbo",
+  ".parcel-cache",
+  ".vite",
+  ".cache",
+  "coverage",
+  ".nyc_output",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".gradle",
+]);
+
+/** True when an owned pattern names something at or below `directory` (its literal prefix is inside it), not merely overlaps it (`test/**` does not own `test/node_modules`). */
+function ownsInside(ownedPaths: readonly string[], directory: string, platform: NodeJS.Platform): boolean {
+  return ownedPaths.some((pattern) => {
+    const literal: string[] = [];
+    for (const segment of pattern.split("/")) {
+      if (/[*?[\]{}]/.test(segment)) break;
+      literal.push(segment);
+    }
+    const prefix = literal.join("/");
+    return prefix !== "" && isAtOrBelow(prefix, directory, platform);
+  });
+}
+
+/** True when `relative` lies inside a generated directory (`GENERATED_DIRECTORY_NAMES`) that no owned path names. */
+export function inGeneratedDirectory(relative: string, ownedPaths: readonly string[], platform: NodeJS.Platform): boolean {
+  const segments = relative.split("/");
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    if (!GENERATED_DIRECTORY_NAMES.has(segments[index] ?? "")) continue;
+    return !ownsInside(ownedPaths, segments.slice(0, index + 1).join("/"), platform);
+  }
+  return false;
+}
+
 export interface ArtifactChange {
   readonly path: string;
   readonly before: Digest | null;
@@ -467,15 +516,17 @@ async function walkTree(root: string, limit: number, options: WalkOptions = {}):
 
 /**
  * Directories a scoped snapshot never walks: `.git` (except config/hooks), the ignored directories
- * git reports (`skipDirs`) and dependency directories by name, unless an owned path overlaps them.
+ * git reports (`skipDirs`) and generated directories by name (dependency directories in a git root,
+ * `GENERATED_DIRECTORY_NAMES` outside one), unless an owned path names something inside them.
  */
-function scopedSkipRule(skipDirs: readonly string[], ownedPaths: readonly string[], platform: NodeJS.Platform): (relative: string, name: string) => boolean {
+function scopedSkipRule(skipDirs: readonly string[], ownedPaths: readonly string[], platform: NodeJS.Platform, gitRoot: boolean): (relative: string, name: string) => boolean {
   const key = (value: string): string => (isCaseInsensitivePlatform(platform) ? foldPathCase(value) : value);
   const skipped = new Set(skipDirs.map(key));
+  const names = gitRoot ? DEPENDENCY_NAMES : GENERATED_DIRECTORY_NAMES;
   return (relative, name) => {
     if (name === ".git") return true;
     if (skipped.has(key(relative))) return true;
-    return DEPENDENCY_NAMES.has(name) && !ownedPaths.some((owned) => pathPatternsOverlap(owned, relative));
+    return names.has(name) && !ownsInside(ownedPaths, relative, platform);
   };
 }
 
@@ -569,7 +620,7 @@ class ScopedSnapshot implements Baseline {
     return walkTree(this.root, SCOPED_SNAPSHOT_LIMITS.maxEntries, {
       excluded: path.dirname(this.directory),
       watchGitConfig: true,
-      skipDirectory: scopedSkipRule(this.skipDirs, this.ownedPaths, this.platform),
+      skipDirectory: scopedSkipRule(this.skipDirs, this.ownedPaths, this.platform, this.git !== undefined),
     });
   }
 
@@ -674,7 +725,16 @@ class ScopedSnapshot implements Baseline {
       if (record === undefined || record.signature !== signed.signature) changed.push(entry.relative);
     }
     for (const relative of this.records.keys()) if (!seen.has(relative)) changed.push(relative);
-    return changed;
+    if (this.git === undefined) return changed;
+    // New entries git ignores (build output, caches created during the attempt) are generated, not
+    // part of the artifact; an owned literal file is always kept (B8).
+    const fresh = changed.filter((relative) => !this.records.has(relative) && !this.ownedPaths.some((pattern) => isLiteralPattern(pattern) && pattern === relative));
+    // An ignored write outside the owned paths (a stray `.env`) stays visible so integrate refuses it (SEC-M1).
+    const ignored = await gitIgnoredSubset(this.git.runner, this.root, fresh).catch(() => new Set<string>());
+    const generated = new Set(
+      fresh.filter((relative) => inGeneratedDirectory(relative, this.ownedPaths, this.platform) || (ignored.has(relative) && matchesAny(relative, this.ownedPaths, this.platform))),
+    );
+    return generated.size === 0 ? changed : changed.filter((relative) => !generated.has(relative));
   }
 
   public async markIntegrated(): Promise<void> {
@@ -1075,7 +1135,14 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
           }
         }
         flagged = nextFlagged;
-        return [...found].filter((relative) => !excludedPrefixes.some((prefix) => isAtOrBelow(relative, prefix, platform)));
+        const kept: string[] = [];
+        for (const relative of found) {
+          if (excludedPrefixes.some((prefix) => isAtOrBelow(relative, prefix, platform))) continue;
+          // A new file inside an unignored generated directory (build output, caches) is not part of the artifact.
+          if (inGeneratedDirectory(relative, owned, platform) && !seeded.has(relative) && (await content(relative)) === null) continue;
+          kept.push(relative);
+        }
+        return kept;
       },
       flagged: () => flagged,
     };
@@ -1251,7 +1318,7 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
           ? (await gitIgnoredEntries(git, deps.workspaceRoot, signal))
               .filter((entry) => entry.endsWith("/"))
               .map((entry) => entry.replace(/\/+$/, ""))
-              .filter((relative) => relative.length > 0 && !owned.some((pattern) => pathPatternsOverlap(pattern, relative)))
+              .filter((relative) => relative.length > 0 && !ownsInside(owned, relative, platform))
           : [];
         // Clean tracked files outside the owned paths are restored from the base commit (checkout
         // form, digest-verified) instead of copied; owned files always keep a copy.

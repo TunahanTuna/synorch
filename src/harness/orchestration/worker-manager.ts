@@ -909,8 +909,11 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     };
   };
 
+  /** P0-A: per task, the last passing run of each verification command (see `isInstallCommand`). */
+  const verificationCache = new Map<TaskId, Map<string, CachedVerification>>();
+
   /** ADR-18 D1: the harness runs the packet's verification commands itself and records each run. */
-  const runHarnessVerification = async (record: AttemptRecord, changeSet: ChangeSet, signal: AbortSignal): Promise<HarnessEvidence> => {
+  const runHarnessVerification = async (record: AttemptRecord, changeSet: ChangeSet, signal: AbortSignal): Promise<{ readonly harness: HarnessEvidence; readonly changeSet: ChangeSet }> => {
     const diff =
       changeSet.changes.length === 0
         ? undefined
@@ -920,16 +923,30 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
           };
     const runner = deps.verification;
     const verification: HarnessVerification[] = [];
+    const cache = verificationCache.get(record.taskId) ?? new Map<string, CachedVerification>();
+    verificationCache.set(record.taskId, cache);
+    const scoped = record.workspace.mode === "scoped-dir";
+    const manifests = manifestFingerprint(changeSet);
+    let ranCommand = false;
+    const passedCommands: string[] = [];
     if (runner !== undefined) {
       for (const [position, command] of record.packet.verification.commands.slice(0, 100).entries()) {
         const started = Date.now();
         const argv = commandArgv(command);
+        const install = argv !== undefined && argv.length > 0 && isInstallCommand(argv);
+        const cached = cache.get(command);
+        const sameTree = cached !== undefined && (cached.attemptId === record.attemptId || (scoped && cached.scoped && cached.root === record.workspace.root));
+        const reusable = cached !== undefined && sameTree && (install ? cached.manifests === manifests : cached.artifact === changeSet.artifactDigest);
         let result: VerificationResult;
-        if (argv === undefined || argv.length === 0) {
+        if (reusable && argv !== undefined && argv.length > 0) {
+          const why = install ? "the dependency manifests are unchanged" : "the artifact is unchanged";
+          result = { status: "passed", termination: "exited", exitCode: 0, output: `(reused) passed earlier in this task (${cached.ref}); ${why}, so the harness did not run it again`, durationMs: 0 };
+        } else if (argv === undefined || argv.length === 0) {
           result = { status: "not-run", exitCode: null, output: "", durationMs: 0, reason: "the command uses shell syntax and cannot be run as a plain argv" };
         } else if (signal.aborted) {
           result = { status: "not-run", exitCode: null, output: "", durationMs: 0, reason: "the attempt was cancelled" };
         } else {
+          ranCommand = true;
           try {
             result = await runner({
               command,
@@ -972,6 +989,10 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
           },
           { taskId: record.taskId, attemptId: record.attemptId, actor: { kind: "system" } },
         );
+        if (normalized.status === "passed" && !reusable) {
+          cache.set(command, { attemptId: record.attemptId, root: record.workspace.root, scoped, artifact: changeSet.artifactDigest, manifests, ref: `${recorder.log.sessionId}#${event.seq}` });
+        } else if (normalized.status !== "passed") cache.delete(command);
+        if (normalized.status === "passed") passedCommands.push(command);
         verification.push({
           ordinal: position + 1,
           command: command.slice(0, 4000),
@@ -989,7 +1010,25 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         });
       }
     }
-    return { verification, ...(diff === undefined ? {} : { diff }) };
+    if (!ranCommand) return { harness: { verification, ...(diff === undefined ? {} : { diff }) }, changeSet };
+    // P0-A: a verification command may write non-ignored outputs (an install's lockfile): the verified
+    // state is the one pinned, reviewed and integrated, so a later integrate never sees a moved artifact.
+    const verified = await record.workspace.changeSet(new AbortController().signal);
+    if (verified.artifactDigest === changeSet.artifactDigest) return { harness: { verification, ...(diff === undefined ? {} : { diff }) }, changeSet };
+    const verifiedManifests = manifestFingerprint(verified);
+    for (const command of passedCommands) {
+      const entry = cache.get(command);
+      if (entry !== undefined) cache.set(command, { ...entry, artifact: verified.artifactDigest, manifests: verifiedManifests });
+    }
+    return {
+      harness: {
+        verification,
+        ...(verified.changes.length === 0
+          ? {}
+          : { diff: { evidence: { kind: "harness-diff" as const, ref: verified.artifactDigest, produced_by: "harness" as const }, changed_paths: verified.changes.map((change) => change.path) } }),
+      },
+      changeSet: verified,
+    };
   };
 
   const assemble = async (
@@ -1138,7 +1177,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     let cancelledReason: string | undefined;
     let rounds = 0;
     for (;;) {
-      const changeSet = await record.workspace.changeSet(new AbortController().signal);
+      let changeSet = await record.workspace.changeSet(new AbortController().signal);
       record.changeSet = changeSet;
       let stale: readonly string[] | undefined;
       if (execution.outcome?.outcome !== "cancelled") {
@@ -1155,7 +1194,13 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       const turnEnded = execution.error === undefined && (execution.outcome?.outcome === "completed" || execution.outcome?.outcome === "max_steps");
       const claimedStatus = claim.ok ? claim.claim.status : undefined;
       const verifies = turnEnded && stale === undefined && cancelledReason === undefined && claimedStatus !== "needs_context" && claimedStatus !== "blocked" && claimedStatus !== "failed";
-      record.harness = verifies ? await runHarnessVerification(record, changeSet, controller.signal) : undefined;
+      record.harness = undefined;
+      if (verifies) {
+        const verified = await runHarnessVerification(record, changeSet, controller.signal);
+        record.harness = verified.harness;
+        changeSet = verified.changeSet;
+        record.changeSet = changeSet;
+      }
       completion = await assemble(record, execution, changeSet, claim, stale, cancelledReason);
       if (completion.status !== "completed" || stale !== undefined || cancelledReason !== undefined) break;
       const check = await verifyCompletion(record.packet, completion, indexFor(record, changeSet, record.workspace.root, execution.log), platform);
@@ -1535,6 +1580,64 @@ function normalizeVerification(result: VerificationResult): VerificationResult {
   }
   const passed = result.termination === "exited" && result.exitCode === 0;
   return { status: passed ? "passed" : "failed", termination: result.termination, exitCode: result.exitCode, output: result.output, durationMs: result.durationMs, ...(result.commandClass === undefined ? {} : { commandClass: result.commandClass }) };
+}
+
+/**
+ * P0-A verification cost: dependency-install commands. Within one task's attempt chain an install
+ * that passed is reused (not re-run) while the dependency manifests are unchanged and the
+ * installed tree is still there (same attempt, or the same in-place scoped-dir workspace).
+ */
+const INSTALL_COMMAND =
+  /^(?:(?:npm|pnpm|yarn|bun)(?:\s+(?:install|i|ci|add)\b.*)?|(?:pip3?|python3?\s+-m\s+pip)\s+install\b.*|(?:uv|poetry|pipenv)\s+(?:sync|install|pip\s+install)\b.*|bundle\s+install\b.*|composer\s+install\b.*|go\s+mod\s+download\b.*|cargo\s+fetch\b.*|dotnet\s+restore\b.*)$/i;
+const DEPENDENCY_MANIFESTS: ReadonlySet<string> = new Set([
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "yarn.lock",
+  "bun.lockb",
+  "bun.lock",
+  "requirements.txt",
+  "requirements-dev.txt",
+  "pyproject.toml",
+  "uv.lock",
+  "poetry.lock",
+  "Pipfile",
+  "Pipfile.lock",
+  "Gemfile",
+  "Gemfile.lock",
+  "composer.json",
+  "composer.lock",
+  "go.mod",
+  "go.sum",
+  "Cargo.toml",
+  "Cargo.lock",
+]);
+
+export function isInstallCommand(argv: readonly string[]): boolean {
+  const [first, second] = argv;
+  if (first === undefined) return false;
+  const tool = path.basename(first).replace(/\.(?:cmd|exe|bat)$/i, "").toLowerCase();
+  if (["npm", "pnpm", "yarn", "bun"].includes(tool) && second === undefined) return tool !== "npm" && tool !== "bun";
+  return INSTALL_COMMAND.test([tool, ...argv.slice(1)].join(" "));
+}
+
+function manifestFingerprint(changeSet: ChangeSet): string {
+  return changeSet.changes
+    .filter((change) => DEPENDENCY_MANIFESTS.has(change.path.split("/").at(-1) ?? ""))
+    .map((change) => `${change.path}:${change.after ?? "-"}`)
+    .sort()
+    .join("|");
+}
+
+interface CachedVerification {
+  readonly attemptId: AttemptId;
+  readonly root: string;
+  readonly scoped: boolean;
+  readonly artifact: Digest;
+  readonly manifests: string;
+  readonly ref: string;
 }
 
 class StaleInFlight extends Error {

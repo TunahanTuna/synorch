@@ -89,14 +89,18 @@ test("plan validation rejects commands on an explorer and names the task that ca
 test("reviewer plan tasks must depend on standard/high-risk work; a sound plan passes", () => {
   const lone = validatePlan(candidate([{ key: "review", role: "reviewer" }]), EXPECTED);
   assert.ok(!lone.ok && lone.issues.some((issue) => /add depends_on/.test(issue)));
-  const trivial = validatePlan(
-    candidate([
-      { key: "fix", role: "implementer", owned_paths: ["src/a.js"], risk: "trivial" },
-      { key: "review", role: "reviewer", depends_on: ["fix"] },
-    ]),
-    EXPECTED,
-  );
+  const trivialPlan = candidate([
+    { key: "fix", role: "implementer", owned_paths: ["src/a.js"], risk: "trivial" },
+    { key: "review", role: "reviewer", depends_on: ["fix"], verification: ["node check.mjs"] },
+  ]);
+  const trivial = validatePlan(trivialPlan, EXPECTED, { proportionalReview: false });
   assert.ok(!trivial.ok && trivial.issues.some((issue) => /depends on fix, which is trivial/.test(issue)));
+  // P0-A (default): the unwarranted reviewer task is dropped instead; its verification moves to fix.
+  const dropped = validatePlan(trivialPlan, EXPECTED);
+  assert.ok(dropped.ok, dropped.ok ? "" : dropped.issues.join("\n"));
+  assert.deepEqual(dropped.plan.tasks.map((task) => task.key), ["fix"]);
+  assert.deepEqual(dropped.plan.tasks[0]?.verification, ["node check.mjs"]);
+  assert.ok(dropped.notes?.some((note) => /Dropped reviewer task review/.test(note)));
   const sound = validatePlan(
     candidate([
       { key: "explore", role: "explorer", acceptance_criteria: [{ id: "AC-1", statement: "the node module that computes add is found" }] },

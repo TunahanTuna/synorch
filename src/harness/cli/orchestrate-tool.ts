@@ -46,9 +46,9 @@ export function createOrchestrateSlot(): OrchestrateSlot {
 
 const DESCRIPTION = [
   "Run a large or multi-part change with parallel workers: the harness plans it, shows the plan, runs workers in their own worktrees,",
-  "verifies with the project's checks and has an independent reviewer accept the result before it is applied. Use it only when the work",
-  "is big (about 5+ files, 2+ independent areas, high risk, or more than fits one context) or the user asks for workers/parallel work;",
-  "otherwise do the work directly. goal: the outcome; reason: one sentence the user sees for why workers help; brief: decisions,",
+  "verifies with the project's checks and, where the change warrants it, has an independent reviewer accept the result before it is applied.",
+  "Call it directly (no separate approval turn first): the harness shows the plan and handles approval for the permission mode.",
+  "goal: the outcome; reason: one sentence the user sees for why workers help; brief: decisions,",
   "constraints and the plan discussed so far. It runs until the workers finish and returns a result block to report from.",
 ].join(" ");
 

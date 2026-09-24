@@ -189,7 +189,8 @@ export async function trustWorkspace(sandbox: Sandbox): Promise<void> {
 }
 
 export function overridesFor(sandbox: Sandbox, extra: RuntimeOverrides = {}): RuntimeOverrides {
-  return { home: sandbox.home, configCeiling: sandbox.root, sandbox: TEST_SANDBOX, credentialStore: () => createMemoryCredentialStore(), ...extra };
+  // Strict review by default: these runs exercise the review machinery; pass `limits: { review: "proportional" }` for the runtime default.
+  return { home: sandbox.home, configCeiling: sandbox.root, sandbox: TEST_SANDBOX, credentialStore: () => createMemoryCredentialStore(), ...extra, limits: { review: "always", ...extra.limits } };
 }
 
 export function toolResultIds(request: ModelRequest): string[] {

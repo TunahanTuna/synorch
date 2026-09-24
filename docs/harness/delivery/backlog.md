@@ -20,6 +20,20 @@
 | K0 | Sohbet öncelikli `syn agent` (anında cevap, doğrudan düzenleme, `/undo`, `/allow`) — ürün sahibi onayladı | `2c51679` |
 | K1 (sürüyor) | U1 giriş (palet, @dosya, görsel, mouse, model seçici) ✅ `7c0c7c2` · U3 görünümler (pano, graf, usage, kartlar) ✅ `1cab7ec` · U2 oturum özellikleri ✅ `73f834f` → deneme bekliyor | |
 
+## 🔥 P0 — YARIN İLK İŞ: Orantılılık ve hız (ürün sahibi testi, 2026-09-25)
+Ürün sahibi aynı işi ("boş bir React projesi oluştur") ChatGPT'nin harness'ına ve bize verdi: ChatGPT 2 dk 21 sn, Synorch 9 dk+ ve bitmedi. Kayıtlar (`C:\temp\Yeni klasör`, run `run_01M3AKRA9EQ0X4VP4PTKZFFRD7` failed + `run_01M3AM498W7VJXWX3QT486312W`):
+1. Session agent tek komutluk işi doğrudan yapmak yerine orkestrasyon açtı (iki run: plan + "onaylanan planı uygula").
+2. Tek görevli plana zorunlu bağımsız reviewer eklendi (risk "standard").
+3. Harness doğrulaması her deneme/onarım/revize turunda `npm install` + `npm run build` koştu.
+4. Reviewer `node_modules`/`dist` (gitignore'lu üretilmiş dosyalar) yüzünden "changes requested" dedi.
+5. İkinci review "artifact changed during review" ile düştü (reviewer'ın build'i `dist`'i değiştirdi).
+Hedefler:
+- **Orantılılık:** session agent basit/tek adımlı işleri (scaffold, tek dosya, komut çalıştırma) doğrudan yapar; `orchestrate` yalnız gerçekten çok parçalı ve paralelleşebilir işte; tek görevli planı orkestrasyona çevirmek reddedilir → doğrudan yapılır. Planı "onaylat → ayrı run" iki aşamalılığı kaldır.
+- **Risk sınıflaması ve review:** araçla üretilmiş scaffold / tek görevli / trivial işlerde bağımsız review yok (harness doğrulaması yeterli); review yalnız anlamlı kod değişikliği olan standard+ işte.
+- **Üretilmiş dosyalar:** gitignore'lu çıktılar (`node_modules`, `dist`, `build`, cache'ler) artifact digest'ine, diff'e, review'a ve "changed ⊆ owned" kontrolüne girmez; reviewer'ın doğrulaması artifact'ı değiştirmez (yalnız izlenen dosyalar sabitlenir).
+- **Doğrulama maliyeti:** kurulum komutları (`npm install` vb.) attempt başına bir kez, sonraki turlarda önbellek/yeniden kullanım; doğrulama paralel ve kısa tutulur.
+- **Ölçüt:** "boş React projesi" ≤ ChatGPT harness süresi (~2,5 dk, çoğu `npm install`); gerçek modelle ölçülür.
+
 ## Sıradaki dalgalar (öncelik sırasıyla)
 
 ### K1 — Günlük kullanım hissi (sürüyor)

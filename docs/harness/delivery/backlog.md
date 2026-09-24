@@ -26,7 +26,7 @@
 - U2: çalışırken yön verme, plan modu (policy daraltma), `orchestrate` aracı + canlı pano verisi, tek komut kaydı (`/help /plan /model /review /commit /undo /allow /trust /usage /evidence /why /compact /context /resume /memory /mouse`), kullanım istatistikleri + kota %, ekler (dosya/görsel → model), "kaldığın yerden devam" özeti.
 - Entegrasyon → ürün sahibi denemesi.
 
-### K1.5 — Ürün sahibinin 2026-09-24 istekleri (K1 testinden hemen sonra) ⭐
+### K1.5 — Ürün sahibinin 2026-09-24 istekleri ⭐ — altyapı ✅ (2026-09-24 akşam: `1112be2` görseller + kota, `7f54568` çapraz sağlayıcı katalog/routing + Claude Code köprüsü worker, `7e54328`/`c80c0a6` `syn config` + `/config` + init'siz + full'da yıkıcı → onay). Bekleyen: gerçek Claude Code ile doğrulama (`--model claude-opus-5-5`, MCP rapor araçları, `--resume`, görsel, abonelik `apiKeySource`), Codex models listesi formatı.
 0. **K1.6 ✅ (2026-09-24, `4d71fa4` + `848894a`):** Claude Code tarzı izin modları (ask/auto/full/plan, Shift+Tab, `/permissions`, reddetmek yerine sor); reviewer'lar workspace'in tamamını okur; görevler arası ölçütler entegrasyon review'una; ret yerine revize turu; çift basılan pano düzeltmesi.
 0. **K1.7 — Worker'ların içine girme (ürün sahibi isteği, 2026-09-24) ⭐ ayrıştırıcı:**
    - Pano ve graf görünümünde worker seçimi: `↑/↓` (veya `j/k`), grafta `←/→` ile seviyeler arası; seçili worker vurgulanır.

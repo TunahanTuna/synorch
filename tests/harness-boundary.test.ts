@@ -56,7 +56,13 @@ const ALLOWED_HARNESS_DEPENDENCIES: { readonly [M in HarnessModule]: readonly Ha
  * no `.ai/` (one source of truth for what `syn init` writes and what the runtime assumes). Only
  * `cli` may import it; every other harness module still sees `contracts` and `src/domain` only.
  */
-const CLI_EXTRA_SOURCES: readonly string[] = [path.join(SRC, "templates", "structure-templates.ts")];
+// The composition root reuses the legacy discovery and init engines (zero-config project profile, `/init`).
+const CLI_EXTRA_SOURCES: readonly string[] = [
+  path.join(SRC, "templates", "structure-templates.ts"),
+  path.join(SRC, "application", "project-discovery.ts"),
+  path.join(SRC, "application", "structure-service.ts"),
+  path.join(SRC, "infrastructure", "file-system.ts"),
+];
 
 const HARNESS_CLI_ENTRY = "./harness/cli/index.ts";
 const PI_TUI_PACKAGE = "@earendil-works/pi-tui";

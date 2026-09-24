@@ -18,6 +18,7 @@ import { pruneOrphanedAttempts } from "../orchestration/index.ts";
 import { createSessionStore } from "../store/index.ts";
 import { probeSandbox } from "../tools/index.ts";
 import { describeCanonical, describeProfiles } from "./canonical.ts";
+import { profileHeaderLine, profileSummaryLines } from "./project-profile.ts";
 import { resolveHome } from "./config.ts";
 import { failureInfo } from "./outcome.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
@@ -32,7 +33,7 @@ import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts
 export type CheckStatus = "ok" | "warn" | "fail";
 
 export interface DoctorCheck {
-  readonly id: "node" | "terminal" | "config" | "canonical" | "sandbox" | "trust" | "store" | "auth" | "capabilities" | "models" | "probe-model";
+  readonly id: "node" | "terminal" | "config" | "canonical" | "profile" | "sandbox" | "trust" | "store" | "auth" | "capabilities" | "models" | "probe-model";
   readonly status: CheckStatus;
   readonly summary: string;
   readonly details: readonly unknown[];
@@ -106,6 +107,18 @@ function canonicalCheck(runtime: Runtime): DoctorCheck {
         diagnostics: canonical.diagnostics,
       },
     ],
+  };
+}
+
+/** The zero-config project profile the session and every worker receive (detected, cached in the user scope). */
+async function profileCheck(runtime: Runtime): Promise<DoctorCheck> {
+  const profile = await runtime.profile.ready;
+  if (profile === undefined) return { id: "profile", status: "warn", summary: "the project profile could not be detected", details: [] };
+  return {
+    id: "profile",
+    status: "ok",
+    summary: `${profileHeaderLine(profile).replace(/^Synorch ready · /, "")} (cache ${runtime.profile.file})`,
+    details: [{ lines: profileSummaryLines(profile), profile }],
   };
 }
 
@@ -304,7 +317,10 @@ async function probeModels(runtime: Runtime, signal: AbortSignal): Promise<Docto
 
 function renderHuman(report: DoctorReport): string {
   const lines = ["Synorch runtime doctor", `home ${report.home}`];
-  for (const check of report.checks) lines.push(`${check.status.toUpperCase().padEnd(5)} ${check.id.padEnd(13)} ${check.summary}`);
+  for (const check of report.checks) {
+    lines.push(`${check.status.toUpperCase().padEnd(5)} ${check.id.padEnd(13)} ${check.summary}`);
+    if (check.id === "profile") for (const detail of check.details as { lines?: string[] }[]) for (const line of detail.lines ?? []) lines.push(`${" ".repeat(20)}${line}`);
+  }
   if (report.network_requests === "none") lines.push("No network request was made (use --probe-model to send one request per route).");
   return `${lines.join("\n")}\n`;
 }
@@ -326,6 +342,7 @@ export async function doctorRuntime(io: DoctorIO, target: string | undefined, pr
       details: [...runtime.config.files, ...warnings],
     });
     checks.push(canonicalCheck(runtime));
+    checks.push(await profileCheck(runtime));
   } catch (error) {
     checks.push({ id: "config", status: "fail", summary: failureInfo(error).message, details: [] });
   }

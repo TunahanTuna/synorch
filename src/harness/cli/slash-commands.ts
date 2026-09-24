@@ -212,6 +212,8 @@ export interface ConversationCommandHost {
   graph(): Promise<void>;
   /** `/config [key [value]]`: the settings screen, or read / set one key (user configuration). */
   config(argument: string): Promise<void>;
+  /** `/init [--yes]`: materialize the Synorch `.ai/` structure into the repository (preview first). */
+  init(argument: string): Promise<void>;
 }
 
 export interface SlashCommand {
@@ -249,7 +251,8 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/context", description: "why this context: instructions, skills, memory, files and history the model received, with token estimates", whileBusy: true, run: (host, argument) => host.report("context", argument) },
   { name: "/clear", description: "start a fresh conversation (this one stays resumable)", run: (host) => host.clear() },
   { name: "/resume", argsHint: "[n | session id]", description: "list recent conversations or switch to one", run: (host, argument) => host.resume(argument) },
-  { name: "/memory", argsHint: "[review | edit <id> | retire <id> | open [id] | graph]", description: "memory ledger and decision desk: what Synorch remembers, proposals to accept / edit / reject / defer", whileBusy: true, run: (host, argument) => host.report("memory", argument) },
+  { name: "/init", argsHint: "[--yes]", description: "write the Synorch .ai/ structure into this repo to customize it (preview first; never needed to use Synorch)", run: (host, argument) => host.init(argument) },
+  { name: "/memory", argsHint: "[init | review | edit <id> | retire <id> | open [id] | graph]", description: "memory ledger and decision desk: what Synorch remembers, proposals to accept / edit / reject / defer", whileBusy: true, run: (host, argument) => host.report("memory", argument) },
   { name: "/mouse", argsHint: "[on|off]", description: "toggle mouse capture (scroll / select)", whileBusy: true, rendererLocal: true, run: (host, argument) => host.mouse(argument) },
   { name: "/diff", description: "files changed by Synorch in this conversation", whileBusy: true, run: (host, argument) => host.report("diff", argument) },
   { name: "/ps", argsHint: "[kill <handle|all>]", description: "background processes (dev servers, watchers); stop one or all", whileBusy: true, run: (host, argument) => host.ps(argument) },

@@ -206,10 +206,11 @@ export const PLAN_FORMAT = [
   "A task's criteria must be checkable from its own files; criteria about other tasks' files or the combined result go on the integration reviewer task. You never implement anything yourself.",
 ].join("\n");
 
-export function renderPlanningPrompt(input: PlannerInput): string {
+export function renderPlanningPrompt(input: PlannerInput, projectHint?: string): string {
   return [
     `Goal: ${input.goal}`,
     `Workspace: ${input.workspaceRoot} (policy mode ${input.mode}).`,
+    projectHint ?? "",
     "Plan the work as a task DAG for workers. Explore first when the codebase is unknown; for a small, well-located change an explorer is optional.",
     renderRoleCapabilityTable(),
     PLAN_FORMAT,
@@ -223,6 +224,8 @@ export interface ModelPlannerDependencies {
   readonly createDriver: (events: EventStore) => AgentDriver;
   readonly blobs: BlobStore;
   readonly maxSteps?: number;
+  /** The detected project's real commands (zero-config profile), so plan verification uses existing scripts. */
+  readonly projectHint?: () => string | undefined;
 }
 
 export function createModelPlanner(deps: ModelPlannerDependencies): Planner {
@@ -238,7 +241,7 @@ export function createModelPlanner(deps: ModelPlannerDependencies): Planner {
           route: input.route,
           policy: input.policy,
           packet: undefined,
-          userMessage: renderPlanningPrompt(input),
+          userMessage: renderPlanningPrompt(input, deps.projectHint?.()),
           trigger: "orchestrator",
           maxSteps: deps.maxSteps ?? 20,
         },

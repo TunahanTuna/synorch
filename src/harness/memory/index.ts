@@ -16,7 +16,18 @@ export { createMemoryCommand, MEMORY_SUBCOMMANDS, memoryCommand, type MemoryComm
 export { createSystemObsidianLauncher, obsidianOpenUri, type ObsidianLauncher } from "./obsidian.ts";
 export { redactSecrets, REDACTED } from "./redaction.ts";
 export { candidateToProposal, findCandidates, INACTIVE_STATUSES, type MemoryCandidate } from "./relations.ts";
-export { KIND_DIRECTORIES, readGitBranch, resolveMemoryRoot } from "./vault.ts";
+export { ensureVaultScaffold, KIND_DIRECTORIES, readGitBranch, resolveMemoryRoot } from "./vault.ts";
+export {
+  bootstrapId,
+  bootstrapProjectMemory,
+  bootstrapSummary,
+  memoryBootstrapped,
+  type BootstrapEvidence,
+  type BootstrapNote,
+  type BootstrapProposal,
+  type BootstrapResult,
+  type ProjectFacts,
+} from "./bootstrap.ts";
 export {
   buildProposal,
   ledgerSummary,

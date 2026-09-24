@@ -98,6 +98,7 @@ import type { RouteOverride } from "./args.ts";
 import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts";
 import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
 import { withRoleDefinitions } from "./role-policy.ts";
+import { plannerHint, renderProfileBlock, startProjectProfile, within, type ProjectProfileHandle } from "./project-profile.ts";
 import { createOrchestrateSlot, createOrchestrateTool, type OrchestrateSlot } from "./orchestrate-tool.ts";
 import { loadScript } from "./scripted-script.ts";
 import { recordTrustDecision } from "./trust.ts";
@@ -169,6 +170,8 @@ export interface Runtime {
   readonly config: RuntimeConfig;
   /** The target repository's canonical `.ai/` structure (or the built-in defaults) fed to context and policy. */
   readonly canonical: CanonicalStructure;
+  /** Zero-config project profile (stack, package manager, commands), loaded in the background from the user-scope cache. */
+  readonly profile: ProjectProfileHandle;
   readonly sessions: SessionStore;
   readonly blobs: BlobStore;
   readonly router: ModelRouter;
@@ -512,6 +515,12 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   };
 
   const canonical = await loadCanonicalStructure(workspaceRoot);
+  // Never awaited here: the first token must not wait for a cold detection (cached profiles load in ms).
+  const profile = startProjectProfile(home, projectId, workspaceRoot);
+  const profileText = async (): Promise<string | undefined> => {
+    const known = profile.current() ?? (await within(profile.ready, 1_500));
+    return known === undefined ? undefined : renderProfileBlock(known);
+  };
   const trustStore = createWorkspaceTrustStore(home, { platform });
   const stored = trustStore.status(workspaceRoot);
   let trustState: WorkspaceTrustState = !stored.trusted && options.trustWorkspace === true ? { ...stored, trusted: true, source: "flag", reason: undefined } : stored;
@@ -604,6 +613,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     budget: budgetGate,
     compactor: createCompactor({ blobs, writerFor: (sessionId) => writers.get(sessionId) }),
     platform,
+    projectProfile: profileText,
   });
 
   /**
@@ -673,6 +683,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     policyMode: options.policyMode,
     config,
     canonical,
+    profile,
     sessions,
     blobs,
     router,
@@ -745,7 +756,14 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         router,
         policy,
         approvals: broker,
-        planner: createModelPlanner({ createDriver: driverFor, blobs }),
+        planner: createModelPlanner({
+          createDriver: driverFor,
+          blobs,
+          projectHint: () => {
+            const known = profile.current();
+            return known === undefined ? undefined : plannerHint(known);
+          },
+        }),
         sandbox,
         createWorkers: createWorkerFactory({
           sessions,

@@ -116,6 +116,11 @@ export class WorkerStreamHub implements WorkerStreamSource {
     }
     this.#buffer(recorded);
     this.#emitTo((subscriber) => subscriber.sessionId === recorded.session_id, event);
+    // The attempt's driver took a queued steer into its next step: the assignment shows it delivered.
+    if (recorded.type === "steer/queued") {
+      const track = this.#taskOfSession(recorded.session_id);
+      if (track !== undefined) for (const subscriber of this.#subscribers) if (subscriber.taskId === track.taskId) this.#sendAssignment(subscriber);
+    }
   }
 
   /** Delivers the assignment and the current attempt's past events synchronously, then live events; an unknown key delivers nothing until it appears. */
@@ -151,8 +156,19 @@ export class WorkerStreamHub implements WorkerStreamSource {
   }
 
   #isAttemptSession(sessionId: string): boolean {
-    for (const track of this.#tasks.values()) if (track.attempts.some((attempt) => attempt.sessionId === sessionId)) return true;
-    return false;
+    return this.#taskOfSession(sessionId) !== undefined;
+  }
+
+  #taskOfSession(sessionId: string): TaskTrack | undefined {
+    for (const track of this.#tasks.values()) if (track.attempts.some((attempt) => attempt.sessionId === sessionId)) return track;
+    return undefined;
+  }
+
+  /** Steer texts the task's attempt drivers took into a step (`steer/queued` in the attempt sessions). */
+  #consumedSteers(track: TaskTrack): Set<string> {
+    const texts = new Set<string>();
+    for (const attempt of track.attempts) for (const event of this.#sessions.get(attempt.sessionId) ?? []) if (event.type === "steer/queued") texts.add(event.data.text);
+    return texts;
   }
 
   #track(taskId: string, key: string): void {
@@ -190,7 +206,11 @@ export class WorkerStreamHub implements WorkerStreamSource {
   #sendAssignment(subscriber: Subscriber): void {
     const track = subscriber.taskId === undefined ? undefined : this.#tasks.get(subscriber.taskId);
     const assignment = track === undefined ? undefined : this.assignments?.(track.key);
-    if (assignment !== undefined) this.#safe(subscriber, { kind: "assignment", assignment });
+    if (track === undefined || assignment === undefined) return;
+    const pending = assignment.steering.some((note) => note.delivered === false);
+    const consumed = pending ? this.#consumedSteers(track) : new Set<string>();
+    const steering = pending ? assignment.steering.map((note) => (note.delivered === false && consumed.has(note.text) ? { ...note, delivered: true } : note)) : assignment.steering;
+    this.#safe(subscriber, { kind: "assignment", assignment: pending ? { ...assignment, steering } : assignment });
   }
 
   #follow(subscriber: Subscriber, sessionId: string): void {

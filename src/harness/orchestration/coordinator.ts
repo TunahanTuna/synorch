@@ -1045,6 +1045,13 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
           entry.summary = completion.summary;
           entry.failure = workers.attempt(handle.attemptId)?.failure;
           seed = undefined;
+          if (userCancelled.has(handle.attemptId)) {
+            // K1.7: the user cancelled this attempt; that is intent, not a failure to retry.
+            await workers.revert(handle.attemptId, signal).catch(() => undefined);
+            await retire(entry, handle.attemptId);
+            await move(entry, "cancelled", "cancelled by you");
+            return "failed";
+          }
 
           const retry = async (reason: string, notes: readonly string[]): Promise<boolean> => {
             if (retries >= limits.budgets.triage_retries) return false;
@@ -1227,6 +1234,12 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
             entry.attempts.push(reviewHandle.attemptId);
             await delegated(entry, reviewHandle.attemptId);
             const result = await reviewHandle.result;
+            if (userCancelled.has(reviewHandle.attemptId)) {
+              await workers.revert(handle.attemptId, signal).catch(() => undefined);
+              await retire(entry, handle.attemptId);
+              await move(entry, "cancelled", "review cancelled by you");
+              return "failed";
+            }
             outcome = result.verification.decision;
             problems = result.verification.problems;
             findingsEvidence = (result.review?.findings ?? []).map((finding) => ({ kind: "review" as const, ref: `review:${finding.id}`, produced_by: "reviewer" as const }));
@@ -1332,6 +1345,8 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
       const spawned: PlanTask[] = [];
       /** K1.7: what the user told workers directly since the orchestrator's last turn; included in its next consultation or triage. */
       const workerMessages: string[] = [];
+      /** K1.7: attempts the user cancelled; never auto-retried (user intent): the task ends cancelled and the orchestrator is told. */
+      const userCancelled = new Set<AttemptId>();
       let consulting = false;
       let triaging: PendingTriage | undefined;
       // Orchestrator turns (steering consultation, triage) share the run session: one at a time.
@@ -1460,13 +1475,14 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
             const trimmed = text.trim().slice(0, 8000);
             if (trimmed === "") return { ok: false, message: "the message is empty" };
             if (!workers.steer(attemptId, trimmed)) return { ok: false, message: `${entry.key} finished before the message could be delivered` };
-            entry.userMessages.push({ from: "user", text: trimmed, atMs: now().getTime() });
+            entry.userMessages.push({ from: "user", text: trimmed, atMs: now().getTime(), delivered: false });
             workerMessages.push(`to ${entry.key}: ${trimmed}`.slice(0, NOTE_LIMIT));
             await recorder.record("task/user_message", { task_id: entry.taskId, attempt_id: attemptId, text: trimmed }, scope);
             return { ok: true, message: `sent to ${entry.key}; it reads it at its next step (the orchestrator is told too)` };
           }
           const applied = action === "pause" ? workers.pause(attemptId) : action === "resume" ? workers.resume(attemptId) : workers.cancel(attemptId, "cancelled by the user");
           if (!applied) return { ok: false, message: `${entry.key} finished before it could be ${action === "pause" ? "paused" : action === "resume" ? "resumed" : "cancelled"}` };
+          if (action === "cancel") userCancelled.add(attemptId);
           if (action === "cancel") workerMessages.push(`the user cancelled the running attempt of ${entry.key}`);
           await recorder.record("attempt/user_control", { attempt_id: attemptId, task_id: entry.taskId, action }, scope);
           return {
@@ -1476,7 +1492,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
                 ? `${entry.key} pauses after its current step (resume with /worker ${entry.key} --resume)`
                 : action === "resume"
                   ? `${entry.key} resumed`
-                  : `${entry.key} cancelled; the orchestrator handles it like any cancelled attempt`,
+                  : `${entry.key} cancelled; it is not retried and the orchestrator is told`,
           };
         },
       };

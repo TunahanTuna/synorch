@@ -75,13 +75,13 @@ test("message, pause and resume a running worker; its assignment is visible and 
     const late = await runtime.coordinator.workers.message("edit-a", "too late");
     assert.equal(late.ok, false);
     assert.match(late.message, /not running/);
-    assert.deepEqual(runtime.coordinator.workers.assignment("edit-a")?.steering, [{ from: "user", text: "keep the heading unchanged", atMs: runtime.coordinator.workers.assignment("edit-a")?.steering[0]?.atMs }]);
+    assert.deepEqual(runtime.coordinator.workers.assignment("edit-a")?.steering, [{ from: "user", text: "keep the heading unchanged", atMs: runtime.coordinator.workers.assignment("edit-a")?.steering[0]?.atMs, delivered: false }]);
   } finally {
     await workspace.cleanup();
   }
 });
 
-test("cancelling a running worker aborts that attempt and the coordinator handles it like a cancelled attempt", async () => {
+test("cancelling a running worker aborts that attempt; a user cancel is intent, so the task ends cancelled without a retry", async () => {
   const workspace = await createTempWorkspace({ "docs/a.md": "a\n" }, { git: true });
   try {
     let runtime: TestRuntime | undefined;
@@ -110,9 +110,11 @@ test("cancelling a running worker aborts that attempt and the coordinator handle
     assert.deepEqual(ofType(events, "attempt/user_control").map((event) => event.data.action), ["cancel"]);
     const states = ofType(events, "attempt/state_changed").map((event) => event.data.to);
     assert.equal(states[0], "cancelled");
-    assert.equal(outcome.status, "succeeded", "the existing rules retried the task with a new attempt");
-    assert.equal(ofType(events, "task/delegated").length, 2);
-    assert.equal(ofType(events, "task/delegated")[1]?.data.attempt, 2);
+    assert.equal(attempts, 1, "a user-cancelled attempt is not retried");
+    assert.equal(ofType(events, "task/delegated").length, 1);
+    const task = ofType(events, "task/state_changed").at(-1);
+    assert.equal(task?.data.to, "cancelled");
+    assert.equal(task?.data.reason, "cancelled by you");
   } finally {
     await workspace.cleanup();
   }

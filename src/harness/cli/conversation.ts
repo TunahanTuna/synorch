@@ -1246,8 +1246,11 @@ class Conversation implements ConversationCommandHost {
       return;
     }
     const task: OrchestrationTaskView = this.lastTracker?.view().tasks.find((candidate) => candidate.key === worker.key) ?? { key: worker.key, role: worker.role, model: worker.model, state: worker.state as OrchestrationTaskView["state"] };
-    const assignment = directory.assignment(worker.key);
-    const events = this.hub.snapshot(worker.key).filter((event) => event.kind !== "assignment");
+    // The hub's assignment carries delivery state (a steer the worker already took is no longer "queued").
+    const snapshot = this.hub.snapshot(worker.key);
+    const latest = snapshot.filter((event) => event.kind === "assignment").at(-1);
+    const assignment = latest?.kind === "assignment" ? latest.assignment : directory.assignment(worker.key);
+    const events = snapshot.filter((event) => event.kind !== "assignment");
     views.showView({ kind: "worker", task: worker.paused ? { ...task, paused: true } : task, ...(assignment === undefined ? {} : { assignment }), events });
   }
 

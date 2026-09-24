@@ -132,6 +132,12 @@ export interface InteractiveInputControls {
   /** Resolves with the chosen row, or undefined on Esc / abort. */
   openModelPicker(entries: readonly ModelPickerEntry[], signal?: AbortSignal, heading?: PickerHeading): Promise<ModelPickerEntry | undefined>;
   /**
+   * A question that owns the input until answered (K5): with options a picker (arrows + Enter,
+   * number shortcuts, Esc cancels), without a one-line answer field. What is typed never reaches
+   * the conversation. Resolves with the chosen option text or the answer, undefined on Esc / abort.
+   */
+  ask(question: string, options: readonly string[] | undefined, signal?: AbortSignal): Promise<string | undefined>;
+  /**
    * Permission mode (Shift+Tab / Alt+M cycles ask -> auto -> full -> plan): the renderer shows it in
    * the footer; the session applies the policy and announces the change.
    */

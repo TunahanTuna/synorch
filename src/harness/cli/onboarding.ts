@@ -92,7 +92,8 @@ export async function runInitCommand(host: InitHost, argument: string): Promise<
   if (!yes) {
     const options = differing.length === 0 ? ["Create the files", "Cancel"] : ["Create new files only (keep the differing ones)", "Create and overwrite the differing files", "Cancel"];
     const answer = (await host.ask("Write the Synorch structure into this repository?", options).catch(() => "cancel")).trim().toLowerCase();
-    const cancelled = differing.length === 0 ? /^(2|c|cancel|n|no|hayır|iptal)/.test(answer) || answer === "" : /^(3|c|cancel|n|no|hayır|iptal)/.test(answer) || answer === "";
+    // The answer is the option's text ("create the files") or what was typed; a bare "c" still cancels.
+    const cancelled = differing.length === 0 ? /^(2|c$|cancel|n$|no|hayır|iptal)/.test(answer) || answer === "" : /^(3|c$|cancel|n$|no|hayır|iptal)/.test(answer) || answer === "";
     if (cancelled) {
       host.print(["Cancelled · nothing was written."]);
       return;

@@ -953,20 +953,35 @@ class Conversation implements ConversationCommandHost {
     orchestration.controller.abort();
   }
 
+  /**
+   * Every question the session asks the user (ask_user, /init, /memory review, /config, /commit,
+   * /model --save). The TUI opens a prompt that owns the input (a picker for choices); plain mode
+   * reads a numbered answer. Either way the answer never becomes a conversation message. A numeric
+   * answer resolves to its option's text.
+   */
   private async askUser(question: string, options: readonly string[] | undefined, signal: AbortSignal): Promise<string> {
+    const controls = this.renderer.controls;
+    if (this.renderer.kind === "tui" && controls !== undefined) {
+      const answer = await controls.ask(question, options, signal);
+      if (answer === undefined) throw new DOMException("the question was cancelled", "AbortError");
+      return answer;
+    }
     this.note("warning", `? ${question}`);
     if (options !== undefined && options.length > 0) this.note("info", `  ${options.map((option, index) => `${index + 1}. ${option}`).join("   ")}`);
-    this.note("info", "  type your answer and press Enter");
-    if (this.renderer.kind === "tui" || this.readingDuringWorkers) return this.desk.ask(signal);
+    this.note("info", options !== undefined && options.length > 0 ? "  type a number (or your answer) and press Enter" : "  type your answer and press Enter");
+    const resolve = (typed: string): string => {
+      const answer = typed.trim();
+      const picked = options?.[Number(answer) - 1];
+      return /^\d+$/.test(answer) && picked !== undefined ? picked : answer;
+    };
+    if (this.renderer.kind === "tui" || this.readingDuringWorkers) return resolve(await this.desk.ask(signal));
     const input = this.renderer.input;
     if (input === undefined) throw new DOMException("no input", "AbortError");
     for (;;) {
       const next = await input.next(signal);
       if (!("text" in next)) throw new DOMException("the question was not answered", "AbortError");
-      const answer = next.text.trim();
-      if (answer === "") continue;
-      const picked = options?.[Number(answer) - 1];
-      return /^\d+$/.test(answer) && picked !== undefined ? picked : answer;
+      if (next.text.trim() === "") continue;
+      return resolve(next.text);
     }
   }
 

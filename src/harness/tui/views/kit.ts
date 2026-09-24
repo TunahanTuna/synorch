@@ -56,6 +56,11 @@ export interface ViewGlyphs {
   readonly arrowHead: string;
   readonly leftArrow: string;
   readonly downArrow: string;
+  /** Marks the selected board row / graph node (§11.1 `select`). */
+  readonly select: string;
+  /** Delegation line (`→ key`) and user-to-worker line (`↳ you → key`). */
+  readonly rightArrow: string;
+  readonly hook: string;
   readonly box: BoxGlyphs;
   /** Border of an active graph node (double line; `#` in ascii). */
   readonly strongBox: BoxGlyphs;
@@ -81,6 +86,9 @@ const VIEW_GLYPHS: { readonly [N in GlyphSetName]: Omit<ViewGlyphs, "base" | "na
     arrowHead: "►",
     leftArrow: "←",
     downArrow: "↓",
+    select: "›",
+    rightArrow: "→",
+    hook: "↳",
     box: { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" },
     strongBox: { tl: "╔", tr: "╗", bl: "╚", br: "╝", h: "═", v: "║" },
     line: LINE_UNICODE,
@@ -98,6 +106,9 @@ const VIEW_GLYPHS: { readonly [N in GlyphSetName]: Omit<ViewGlyphs, "base" | "na
     arrowHead: "►",
     leftArrow: "←",
     downArrow: "↓",
+    select: ">",
+    rightArrow: "→",
+    hook: "↳",
     box: { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" },
     strongBox: { tl: "╔", tr: "╗", bl: "╚", br: "╝", h: "═", v: "║" },
     line: LINE_UNICODE,
@@ -115,6 +126,9 @@ const VIEW_GLYPHS: { readonly [N in GlyphSetName]: Omit<ViewGlyphs, "base" | "na
     arrowHead: ">",
     leftArrow: "<-",
     downArrow: "v",
+    select: ">",
+    rightArrow: "->",
+    hook: "`-",
     box: { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" },
     strongBox: { tl: "#", tr: "#", bl: "#", br: "#", h: "=", v: "#" },
     line: LINE_ASCII,

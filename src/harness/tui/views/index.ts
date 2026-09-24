@@ -5,8 +5,22 @@
  */
 export { isActive, isFinished, isWaiting, PlainBoardTracker, presentTask, renderBoard, renderBoardSummary, renderLiveBoard, type TaskPresentation, type Tone } from "./board.ts";
 export { renderAction, renderEvidence, renderWhy } from "./cards.ts";
-export { LiveBoardComponent, PlainViews, renderView, StaticViewComponent, type ViewComponent, type ViewStyleOptions } from "./components.ts";
-export { layoutGraph, renderGraph, type GraphOptions } from "./graph.ts";
+export { DelegationComponent, LiveBoardComponent, PlainViews, renderView, StaticViewComponent, UserToWorkerComponent, type ViewComponent, type ViewStyleOptions } from "./components.ts";
+export { graphLevels, layoutGraph, renderGraph, type GraphOptions } from "./graph.ts";
+export {
+  cycleWorker,
+  initialSelection,
+  moveSelection,
+  renderAssignment,
+  renderDelegation,
+  renderItem,
+  renderUserToWorker,
+  renderWorkerHeader,
+  renderWorkerSnapshot,
+  workerItems,
+  workerStatus,
+  type SelectionMove,
+} from "./worker.ts";
 export {
   createViewTheme,
   displayWidth,

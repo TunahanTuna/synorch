@@ -97,3 +97,88 @@ export async function commitsSince(cwd: string, since: string, signal?: AbortSig
   const log = await git(cwd, ["log", `--since=${since}`, "--format=%h %s", "-n", "20"], signal);
   return log.ok ? log.stdout.split(/\r?\n/).filter((line) => line.trim() !== "") : [];
 }
+
+/** What `/review` pins: the full diff of one target (generated files left out), its files, and the target with commits resolved. */
+export interface ReviewDiff {
+  readonly text: string;
+  readonly files: readonly string[];
+  readonly excluded: readonly string[];
+  readonly label: string;
+  /** The target with its commits resolved to ids, so recomputing the digest reads the same content. */
+  readonly resolved: ReviewDiffTarget;
+}
+
+export type ReviewDiffTarget =
+  | { readonly kind: "workspace"; readonly paths?: readonly string[] }
+  | { readonly kind: "staged" }
+  | { readonly kind: "commit"; readonly rev: string }
+  | { readonly kind: "range"; readonly from: string; readonly to: string; readonly symmetric: boolean };
+
+const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--relative"] as const;
+
+function nonEmptyLines(text: string): string[] {
+  return text.split(/\r?\n/).filter((line) => line.trim() !== "");
+}
+
+function excludePathspecs(paths: readonly string[]): string[] {
+  return paths.map((entry) => `:(exclude,literal)${entry}`);
+}
+
+async function revParse(cwd: string, rev: string, signal?: AbortSignal): Promise<string | undefined> {
+  const result = await git(cwd, ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`], signal);
+  return result.ok ? result.stdout.trim() || undefined : undefined;
+}
+
+/**
+ * The full diff of a `/review` target, workspace-relative, with generated files (`isGenerated`)
+ * listed but left out. A string result is why it cannot be read (not a repository, an unknown
+ * commit). The workspace target includes untracked files as new-file diffs.
+ */
+export async function reviewDiff(cwd: string, target: ReviewDiffTarget, isGenerated: (path: string) => boolean, signal?: AbortSignal): Promise<ReviewDiff | string> {
+  const split = (names: readonly string[]) => ({ files: names.filter((name) => !isGenerated(name)), excluded: names.filter((name) => isGenerated(name)) });
+  switch (target.kind) {
+    case "workspace": {
+      const scope = target.paths === undefined || target.paths.length === 0 ? ["."] : [...target.paths];
+      let head = ["HEAD"];
+      let names = await git(cwd, ["diff", ...head, "--name-only", "--relative", "--", ...scope], signal);
+      if (!names.ok) {
+        head = [];
+        names = await git(cwd, ["diff", "--name-only", "--relative", "--", ...scope], signal);
+        if (!names.ok) return "not a git repository";
+      }
+      const untracked = await git(cwd, ["ls-files", "--others", "--exclude-standard", "--", ...scope], signal);
+      const tracked = split(nonEmptyLines(names.stdout));
+      const fresh = split(untracked.ok ? nonEmptyLines(untracked.stdout) : []);
+      let text = tracked.files.length === 0 ? "" : (await git(cwd, ["diff", ...head, ...DIFF_FLAGS, "--", ...scope, ...excludePathspecs(tracked.excluded)], signal)).stdout;
+      for (const file of fresh.files) text += (await git(cwd, ["diff", "--no-color", "--no-index", "--", process.platform === "win32" ? "NUL" : "/dev/null", file], signal)).stdout;
+      return { text, files: [...tracked.files, ...fresh.files], excluded: [...tracked.excluded, ...fresh.excluded], label: target.paths === undefined ? "uncommitted changes" : "worker run changes", resolved: target };
+    }
+    case "staged": {
+      const names = await git(cwd, ["diff", "--cached", "--name-only", "--relative"], signal);
+      if (!names.ok) return "not a git repository";
+      const { files, excluded } = split(nonEmptyLines(names.stdout));
+      const text = files.length === 0 ? "" : (await git(cwd, ["diff", "--cached", ...DIFF_FLAGS, "--", ".", ...excludePathspecs(excluded)], signal)).stdout;
+      return { text, files, excluded, label: "staged changes", resolved: target };
+    }
+    case "commit": {
+      const sha = await revParse(cwd, target.rev, signal);
+      if (sha === undefined) return `unknown commit ${target.rev}`;
+      const subject = await git(cwd, ["log", "-1", "--format=%h %s", sha], signal);
+      const names = await git(cwd, ["diff-tree", "-r", "--root", "--no-commit-id", "--name-only", "--relative", sha], signal);
+      const { files, excluded } = split(nonEmptyLines(names.stdout));
+      const text = files.length === 0 ? "" : (await git(cwd, ["diff-tree", "-r", "-p", "--root", "--no-commit-id", ...DIFF_FLAGS, sha, "--", ".", ...excludePathspecs(excluded)], signal)).stdout;
+      return { text, files, excluded, label: `commit ${subject.ok ? subject.stdout.trim().slice(0, 80) : sha.slice(0, 7)}`, resolved: { kind: "commit", rev: sha } };
+    }
+    case "range": {
+      const from = await revParse(cwd, target.from, signal);
+      const to = await revParse(cwd, target.to, signal);
+      if (from === undefined || to === undefined) return `unknown commit ${from === undefined ? target.from : target.to}`;
+      const spec = target.symmetric ? [`${from}...${to}`] : [from, to];
+      const names = await git(cwd, ["diff", "--name-only", "--relative", ...spec], signal);
+      if (!names.ok) return names.stderr.trim() || "git diff failed";
+      const { files, excluded } = split(nonEmptyLines(names.stdout));
+      const text = files.length === 0 ? "" : (await git(cwd, ["diff", ...DIFF_FLAGS, ...spec, "--", ".", ...excludePathspecs(excluded)], signal)).stdout;
+      return { text, files, excluded, label: `${target.from}${target.symmetric ? "..." : ".."}${target.to}`, resolved: { kind: "range", from, to, symmetric: target.symmetric } };
+    }
+  }
+}

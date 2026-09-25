@@ -11,6 +11,7 @@ import {
 import type { ContextGroupView, ContextItemView, ContextView, CriterionView, DiffView, EvidenceView, ProofView, WhyView } from "../contracts/views.ts";
 import { estimateTokens, toolTokens } from "../context/index.ts";
 import { rebuildModelRequest } from "../core/envelope.ts";
+import { artifactReviewRecordSchema, REVIEW_CRITERIA } from "../orchestration/artifact-review.ts";
 import { isTestCommand } from "../tui/conversation-view.ts";
 
 /**
@@ -160,7 +161,47 @@ function directEvidence(turn: DirectTurn, sources: EvidenceSources, restored: Re
   };
 }
 
+const REVIEW_VERDICT_VIEW = { approve: "accepted", changes_requested: "changes_requested", blocked: "rejected" } as const;
+
+/** A `/review` run (ADR-09 artifact review): criteria with the reviewer's own evidence, the verdict and findings. */
+async function artifactReviewEvidence(run: EvidenceRun, blobs: BlobStore): Promise<EvidenceView | undefined> {
+  const recorded = [...run.events].reverse().find((event): event is SessionEventOf<"review/recorded"> => event.type === "review/recorded");
+  if (recorded === undefined) return undefined;
+  const record = await readJson(blobs, recorded.data.blob.digest, (value) => artifactReviewRecordSchema.parse(value));
+  if (record === undefined) return undefined;
+  const reviewer = `${record.reviewer.provider_id}/${record.reviewer.model_id}`;
+  const verdict = record.verdict === undefined ? undefined : REVIEW_VERDICT_VIEW[record.verdict];
+  const criteria: CriterionView[] = record.criteria.map((criterion) => ({
+    text: `${criterion.name}: ${REVIEW_CRITERIA.find((entry) => entry.id === criterion.id)?.statement ?? criterion.id}`,
+    status: criterion.verdict === "met" ? "passed" : criterion.verdict === "not_met" ? "failed" : "unverifiable",
+    proofs: [
+      ...criterion.evidence.map((ref): ProofView => ({ kind: "note", text: `${ref} (reviewer's own tool call)` })),
+      ...(criterion.note === undefined ? [] : [{ kind: "note" as const, text: criterion.note }]),
+    ],
+  }));
+  criteria.push({
+    text: `artifact ${record.artifactDigest.slice(0, 19)}… pinned`,
+    status: record.status === "artifact_changed" ? "unverifiable" : "passed",
+    proofs: [{ kind: "note", text: record.status === "artifact_changed" ? "the artifact changed during review: the verdict covers the pinned version only" : "unchanged during review (digest recomputed after the reviewer finished)" }],
+  });
+  return {
+    kind: "evidence",
+    title: `review: ${snippet(record.target, 50)} (${runStatus(run)})`,
+    criteria,
+    review: {
+      independent: true,
+      reviewer,
+      ...(verdict === undefined ? {} : { verdict }),
+      findings: record.findings.map((finding) => `${finding.severity} ${finding.path === undefined ? "" : `${finding.path}${finding.line === undefined ? "" : `:${finding.line}`} `}${finding.summary}`),
+    },
+    changedPaths: record.changedPaths,
+    ...(record.findings.some((finding) => finding.severity !== "info") ? { next: "/review fix sends the findings to Synorch" } : {}),
+  };
+}
+
 async function runEvidence(run: EvidenceRun, blobs: BlobStore): Promise<EvidenceView> {
+  const reviewed = await artifactReviewEvidence(run, blobs);
+  if (reviewed !== undefined) return reviewed;
   const events = run.events;
   const keys = new Map<string, string>();
   const states = new Map<string, string>();

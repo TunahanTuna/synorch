@@ -55,7 +55,22 @@ import {
 import type { DiffFileView, DiffView, OrchestrationTaskView, WorkerControl, WorkerSeam } from "../contracts/views.ts";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageTokens, reconstructHistory } from "../context/index.ts";
-import { WorkerStreamHub, type OrchestrationCoordinator, type WorkerControlResult, type WorkerDirectory } from "../orchestration/index.ts";
+import {
+  actionableFindings,
+  artifactReviewGoal,
+  fixFollowUpMessage,
+  isGeneratedPath,
+  parseReviewArgument,
+  renderArtifactReviewBrief,
+  renderReviewCard,
+  WorkerStreamHub,
+  type ArtifactReviewRequest,
+  type ArtifactReviewResult,
+  type OrchestrationCoordinator,
+  type PinnedReviewArtifact,
+  type WorkerControlResult,
+  type WorkerDirectory,
+} from "../orchestration/index.ts";
 import { classifyCommand, createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/index.ts";
 import { BUILTIN_THEMES, bindBackgroundStatus, defaultThemeName, describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, pickHint, quotaProviderLabel, runPrompts, selectGlyphs, shortenPath, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
 import { buildCommit, loadAppearance, planLabel, subscriptionPlan, userHome, workerModels } from "./appearance.ts";
@@ -88,7 +103,7 @@ import { failureInfo } from "./outcome.ts";
 import { createSessionRenderer, type SessionRenderer } from "./renderers.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
 import type { SessionIO } from "./session.ts";
-import { changePathspecs, commitAll, commitSelected, commitsSince, lastCommitDiff, uncommittedChanges, uncommittedDiff, type ChangeSummary } from "./session-git.ts";
+import { changePathspecs, commitAll, commitSelected, commitsSince, reviewDiff, uncommittedChanges, type ChangeSummary, type ReviewDiffTarget } from "./session-git.ts";
 import {
   CONVERSATION_COMMANDS,
   contextReport,
@@ -316,6 +331,8 @@ interface ActiveOrchestration {
   result: ToolResult | undefined;
   /** The completion note queued for the agent (removed again when the agent read the result itself). */
   notice: string | undefined;
+  /** `review`: a `/review` run (ADR-09 reviewer attempt); it never becomes `this.orchestration` and cannot be steered. */
+  kind?: "review";
 }
 
 interface QueuedMessage {
@@ -379,6 +396,8 @@ class Conversation implements ConversationCommandHost {
   private sessionBroker: ApprovalBroker | undefined;
   private startedAt = Date.now();
   private lastTracker: OrchestrationTracker | undefined;
+  /** The last `/review` result of this process (`/review fix`). */
+  private lastReview: ArtifactReviewResult | undefined;
   private turnId: TurnId | undefined;
   private trustAsked = false;
   private exiting = false;
@@ -638,6 +657,14 @@ class Conversation implements ConversationCommandHost {
       // Worker, reviewer and planner requests of this process count toward the footer's quota %, cost
       // and activity tokens: their provider/usage events (with `x-codex-*` quota) reach the view too.
       if (recorded.session_id !== this.sessionId && recorded.type === "provider/usage" && this.renderer.kind !== "jsonl") this.renderer.render(event);
+      // `/review` runs feed their own trackers (`/runs`, `/evidence`); they never touch the board.
+      if (recorded.session_id !== this.sessionId) {
+        for (const run of this.workerRuns) {
+          if (run.kind !== "review" || run.status !== "running") continue;
+          const before = run.tracker.sessionId;
+          if (run.tracker.observe(recorded) && before === undefined && run.tracker.sessionId !== undefined && !this.orchestratedSessions.includes(run.tracker.sessionId)) this.orchestratedSessions.push(run.tracker.sessionId);
+        }
+      }
       if (orchestration !== undefined && recorded.session_id !== this.sessionId) {
         this.workerLine(recorded);
         this.observeOrchestration(orchestration, recorded);
@@ -1657,6 +1684,7 @@ class Conversation implements ConversationCommandHost {
     const run = this.findRun(input.run);
     if (run === undefined) return toolError("execution_failed", this.unknownRun(input.run));
     if (run.status !== "running") return toolError("execution_failed", `${run.id} already ended (${run.status}); nothing was sent`);
+    if (run.kind === "review") return toolError("execution_failed", `${run.id} is an independent review; it cannot be steered (run_cancel stops it)`);
     const arrow = this.glyphs.name === "rich" ? "↳" : "->";
     if (input.task !== undefined) {
       const result = await run.coordinator.workers.message(input.task, input.message);
@@ -2503,25 +2531,53 @@ class Conversation implements ConversationCommandHost {
     this.print([`${g.ok} Saved: new conversations use the ${tier} route (${path.join(runtime.home, SESSION_MODEL_FILE)})`]);
   }
 
-  public async review(focus: string): Promise<void> {
+  /**
+   * `/review [--staged | <commit> | <from>..<to> | run-<n> | fix] [focus]` (ADR-09): pins the target's
+   * diff (digest of the full content, generated files left out), resolves the reviewer route
+   * (cross-provider when possible) and runs a read-only reviewer attempt through the worker manager
+   * as its own background run (`/runs`); the verdict card, `/evidence` and "Fix these?" follow.
+   */
+  public async review(argument: string): Promise<void> {
     const g = this.glyphs;
     const runtime = this.runtime;
-    let diff: { readonly text: string } | undefined = await uncommittedDiff(runtime.workspaceRoot, REVIEW_DIFF_LIMIT, this.outer.signal);
-    if (diff === undefined) {
-      this.print(["/review needs a git repository: the uncommitted diff is what gets reviewed."]);
+    const root = runtime.workspaceRoot;
+    const parsed = parseReviewArgument(argument);
+    if (parsed.fix) {
+      if (this.lastReview === undefined) this.print(["No review in this conversation yet; /review runs one."]);
+      else await this.offerReviewFixes(this.lastReview, true);
       return;
     }
-    let subject = "uncommitted changes";
-    if (diff.text.trim() === "") {
-      // Nothing uncommitted (e.g. the last run was committed): review the last commit instead.
-      const last = await lastCommitDiff(runtime.workspaceRoot, REVIEW_DIFF_LIMIT, this.outer.signal);
-      if (last === undefined) {
-        this.print(["No uncommitted changes and no commit to review."]);
+    let target: ReviewDiffTarget;
+    let runLabel: string | undefined;
+    if (parsed.target.kind === "run") {
+      const run = this.findRun(parsed.target.ref);
+      if (run === undefined || run.kind === "review") {
+        this.print([run === undefined ? this.unknownRun(parsed.target.ref) : `${run.id} is a review run; review a worker run instead`]);
         return;
       }
-      diff = last;
-      subject = `last commit ${last.subject}`;
+      const paths = run.tracker.integratedPaths();
+      if (paths.length === 0) {
+        this.print([`${run.id} integrated no files${run.status === "running" ? " yet" : ""}; nothing to review.`]);
+        return;
+      }
+      target = { kind: "workspace", paths };
+      runLabel = `files integrated by ${run.id}`;
+    } else target = parsed.target;
+    let diff = await reviewDiff(root, target, isGeneratedPath, this.outer.signal);
+    if (typeof diff === "string") {
+      this.print([`/review: ${diff === "not a git repository" ? "needs a git repository (the diff is what gets reviewed)" : diff}`]);
+      return;
     }
+    if (diff.text.trim() === "" && parsed.target.kind === "workspace") {
+      // Nothing uncommitted (e.g. the last run was committed): review the last commit instead.
+      const last = await reviewDiff(root, { kind: "commit", rev: "HEAD" }, isGeneratedPath, this.outer.signal);
+      if (typeof last !== "string" && last.text.trim() !== "") diff = { ...last, label: `last ${last.label}` };
+    }
+    if (diff.text.trim() === "") {
+      this.print([diff.excluded.length > 0 ? `Only generated files changed (${diff.excluded.slice(0, 3).join(", ")}); nothing to review.` : `Nothing to review in ${diff.label}.`]);
+      return;
+    }
+    const label = runLabel ?? diff.label;
     // ADR-09 reviewer routing, as for workers: routes.<tier>.reviewer wins, otherwise review.cross_provider
     // prefers a provider other than the one that wrote the changes (the conversation's route).
     const rules = runtime.routeRules();
@@ -2535,68 +2591,148 @@ class Conversation implements ConversationCommandHost {
       this.showFailure(failureInfo(error));
       return;
     }
+    const digest = digestOf({ diff: diff.text });
+    const truncated = Buffer.byteLength(diff.text, "utf8") > REVIEW_DIFF_LIMIT;
+    const shown = truncated ? Buffer.from(diff.text, "utf8").subarray(0, REVIEW_DIFF_LIMIT).toString("utf8") : diff.text;
+    const resolved = diff.resolved;
+    const artifact: PinnedReviewArtifact = {
+      digest,
+      brief: renderArtifactReviewBrief({ label, digest, diff: shown, truncated, changedPaths: diff.files, excludedPaths: diff.excluded, focus: parsed.focus }),
+      repin: async (signal) => {
+        const again = await reviewDiff(root, resolved, isGeneratedPath, signal);
+        return typeof again === "string" ? undefined : digestOf({ diff: again.text });
+      },
+    };
+    const request: ArtifactReviewRequest = {
+      workspaceRoot: root,
+      policyMode: runtime.policyMode,
+      headless: this.renderer.approvals.availability === "headless",
+      target: parsed.target,
+      label,
+      focus: parsed.focus,
+      tier: tier === "session" ? "complex_worker" : tier,
+      route,
+      implementer,
+      changedPaths: diff.files,
+      excludedPaths: diff.excluded,
+      artifact,
+    };
+    this.coordinator ??= runtime.createCoordinator(runtime.brokerFor(this.gatedApprovals()));
+    const goal = artifactReviewGoal(label, parsed.focus);
+    const background = this.canRunInBackground();
+    const run: ActiveOrchestration = {
+      id: `run-${this.workerRuns.length + 1}`,
+      goal,
+      tracker: new OrchestrationTracker(goal, undefined),
+      coordinator: this.coordinator,
+      controller: linked(this.outer.signal),
+      disarm: undefined,
+      foreground: !background,
+      status: "running",
+      done: Promise.resolve({ status: "ok", text: "", truncated: false, redactions: 0 }),
+      result: undefined,
+      notice: undefined,
+      kind: "review",
+    };
+    this.workerRuns.push(run);
     const reviewer = `${route.route.provider_id}/${route.route.model_id}`;
     const crossProvider = implementer !== undefined && implementer.provider_id !== route.route.provider_id;
-    const files = (diff.text.match(/^diff --git /gm) ?? []).length;
-    this.note("info", `${g.bullet} Reviewing ${files} changed file${files === 1 ? "" : "s"} (${subject}) with ${reviewer}${crossProvider ? " (another provider)" : ""} ${g.sep} independent: fresh context, no conversation history ${g.sep} Esc stops`);
-    const reviewLog = await runtime.sessions.create({
-      session_id: createId("session"),
-      project_id: runtime.projectId,
-      workspace_root: runtime.workspaceRoot,
-      created_at: new Date().toISOString(),
-      title: `review: ${focus === "" ? subject.slice(0, 100) : focus.slice(0, 100)}`,
-    });
-    // The reviewer route and why (independence, cross-provider or the reason it is not) stay in the review's own log.
-    await reviewLog.append({ type: "route/decided", event_version: EVENT_VERSIONS["route/decided"], actor: { kind: "system" }, data: { decision: route } }).catch(() => undefined);
-    const driver = runtime.createSessionDriver(runtime.brokerFor(undefined), reviewLog, (gateway) => gateway);
-    const active = linked(this.outer.signal);
-    this.active = active;
-    const prompt = [
-      "You are an independent code reviewer. You did not write these changes and you have no conversation history.",
-      `Review the diff below (${subject}) for correctness bugs, security problems, missing tests and risky behaviour changes. You may read files to check context; you cannot edit or run commands.`,
-      "Reply with: a one-line verdict (accept / changes requested / block), then findings as a short list with file:line, severity and why. Say plainly when you found nothing important.",
-      ...(focus === "" ? [] : [`Focus: ${focus}`]),
-      "",
-      "```diff",
-      diff.text,
-      "```",
-    ].join("\n");
-    try {
-      await driver.runTurn(
-        {
-          sessionId: reviewLog.sessionId,
-          runId: undefined,
-          taskId: undefined,
-          attemptId: undefined,
-          role: "session",
-          route: route.route,
-          policy: planModePolicy(this.basePolicy()),
-          packet: undefined,
-          userMessage: prompt,
-          trigger: "user",
-          maxSteps: 20,
-        },
-        active.signal,
+    this.note(
+      "info",
+      `${g.bullet} Reviewing ${diff.files.length} file${diff.files.length === 1 ? "" : "s"} (${label}) with ${reviewer}${crossProvider ? " (another provider)" : ""} ${g.sep} fresh context, read-only, artifact ${digest.slice(0, 19)}… pinned ${g.sep} ${background ? `background ${run.id} · /runs` : "waiting"}`,
+    );
+    run.done = this.driveReview(run, request);
+    if (!background) await run.done;
+  }
+
+  /** Runs one `/review` to its card; never rejects. */
+  private async driveReview(run: ActiveOrchestration, request: ArtifactReviewRequest): Promise<ToolResult> {
+    const g = this.glyphs;
+    const result = await run.coordinator.review(request, run.controller.signal).catch((error: unknown): ArtifactReviewResult => ({
+      kind: "artifact-review",
+      runId: "",
+      sessionId: "",
+      reviewerAttemptId: undefined,
+      reviewerSessionId: undefined,
+      target: request.label,
+      targetKind: request.target.kind,
+      artifactDigest: request.artifact.digest,
+      changedPaths: request.changedPaths,
+      excludedPaths: request.excludedPaths,
+      reviewer: { provider_id: request.route.route.provider_id, model_id: request.route.route.model_id },
+      sameProvider: undefined,
+      status: "failed",
+      verdict: undefined,
+      criteria: [],
+      findings: [],
+      evidence: [],
+      problems: [failureInfo(error).message],
+    }));
+    run.status = result.status === "reviewed" || result.status === "artifact_changed" ? "succeeded" : result.status === "cancelled" ? "cancelled" : "failed";
+    run.tracker.finish(run.status);
+    if (result.sessionId !== "" && !this.orchestratedSessions.includes(result.sessionId as SessionId)) this.orchestratedSessions.push(result.sessionId as SessionId);
+    this.lastReview = result;
+    const card = renderReviewCard(result, g);
+    const level = result.verdict === "approve" ? "info" : "warning";
+    for (const [index, line] of card.entries()) this.note(index === 0 ? level : "info", line);
+    const text = JSON.stringify(result);
+    run.result = { status: "ok", text: text.slice(0, 16 * 1024), truncated: text.length > 16 * 1024, redactions: 0 };
+    if (!this.exiting && result.verdict !== undefined) {
+      const findings = result.findings.map((finding) => `${finding.severity} ${finding.path ?? ""}${finding.line === undefined ? "" : `:${finding.line}`} ${finding.summary}`.replace(/\s+/g, " ").trim());
+      this.pendingNotes.push(
+        snippet(`the user ran /review (${result.target}); the independent reviewer (${result.reviewer.provider_id}/${result.reviewer.model_id}, fresh context) verdict: ${result.verdict.replaceAll("_", " ")}${findings.length === 0 ? ", no findings" : `; findings: ${findings.join("; ")}`}`, 1500),
       );
-      const events: SessionEvent[] = [];
-      for await (const item of reviewLog.read()) if (item.status === "ok") events.push(item.event);
-      const answer = [...events]
-        .reverse()
-        .flatMap((event) => (event.type === "message/recorded" && event.data.role === "assistant" && event.data.message !== undefined ? [event.data.message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")] : []))
-        .find((entry) => entry.trim() !== "");
-      if (answer === undefined) {
-        this.note("warning", `${g.warn} The reviewer gave no answer${active.signal.aborted ? " (stopped)" : ""}.`);
+    }
+    if (!this.exiting && actionableFindings(result).length > 0) await this.offerReviewFixes(result, false);
+    return run.result;
+  }
+
+  /**
+   * "Fix these?" after a review: the TUI's choice modal (every finding checked); the accepted ones
+   * reach the session agent as a follow-up message. Plain mode sends them on `/review fix`.
+   */
+  private async offerReviewFixes(result: ArtifactReviewResult, explicit: boolean): Promise<void> {
+    const g = this.glyphs;
+    const findings = actionableFindings(result);
+    if (findings.length === 0) {
+      if (explicit) this.print(["The last review has no findings to fix."]);
+      return;
+    }
+    let chosen = findings;
+    if (this.renderer.kind === "tui" && this.renderer.controls !== undefined) {
+      const answer = await this.typingPause(this.outer.signal)
+        .then(() =>
+          this.choose(
+            {
+              question: `Fix these? ${findings.length} finding${findings.length === 1 ? "" : "s"} from the review of ${result.target}`,
+              header: "Review",
+              subtitle: "checked findings go to Synorch as a follow-up message",
+              options: findings.map((finding) => ({
+                label: snippet(`${finding.severity} ${finding.path === undefined ? "" : `${finding.path}${finding.line === undefined ? "" : `:${finding.line}`} `}${finding.summary}`, 140),
+                ...(finding.recommendation === undefined ? {} : { description: snippet(finding.recommendation, 160) }),
+              })),
+              multiSelect: true,
+              initialChecked: findings.map((_, index) => index),
+              allowOther: false,
+              escapeLabel: "not now",
+              tone: "neutral",
+            },
+            this.outer.signal,
+          ),
+        )
+        .catch(() => undefined);
+      if (answer?.kind !== "selected" || answer.indices.length === 0) {
+        this.note("info", `Not sent ${g.sep} /review fix sends the findings later`);
         return;
       }
-      this.note("info", `${g.bullet} Review ${g.sep} independent (fresh context, ${reviewer}${crossProvider ? ", another provider" : ""}) ${g.sep} advisory, not a harness-verified review`);
-      for (const line of answer.trim().split(/\r?\n/)) this.note("info", `  ${line}`);
-      this.pendingNotes.push(`the user ran /review (${subject}); an independent reviewer (${reviewer}, fresh context) said: ${snippet(answer, 1500)}`);
-    } catch (error) {
-      if (!active.signal.aborted) this.showFailure(failureInfo(error));
-    } finally {
-      if (this.active === active) this.active = undefined;
-      await reviewLog.close().catch(() => undefined);
+      chosen = answer.indices.flatMap((index) => (findings[index] === undefined ? [] : [findings[index]]));
+    } else if (!explicit) {
+      this.note("info", `/review fix sends ${findings.length === 1 ? "this finding" : `these ${findings.length} findings`} to Synorch`);
+      return;
     }
+    this.queued.push({ text: fixFollowUpMessage(result, chosen), attachments: [], verbatim: true });
+    this.note("info", `${g.name === "rich" ? "→" : "->"} ${chosen.length} finding${chosen.length === 1 ? "" : "s"} sent to Synorch${this.turnRunning ? " (after the current turn)" : ""}`);
+    this.wakeIdle.abort();
   }
 
   public async commit(argument: string): Promise<void> {

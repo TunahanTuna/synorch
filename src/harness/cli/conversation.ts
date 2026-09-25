@@ -56,7 +56,7 @@ import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageTokens, reconstructHistory } from "../context/index.ts";
 import { WorkerStreamHub, type OrchestrationCoordinator, type WorkerControlResult, type WorkerDirectory } from "../orchestration/index.ts";
 import { classifyCommand, createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/index.ts";
-import { BUILTIN_THEMES, bindBackgroundStatus, defaultThemeName, describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, pickHint, selectGlyphs, shortenPath, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
+import { BUILTIN_THEMES, bindBackgroundStatus, defaultThemeName, describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, pickHint, quotaProviderLabel, runPrompts, selectGlyphs, shortenPath, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
 import { buildCommit, loadAppearance, planLabel, subscriptionPlan, userHome, workerModels } from "./appearance.ts";
 import { DEFAULT_WEB_DOMAINS, describeProcess } from "../tools/index.ts";
 import type { ParsedCommand } from "./args.ts";
@@ -686,20 +686,24 @@ class Conversation implements ConversationCommandHost {
   }
 
   /** The resume card (UX-06): the replayed tail, then where we were, what changed since, and the next step. */
-  private async showResumed(events: readonly SessionEvent[]): Promise<void> {
+  private async showResumed(all: readonly SessionEvent[]): Promise<void> {
     const g = this.glyphs;
+    // A `syn run` session: the planner's prompts are not the person's messages; the goal stands in for them.
+    const run = runPrompts(all);
+    const events = run.hidden.size === 0 ? all : all.filter((event) => !run.hidden.has(event));
     const users = events.flatMap((event, index) => (event.type === "message/recorded" && event.data.role === "user" ? [index] : []));
     const last = events.at(-1);
     const ago = last === undefined ? "" : ` ${g.sep} ${relativeTime(Date.parse(last.timestamp))}`;
     const firstShown = users.length > REPLAY_EXCHANGES ? (users[users.length - REPLAY_EXCHANGES] ?? 0) : 0;
     const folded = users.length > REPLAY_EXCHANGES ? users.length - REPLAY_EXCHANGES : 0;
     this.note("info", `${g.resume} Resumed${ago} ${g.sep} ${users.length} message${users.length === 1 ? "" : "s"}${folded === 0 ? "" : ` ${g.sep} ${folded} earlier not shown`}`);
+    if (run.goal !== undefined) this.note("info", `  run: ${snippet(run.goal, 160)}`);
     this.renderer.replay?.(events.slice(firstShown));
     for (const line of this.recoveryNotes.splice(0)) this.note("info", line);
-    for (const line of await this.continuity(events)) this.note("info", line);
+    for (const line of await this.continuity(events, run.goal)) this.note("info", line);
   }
 
-  private async continuity(events: readonly SessionEvent[]): Promise<string[]> {
+  private async continuity(events: readonly SessionEvent[], runGoal?: string): Promise<string[]> {
     const texts = (role: "user" | "assistant"): string[] =>
       events.flatMap((event) => {
         if (event.type !== "message/recorded" || event.data.role !== role || event.data.message === undefined) return [];
@@ -708,7 +712,7 @@ class Conversation implements ConversationCommandHost {
       });
     const lastUser = texts("user").at(-1);
     const lastAnswer = texts("assistant").at(-1);
-    const where = lastUser === undefined ? "nothing asked yet" : `"${snippet(lastUser, 70)}"${lastAnswer === undefined ? "" : ` → ${snippet(lastAnswer, 80)}`}`;
+    const where = lastUser === undefined ? (runGoal === undefined ? "nothing asked yet" : `run "${snippet(runGoal, 70)}"${lastAnswer === undefined ? "" : ` → ${snippet(lastAnswer, 80)}`}`) : `"${snippet(lastUser, 70)}"${lastAnswer === undefined ? "" : ` → ${snippet(lastAnswer, 80)}`}`;
 
     const changes: string[] = [];
     const restored = new Set(events.flatMap((event) => (event.type === "checkpoint/restored" ? [event.data.checkpoint_seq] : [])));
@@ -2644,8 +2648,22 @@ class Conversation implements ConversationCommandHost {
     const ledger = this.usageLedger;
     if (ledger === undefined) return;
     const views = this.renderer.views;
-    if (views !== undefined) views.showView(await ledger.view(Date.now() - this.startedAt));
+    if (views !== undefined) views.showView(await ledger.view(Date.now() - this.startedAt, await this.quotaPlans(), quotaProviderLabel));
     else this.print(await ledger.report());
+  }
+
+  /** Provider id → plan label (`ChatGPT Plus`, `Claude Code`) for `/usage`, subscription routes first. No network request. */
+  private async quotaPlans(): Promise<Map<string, string>> {
+    const runtime = this.runtime;
+    const plans = new Map<string, string>();
+    const method = (adapterId: string): string | undefined => runtime.adapters.find((adapter) => adapter.adapterId === adapterId)?.authMethod;
+    const rules = [...runtime.routeRules()].sort((left, right) => Number(method(left.route.adapter_id) === "api-key") - Number(method(right.route.adapter_id) === "api-key"));
+    for (const rule of rules) {
+      if (plans.has(rule.route.provider_id)) continue;
+      const plan = (await subscriptionPlan(runtime, rule.route, this.outer.signal).catch(() => undefined)) ?? planLabel(runtime, rule.route);
+      if (plan !== undefined) plans.set(rule.route.provider_id, plan);
+    }
+    return plans;
   }
 
   public async cost(): Promise<void> {

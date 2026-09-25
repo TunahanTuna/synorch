@@ -17,6 +17,7 @@ import {
   planIdSchema,
   projectIdSchema,
   proposalIdSchema,
+  providerIdSchema,
   requestIdSchema,
   runIdSchema,
   sessionIdSchema,
@@ -348,7 +349,8 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
   ),
   eventOf(
     "provider/usage",
-    z.strictObject({ request_id: requestIdSchema, usage: usageSchema, quota: quotaSnapshotSchema.optional() }),
+    // `provider_id` (optional, newer events): whose quota this is, so worker usage counts per provider.
+    z.strictObject({ request_id: requestIdSchema, usage: usageSchema, quota: quotaSnapshotSchema.optional(), provider_id: providerIdSchema.optional() }),
   ),
   eventOf(
     "tool/call_proposed",

@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { SessionEvent } from "../contracts/index.ts";
+import { WORKER_ROLES, type SessionEvent } from "../contracts/index.ts";
 import type { BillingView, QuotaWindowView, UsageRowView, UsageView } from "../contracts/views.ts";
 
 /**
@@ -29,6 +29,8 @@ interface Bucket {
 export interface UsageFooter {
   readonly quotaPercent?: number;
   readonly quotaWindow?: string;
+  /** Provider id of the most-used quota (`anthropic`, `openai`). */
+  readonly quotaProvider?: string;
   readonly costUsd?: number;
   readonly tokens: number;
   readonly requests: number;
@@ -37,7 +39,22 @@ export interface UsageFooter {
 interface UsageFile {
   readonly schema_version: 1;
   days: Record<string, Record<string, Bucket>>;
-  quota: Record<string, { window: string; percent: number; at: string; resetsAt?: string }>;
+  /** Per provider: the top window (`window`/`percent`/`resetsAt`, kept for older readers) and every window seen. */
+  quota: Record<string, ProviderQuota>;
+}
+
+interface QuotaWindow {
+  readonly name: string;
+  readonly percent: number;
+  readonly resetsAt?: string;
+}
+
+interface ProviderQuota {
+  window: string;
+  percent: number;
+  at: string;
+  resetsAt?: string;
+  windows?: QuotaWindow[];
 }
 
 interface RequestRoute {
@@ -45,6 +62,27 @@ interface RequestRoute {
   readonly model: string;
   readonly auth: string;
   readonly tier: string;
+  readonly role: string | undefined;
+}
+
+interface ProviderRequests {
+  total: number;
+  workers: number;
+  subscription: boolean;
+}
+
+const WORKERS: ReadonlySet<string> = new Set(WORKER_ROLES);
+
+/** `in 42m`, `in 3h 5m`, `in 2d` from an ISO time; `now` once passed. */
+export function resetIn(iso: string, now: Date): string {
+  const ms = Date.parse(iso) - now.getTime();
+  if (!Number.isFinite(ms)) return iso;
+  if (ms <= 0) return "now";
+  const minutes = Math.ceil(ms / 60_000);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `in ${hours}h${minutes % 60 === 0 ? "" : ` ${minutes % 60}m`}`;
+  return `in ${Math.round(hours / 24)}d`;
 }
 
 /** USD per million tokens (input, output); coarse public list prices, matched by substring. */
@@ -107,6 +145,7 @@ export class UsageLedger {
   private readonly routes = new Map<string, RequestRoute>();
   private readonly tiers = new Map<string, string>();
   private readonly sessionQuota = new Map<string, { window: string; percent: number }>();
+  private readonly providerRequests = new Map<string, ProviderRequests>();
   private loaded: Promise<void>;
   private saving: Promise<void> = Promise.resolve();
   private dirty = false;
@@ -150,6 +189,7 @@ export class UsageLedger {
         model: route.model_id,
         auth: route.auth_method,
         tier: this.tiers.get(key) ?? event.actor.role ?? "unknown",
+        role: event.actor.role,
       });
       return;
     }
@@ -179,16 +219,30 @@ export class UsageLedger {
     const dayBucket = days[key] ?? emptyBucket();
     add(dayBucket, bucket);
     days[key] = dayBucket;
-    const quota = event.data.quota;
-    if (quota !== undefined && quota.windows.length > 0 && route !== undefined) {
-      const top = [...quota.windows].sort((left, right) => right.used_percent - left.used_percent)[0];
-      if (top !== undefined) {
-        this.sessionQuota.set(route.provider, { window: top.name, percent: top.used_percent });
-        this.data.quota[route.provider] = { window: top.name, percent: top.used_percent, at: this.now().toISOString(), ...(top.resets_at === undefined ? {} : { resetsAt: top.resets_at }) };
-      }
+    const provider = event.data.provider_id ?? route?.provider;
+    if (provider !== undefined) {
+      const counts = this.providerRequests.get(provider) ?? { total: 0, workers: 0, subscription: false };
+      counts.total += 1;
+      if (WORKERS.has(route?.role ?? event.actor.role ?? "")) counts.workers += 1;
+      if (subscription) counts.subscription = true;
+      this.providerRequests.set(provider, counts);
     }
+    const quota = event.data.quota;
+    if (quota !== undefined && quota.windows.length > 0 && provider !== undefined) this.recordQuota(provider, quota.windows);
     this.schedule();
     for (const listener of this.listeners) listener();
+  }
+
+  /** Merges a snapshot into the provider's windows (a bridge may report one window at a time). */
+  private recordQuota(provider: string, windows: readonly { readonly name: string; readonly used_percent: number; readonly resets_at?: string | undefined }[]): void {
+    const previous = this.data.quota[provider];
+    const merged = new Map<string, QuotaWindow>((previous?.windows ?? []).map((window) => [window.name, window]));
+    for (const window of windows) merged.set(window.name, { name: window.name, percent: window.used_percent, ...(window.resets_at === undefined ? {} : { resetsAt: window.resets_at }) });
+    const all = [...merged.values()].sort((left, right) => right.percent - left.percent);
+    const top = all[0];
+    if (top === undefined) return;
+    this.sessionQuota.set(provider, { window: top.name, percent: top.percent });
+    this.data.quota[provider] = { window: top.name, percent: top.percent, at: this.now().toISOString(), ...(top.resetsAt === undefined ? {} : { resetsAt: top.resetsAt }), windows: all };
   }
 
   private schedule(): void {
@@ -232,11 +286,11 @@ export class UsageLedger {
   /** Session totals (footer-style figures): tokens, requests, the highest quota window, the estimated cost. */
   public footer(): UsageFooter {
     const total = this.totals(this.session.values());
-    const quota = [...this.sessionQuota.values()].sort((left, right) => right.percent - left.percent)[0];
+    const quota = [...this.sessionQuota.entries()].sort((left, right) => right[1].percent - left[1].percent)[0];
     return {
       tokens: total.input + total.output,
       requests: total.requests,
-      ...(quota === undefined ? {} : { quotaPercent: Math.round(quota.percent), quotaWindow: quota.window }),
+      ...(quota === undefined ? {} : { quotaPercent: Math.round(quota[1].percent), quotaWindow: quota[1].window, quotaProvider: quota[0] }),
       ...(total.costUsd > 0 ? { costUsd: total.costUsd } : {}),
     };
   }
@@ -263,16 +317,39 @@ export class UsageLedger {
       });
   }
 
-  /** `/usage` as U3's `UsageView` (session rows, today's rows, quota windows). */
-  public async view(sessionElapsedMs: number | undefined): Promise<UsageView> {
+  /** Providers to list under quota: every one with a reported quota, then subscriptions used this session. */
+  private quotaProviders(): string[] {
+    const names = Object.keys(this.data.quota);
+    for (const [provider, counts] of this.providerRequests) if (counts.subscription && !names.includes(provider)) names.push(provider);
+    const top = (provider: string): number => this.data.quota[provider]?.percent ?? -1;
+    return names.sort((left, right) => top(right) - top(left));
+  }
+
+  /**
+   * `/usage` as U3's `UsageView` (session rows, today's rows, quota windows per provider). `plans`
+   * maps provider id → plan label, `label` provider id → short name (`claude`, `chatgpt`).
+   */
+  public async view(sessionElapsedMs: number | undefined, plans: ReadonlyMap<string, string> = new Map(), label: (provider: string) => string = (provider) => provider): Promise<UsageView> {
     await this.loaded;
     const day = this.data.days[today(this.now())] ?? {};
-    const quotas: QuotaWindowView[] = Object.entries(this.data.quota).map(([provider, quota]) => ({
-      provider,
-      window: quota.window,
-      usedPercent: quota.percent,
-      ...(quota.resetsAt === undefined ? {} : { resetsAt: quota.resetsAt.slice(11, 16) || quota.resetsAt }),
-    }));
+    const quotas: QuotaWindowView[] = [];
+    for (const provider of this.quotaProviders()) {
+      const quota = this.data.quota[provider];
+      const counts = this.providerRequests.get(provider);
+      const plan = plans.get(provider);
+      const head = { ...(plan === undefined ? {} : { plan }), ...(counts === undefined ? {} : { requests: { total: counts.total, workers: counts.workers } }) };
+      const windows = quota === undefined ? [] : (quota.windows ?? [{ name: quota.window, percent: quota.percent, ...(quota.resetsAt === undefined ? {} : { resetsAt: quota.resetsAt }) }]);
+      if (windows.length === 0) quotas.push({ provider: label(provider), window: "", usedPercent: undefined, ...head });
+      windows.forEach((window, index) =>
+        quotas.push({
+          provider: label(provider),
+          window: window.name,
+          usedPercent: window.percent,
+          ...(window.resetsAt === undefined ? {} : { resetsAt: resetIn(window.resetsAt, this.now()) }),
+          ...(index === 0 ? head : {}),
+        }),
+      );
+    }
     return {
       kind: "usage",
       session: this.viewRows(this.session),
@@ -304,10 +381,20 @@ export class UsageLedger {
     const day = this.data.days[today(this.now())] ?? {};
     const lines = [this.summary("This session", this.totals(this.session.values())), ...this.rows(this.session)];
     lines.push(this.summary("Today", this.totals(Object.values(day))), ...this.rows(day));
-    const quotas = Object.entries(this.data.quota);
-    if (quotas.length === 0) lines.push("Quota: no subscription quota reported by the providers used so far");
-    for (const [provider, quota] of quotas) {
-      lines.push(`Quota ${provider}: ${Math.round(quota.percent)}% of the ${quota.window} window used${quota.resetsAt === undefined ? "" : ` · resets ${quota.resetsAt}`} (as of ${quota.at.slice(0, 16).replace("T", " ")})`);
+    const providers = this.quotaProviders();
+    if (providers.length === 0) lines.push("Quota: no subscription quota reported by the providers used so far");
+    for (const provider of providers) {
+      const quota = this.data.quota[provider];
+      const counts = this.providerRequests.get(provider);
+      const requests = counts === undefined ? "" : ` · ${counts.total} request${counts.total === 1 ? "" : "s"} this session (${counts.workers} by workers)`;
+      if (quota === undefined) {
+        lines.push(`Quota ${provider}: not reported by the provider${requests}`);
+        continue;
+      }
+      const windows = (quota.windows ?? [{ name: quota.window, percent: quota.percent, ...(quota.resetsAt === undefined ? {} : { resetsAt: quota.resetsAt }) }])
+        .map((window) => `${Math.round(window.percent)}% of the ${window.name} window${window.resetsAt === undefined ? "" : ` (resets ${resetIn(window.resetsAt, this.now())})`}`)
+        .join(", ");
+      lines.push(`Quota ${provider}: ${windows} used${requests} (as of ${quota.at.slice(0, 16).replace("T", " ")})`);
     }
     lines.push("Costs marked ~ are estimates for API-key routes; subscription routes show quota instead.");
     return lines;
@@ -317,7 +404,7 @@ export class UsageLedger {
   public cost(): string[] {
     const total = this.totals(this.session.values());
     const footer = this.footer();
-    const quota = footer.quotaPercent === undefined ? "" : ` · quota ${footer.quotaPercent}% (${footer.quotaWindow ?? "window"})`;
+    const quota = footer.quotaPercent === undefined ? "" : ` · quota ${footer.quotaPercent}% (${footer.quotaProvider === undefined ? "" : `${footer.quotaProvider} `}${footer.quotaWindow ?? "window"})`;
     const cost = total.costUsd > 0 ? `~${money(total.costUsd)} estimated` : total.unpriced > 0 ? "cost unknown for this route" : "no API-key cost (subscription or no requests)";
     return [`This session: ${cost} · ${compact(total.input + total.output)} tokens · ${total.requests} request${total.requests === 1 ? "" : "s"}${quota}`];
   }

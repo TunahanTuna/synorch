@@ -184,8 +184,10 @@ function isWide(code: number): boolean {
     (code >= 0xfe30 && code <= 0xfe4f) ||
     (code >= 0xff00 && code <= 0xff60) ||
     (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x1f1e6 && code <= 0x1f1ff) ||
     (code >= 0x1f300 && code <= 0x1f64f) ||
-    (code >= 0x1f900 && code <= 0x1f9ff) ||
+    (code >= 0x1f680 && code <= 0x1f6ff) ||
+    (code >= 0x1f900 && code <= 0x1faff) ||
     (code >= 0x20000 && code <= 0x3fffd)
   );
 }
@@ -194,16 +196,35 @@ function isZeroWidth(code: number): boolean {
   return (code >= 0x0300 && code <= 0x036f) || (code >= 0x200b && code <= 0x200f) || code === 0xfe0f || (code >= 0x1ab0 && code <= 0x1aff);
 }
 
-export function charWidth(char: string): number {
-  const code = char.codePointAt(0) ?? 0;
-  if (isZeroWidth(code)) return 0;
-  return isWide(code) ? 2 : 1;
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const PRINTABLE_ASCII = /^[\x20-\x7e]*$/;
+/** Inside a cluster: joiner, emoji presentation, keycap, skin tone, regional indicator, tag. */
+const EMOJI_SEQUENCE = /[‍️⃣\u{1f3fb}-\u{1f3ff}\u{1f1e6}-\u{1f1ff}\u{e0020}-\u{e007f}]/u;
+
+/** User-perceived characters: a ZWJ family, a flag, a skin-toned hand or `e` + accent stay one unit. */
+export function graphemes(text: string): string[] {
+  if (PRINTABLE_ASCII.test(text)) return [...text];
+  return Array.from(GRAPHEMES.segment(text), (part) => part.segment);
 }
 
-/** Visible width of a line (SGR sequences ignored). */
+/** Cells of one grapheme (as pi-tui measures it): emoji sequences take 2, marks and joiners 0. */
+export function charWidth(char: string): number {
+  const code = char.codePointAt(0) ?? 0;
+  const rest = char.slice(code > 0xffff ? 2 : 1);
+  if (rest === "") return isZeroWidth(code) ? 0 : isWide(code) ? 2 : 1;
+  if (EMOJI_SEQUENCE.test(rest) || (code >= 0x1f000 && code <= 0x1fbff)) return 2;
+  let width = 0;
+  for (const part of char) {
+    const point = part.codePointAt(0) ?? 0;
+    if (!isZeroWidth(point)) width = Math.max(width, isWide(point) ? 2 : 1);
+  }
+  return width;
+}
+
+/** Visible width of a line (SGR sequences ignored), grapheme by grapheme. */
 export function displayWidth(text: string): number {
   let width = 0;
-  for (const char of text.replace(ANSI, "")) width += charWidth(char);
+  for (const char of graphemes(text.replace(ANSI, ""))) width += charWidth(char);
   return width;
 }
 
@@ -215,7 +236,7 @@ export function truncate(text: string, width: number, ellipsis = "…"): string 
   if (room <= 0) return ellipsis.slice(0, width);
   let out = "";
   let used = 0;
-  for (const char of text) {
+  for (const char of graphemes(text)) {
     const w = charWidth(char);
     if (used + w > room) break;
     out += char;
@@ -248,7 +269,8 @@ export function fitLine(line: string, width: number): string {
       index += sgr[0].length;
       continue;
     }
-    const char = String.fromCodePoint(line.codePointAt(index) ?? 32);
+    const escape = line.indexOf("\x1b", index);
+    const char = graphemes(line.slice(index, escape === -1 ? undefined : escape))[0] ?? " ";
     const w = charWidth(char);
     if (used + w > width - 1) break;
     out += char;

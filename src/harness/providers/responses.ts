@@ -317,10 +317,22 @@ export function parseCodexQuota(headers: Headers): QuotaSnapshot | undefined {
     const used = headers.get(`x-codex-${name}-used-percent`);
     if (used === null || used.trim() === "" || Number.isNaN(Number(used))) continue;
     const percent = Math.min(100, Math.max(0, Number(used)));
-    const resetsAt = parseReset(headers.get(`x-codex-${name}-reset-at`));
-    windows.push(resetsAt === undefined ? { name, used_percent: percent } : { name, used_percent: percent, resets_at: resetsAt });
+    const after = Number(headers.get(`x-codex-${name}-reset-after-seconds`) ?? "");
+    const resetsAt = parseReset(headers.get(`x-codex-${name}-reset-at`)) ?? (Number.isFinite(after) && after > 0 ? new Date(Date.now() + after * 1000).toISOString() : undefined);
+    const label = windowLabel(headers.get(`x-codex-${name}-window-minutes`)) ?? name;
+    windows.push(resetsAt === undefined ? { name: label, used_percent: percent } : { name: label, used_percent: percent, resets_at: resetsAt });
   }
   return windows.length === 0 ? undefined : { source: "headers", windows };
+}
+
+/** `x-codex-*-window-minutes` → `5h`, `weekly`, `90m`; undefined when absent. */
+function windowLabel(value: string | null): string | undefined {
+  const minutes = Number(value ?? "");
+  if (value === null || value.trim() === "" || !Number.isFinite(minutes) || minutes <= 0) return undefined;
+  if (minutes === 10_080) return "weekly";
+  if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440}d`;
+  if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${Math.round(minutes)}m`;
 }
 
 function parseReset(value: string | null): string | undefined {

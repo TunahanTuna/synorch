@@ -569,6 +569,7 @@ class FixedAgentDriver implements PausableAgentDriver {
       request_id: step.requestId,
       usage: outcome.usage ?? { source: "unknown" },
       ...(outcome.quota === undefined ? {} : { quota: outcome.quota }),
+      provider_id: step.input.route.provider_id,
     });
   }
 

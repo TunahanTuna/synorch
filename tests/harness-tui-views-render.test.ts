@@ -123,8 +123,9 @@ test("usage shows dollars for API keys, plan + quota meters for subscriptions, a
   assert.match(text, /anthropic opus-5\.5\s+deep\s+12\s+120k\s+8\.2k\s+90k\s+~\$0\.41/);
   assert.match(text, /openai gpt-6-sol\s+fast\s+4\s+22k\s+1\.1k\s+0\s+plan/);
   assert.match(text, /by provider\s+session\s+today/);
-  assert.match(text, /claude-code 5h\s+█+░+\s+58% resets 14:20/);
-  assert.match(text, /codex weekly\s+█+░\s+93%/);
+  assert.match(text, /claude {2}Claude Code · 9 req \(7 by workers\)\n {4}5h\s+█+░+\s+58% resets in 1h 20m/);
+  assert.match(text, /chatgpt {2}ChatGPT Plus · 4 req\n {4}weekly\s+█+░\s+93%\n {4}5h\s+█+░+\s+12%/);
+  assert.match(text, /gemini\n {4}quota not reported yet/);
   assert.match(text, /session\s+16 req · 142k in · 9\.3k out · 90k cache · ~\$0\.41/);
   assert.match(text, /today\s+42 req/);
   assert.match(text, /estimated/);

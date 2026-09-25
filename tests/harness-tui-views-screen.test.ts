@@ -156,7 +156,7 @@ test("cards and the graph are pinned to the transcript and fit a 60-column termi
     tui.showGraph(BOARD);
     const screen = await settle();
     assert.match(screen, /● Usage · this session · 1h 12m vs today/);
-    assert.match(screen, /claude-code 5h\s+█+░+\s+58% resets 14:20/);
+    assert.match(screen, /claude {2}Claude Code · 9 req \(7 by workers\)\n {4}5h\s+█+░+\s+58% resets in 1h 20m/);
     assert.match(screen, /\[✓ independently reviewed\]/);
     assert.match(screen, /╭─ Delete 14 files\? ─+╮/);
     assert.match(screen, /Why was this denied\?/);

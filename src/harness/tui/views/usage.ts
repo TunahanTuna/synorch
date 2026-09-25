@@ -169,14 +169,26 @@ export function renderUsage(view: UsageView, ctx: ViewContext): string[] {
   if (quotas.length > 0) {
     lines.push("");
     lines.push(t.muted("  quota"));
-    const labelW = Math.min(20, Math.max(8, ...quotas.map((quota) => displayWidth(`${clean(quota.provider, 16)} ${clean(quota.window, 10)}`))));
-    const meterW = Math.max(6, Math.min(20, width - 2 - labelW - 1 - 5 - 16));
+    // One block per provider: `chatgpt  ChatGPT Plus · 12 req (8 by workers)`, then its windows as meters.
+    const labelW = Math.min(14, Math.max(6, ...quotas.map((quota) => displayWidth(clean(quota.window, 12)))));
+    const meterW = Math.max(6, Math.min(20, width - 4 - labelW - 1 - 5 - 16));
+    let provider: string | undefined;
     for (const quota of quotas) {
+      if (quota.provider !== provider) {
+        provider = quota.provider;
+        const requests = quota.requests === undefined ? undefined : `${formatCount(quota.requests.total)} req${quota.requests.workers > 0 ? ` (${formatCount(quota.requests.workers)} by workers)` : ""}`;
+        const detail = [quota.plan === undefined ? undefined : clean(quota.plan, 40), requests].filter((part): part is string => part !== undefined).join(` ${sep} `);
+        lines.push(`  ${t.accent(clean(provider, 16))}${detail === "" ? "" : t.muted(`  ${detail}`)}`);
+      }
+      if (quota.usedPercent === undefined) {
+        lines.push(t.muted("    quota not reported yet"));
+        continue;
+      }
       const percent = Math.round(Math.min(100, Math.max(0, quota.usedPercent)));
       const meter = meterBar(percent / 100, meterW, g);
       const tone = percent >= 90 ? t.error : percent >= 70 ? t.warning : t.success;
       const resets = quota.resetsAt === undefined ? "" : t.muted(` resets ${clean(quota.resetsAt, 20)}`);
-      lines.push(`  ${padEnd(`${clean(quota.provider, 16)} ${clean(quota.window, 10)}`, labelW)} ${tone(meter.filled)}${t.muted(meter.empty)} ${padStart(`${percent}%`, 4)}${resets}`);
+      lines.push(`    ${padEnd(clean(quota.window, 12), labelW)} ${tone(meter.filled)}${t.muted(meter.empty)} ${padStart(`${percent}%`, 4)}${resets}`);
     }
   }
 

@@ -82,7 +82,7 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - Çapraz sağlayıcılı review (K1.5 ile birleşir).
 - MCP client (harici araçlar, gateway altında).
 - Zamanda yolculuk: oturumun herhangi bir anından fork.
-- **UI eki — alt durum satırı (ürün sahibi, 2026-09-25):** Hata: `/model` ile model değişince alttaki model/bağlam bilgisi güncellenmiyor. Durum satırı canlı state'ten beslenmeli: model, efor (K6), izin modu, bağlam %, kota; her değişiklikte (`/model`, `/effort`, Shift+Tab, compact) anında yenilenmeli. Görünüm daha okunur ve renkli olmalı: alanlar ayrı renk/ton, bağlam ve kota eşiklere göre renk (yeşil → sarı → kırmızı), dar terminalde öncelik sırasıyla kısalma.
+- ✅ (`8ae9e99`) **UI eki — alt durum satırı (ürün sahibi, 2026-09-25):** Hata: `/model` ile model değişince alttaki model/bağlam bilgisi güncellenmiyor. Durum satırı canlı state'ten beslenmeli: model, efor (K6), izin modu, bağlam %, kota; her değişiklikte (`/model`, `/effort`, Shift+Tab, compact) anında yenilenmeli. Görünüm daha okunur ve renkli olmalı: alanlar ayrı renk/ton, bağlam ve kota eşiklere göre renk (yeşil → sarı → kırmızı), dar terminalde öncelik sırasıyla kısalma.
 
 ### K4 — Yetenekler: internet ve araç seti (ürün sahibi isteği, 2026-09-24) ⭐
 Ürün sahibi harness'la konuşurken internete çıkamadığını ve bazı yeteneklerin eksik olduğunu fark etti: "yetenekli bir aracımız olsun". Önce araştırma + bağlam, sonra uygulama.
@@ -92,14 +92,14 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - **K4.2 Eksik araçlar:** araştırmanın P0/P1 çıktıları (ör. arka plan komut + çıktı izleme, todo/plan aracı, görsel okuma, LSP/diagnostics, glob).
 - **K4.3 İsteğe bağlı:** tarayıcı otomasyonu (Playwright/CDP) ve MCP üzerinden harici yetenekler (K3 MCP client ile birleşir).
 
-### K5 — Etkileşimli soru/seçim deneyimi (ürün sahibi isteği, 2026-09-24) ⭐ UX
+### ✅ K5 — Etkileşimli soru/seçim deneyimi (ürün sahibi isteği, 2026-09-24) ⭐ UX — yapıldı `7492d98`: tek seçim modalı (oklar/Enter/1–9, çoklu seçim Space, Önerilen, Diğer…, Esc), tüm istemler taşındı, `ask_user` aracı (Claude AskUserQuestion şeması), Claude Code'un AskUserQuestion'ı modala (2.1.282'de canlı doğrulandı). Gerçek terminalde deneme bekliyor.
 Ürün sahibi: "Soru sorduğunda 1 veya 2 yazıp Enter'a basmamı istiyor; cevabım modele mesaj olarak gidip thinking'e düşüyor, sonra kabul ediliyor. Ayrı bir input/pop-up/modal olsun. Claude Code'daki gibi planlarken bana seçenekli sorular sorsun."
 - ✅ (`2adcf0d`, `controls.ask()` istem girdiyi sahiplenir; seçimler picker ile) **Hata (K5'in ilk işi):** onay/soru istemleri (ör. `/init` "Write the Synorch structure into this repository? 1. Create the files 2. Cancel") normal giriş kutusunu kullanıyor; yazılan cevap aynı zamanda sohbete mesaj olarak sızıyor ve modeli tetikliyor. İstem açıkken giriş yalnız isteme gitmeli.
 - **Seçim modalı (tek bileşen, tüm istemler için):** editörün yerine/üstünde odaklı katman; oklarla gezin, Enter ile seç, sayı kısayolları; tek seçim ve çoklu seçim (Space ile tikle); "Önerilen" etiketi; her soruda "Diğer…" ile serbest metin; Esc = iptal/ret; plain modda numaralı eşdeğer. `/init`, onay kartları, `/model`, `/config`, trust istemi, karar masası bu bileşeni kullanır.
 - **Agent'ın soru aracı (Claude Code AskUserQuestion benzeri):** `ask_user` yapılandırılmış sorular alır: 1–4 soru, her biri 2–4 seçenek (açıklama + isteğe bağlı önizleme), `multiSelect`, önerilen seçenek; kullanıcı cevabı yapılandırılmış olarak modele döner. Plan modunda ve planlama sırasında agent önerileriyle seçenek sunar; kullanıcı seçer veya kendi alternatifini yazar. Sohbet akışından ayrı bir etkileşim alanı olarak görünür, cevap transkripte kısa bir özet satırı olarak düşer.
 - Claude Code köprüsünde Claude'un kendi AskUserQuestion çağrıları da bu modala yönlendirilir.
 
-### K6 — Model eforu (reasoning effort) ayarı (ürün sahibi isteği, 2026-09-25) ⭐ — akşam başlanacak
+### ✅ K6 — Model eforu (reasoning effort) ayarı (ürün sahibi isteği, 2026-09-25) ⭐ — yapıldı `8ae9e99`: rol/tier başına `effort` config, `--effort`, `/effort`, `/model` sonrası efor seçici, modele göre seviye kısıtlama; OpenAI `reasoning.effort`, Claude köprüsü `--effort`, Anthropic `output_config.effort`. Canlı sağlayıcıyla deneme bekliyor; orchestrator görev başına efor önerisi yapılmadı.
 Ürün sahibi: "Kullanılan modelin eforu da değiştirilebilir olmalı; buna dair bir ayar görmedim, istediğimiz eforu kullanabilmeliyiz."
 - **Ayar:** rol başına efor (orchestrator / complex_worker / fast_worker / session) `~/.synorch/config.yaml` ve `syn config` ile; tek seferlik `--effort` bayrağı.
 - **Oturum içinde:** `/effort` komutu + `/model` seçicisinde model yanında efor seçimi (K5 seçim modalıyla); geçerli efor başlık/durum satırında görünür (ör. `gpt-6-sol · high`).
@@ -116,7 +116,7 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - macOS + Windows CI hatalarını düzelt (Ubuntu yeşil; ilk CI run `35917000110`).
 - Windows OS sandbox (AppContainer + job object) — HD-03.
 - Güveni commit/lockfile değişikliğine bağlama.
-- Paketleme ve dağıtım (npm yayını ayrı karar; `main`e taşıma ayrı karar).
+- ✅ Paketleme (`31e28fc`): kendi kendine yeten paket, `pnpm run install:global` → global `syn`; [install.md](install.md). npm yayını ve `main`e taşıma ayrı karar.
 
 ## Çalışma kuralları (hatırlatma)
 - Build-first, test-light: ürünü önce eline ver, hataları kullanımla düzelt.

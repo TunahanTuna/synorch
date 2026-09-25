@@ -195,6 +195,8 @@ export interface ConversationCommandHost {
   allow(argument: string): Promise<void>;
   trust(): Promise<void>;
   model(argument: string): Promise<void>;
+  /** K6 `/effort [level] [--tier <tier>]`: set, or with no level pick, a tier's reasoning effort for this session. */
+  effort(argument: string): Promise<void>;
   review(argument: string): Promise<void>;
   commit(argument: string): Promise<void>;
   usage(): Promise<void>;
@@ -238,6 +240,7 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/workers", argsHint: "<goal>", description: "run a large goal with parallel workers and an independent reviewer; alone: list the workers", whileBusy: true, run: (host, argument) => host.workers(argument) },
   { name: "/worker", argsHint: "[key] [message | --pause | --resume | --cancel]", description: "one worker: its assignment and recent activity, or message / pause / resume / cancel it", whileBusy: true, run: (host, argument) => host.worker(argument) },
   { name: "/model", argsHint: "[tier] [provider/model] [--save]", description: "every logged-in provider's models; set a tier's model for this session (--save keeps it)", run: (host, argument) => host.model(argument) },
+  { name: "/effort", argsHint: "[level] [--tier <tier>]", description: "reasoning effort of the conversation model (low … max, ultra); alone: pick one. Applies to the next request", whileBusy: true, run: (host, argument) => host.effort(argument) },
   { name: "/review", argsHint: "[focus]", description: "independent review of the uncommitted changes (fresh context)", run: (host, argument) => host.review(argument) },
   { name: "/commit", argsHint: "[message]", description: "diff summary and a proposed message; commits only after you confirm", run: (host, argument) => host.commit(argument) },
   { name: "/undo", description: "revert the last edit Synorch made (files only)", run: (host) => host.undo() },

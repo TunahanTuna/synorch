@@ -449,6 +449,7 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
         messages: state.messages,
         tools: state.tools,
         max_output_tokens: maxOutput,
+        ...(input.reasoningEffort === undefined ? {} : { reasoning_effort: input.reasoningEffort }),
         cache: { key: promptCacheKey(input.sessionId, input.role), stable_system_blocks: Math.min(64, stablePrefixLength(state.blocks)) },
       };
       const toolResultTokens = state.messages.filter((message) => message.role === "tool").reduce((sum, message) => sum + messageTokens(message), 0);

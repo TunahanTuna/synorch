@@ -158,6 +158,37 @@ export const promptCacheSchema = z.strictObject({
 export type PromptCache = z.infer<typeof promptCacheSchema>;
 
 /**
+ * K6 reasoning effort, lowest to highest: the union of what the providers accept (verified
+ * 2026-09-25). ChatGPT/OpenAI Responses `reasoning.effort` (the Codex models listing reports
+ * `supported_reasoning_levels` low…max, plus `ultra` on frontier models); Anthropic Messages
+ * `output_config.effort` low…max; Claude Code `--effort` low…max. Which levels a model takes comes
+ * from the model catalog; an unsupported level is clamped to the nearest supported one.
+ */
+export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export const reasoningEffortSchema = z.enum(REASONING_EFFORTS);
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+/**
+ * K6 `effort` block of the user configuration: one level per model tier, and per worker role
+ * (a role level wins over its tier's). Unset slots keep the provider default.
+ *
+ * @example { session: "high", complex_worker: "xhigh", fast_worker: "low", reviewer: "high" }
+ */
+export const effortConfigSchema = z.strictObject({
+  session: reasoningEffortSchema.optional(),
+  orchestrator: reasoningEffortSchema.optional(),
+  complex_worker: reasoningEffortSchema.optional(),
+  fast_worker: reasoningEffortSchema.optional(),
+  explorer: reasoningEffortSchema.optional(),
+  implementer: reasoningEffortSchema.optional(),
+  debugger: reasoningEffortSchema.optional(),
+  reviewer: reasoningEffortSchema.optional(),
+});
+export type EffortConfig = z.infer<typeof effortConfigSchema>;
+export type EffortSlot = keyof EffortConfig;
+export const EFFORT_SLOTS = Object.keys(effortConfigSchema.shape) as EffortSlot[];
+
+/**
  * Everything the model sees for one step. It is built by the ContextBuilder from the event log
  * and blobs, recorded (as a blob) before it is sent, and bound by `envelopeDigest`.
  */
@@ -168,7 +199,7 @@ export const modelRequestSchema = z.strictObject({
   messages: z.array(modelMessageSchema),
   tools: z.array(toolDescriptorSchema),
   max_output_tokens: z.int().positive().optional(),
-  reasoning_effort: z.enum(["low", "medium", "high"]).optional(),
+  reasoning_effort: reasoningEffortSchema.optional(),
   cache: promptCacheSchema.optional(),
 });
 export type ModelRequest = z.infer<typeof modelRequestSchema>;
@@ -440,6 +471,8 @@ export interface BackendSessionOptions {
   readonly systemPrompt: string;
   readonly maxTurns: number;
   readonly resumeBackendSessionId: string | undefined;
+  /** K6: the step's reasoning effort (Claude Code `--effort`); undefined keeps the backend default. */
+  readonly reasoningEffort?: ReasoningEffort;
   /** Environment passed to the child; `BRIDGE_STRIPPED_ENV` names are always removed. */
   readonly env: Readonly<Record<string, string>>;
 }

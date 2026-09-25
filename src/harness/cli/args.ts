@@ -8,6 +8,8 @@ import {
   POLICY_MODES,
   profileNameSchema,
   providerIdSchema,
+  REASONING_EFFORTS,
+  reasoningEffortSchema,
   runIdSchema,
   sessionIdSchema,
   type AuthMethodKind,
@@ -15,6 +17,7 @@ import {
   type PermissionMode,
   type PolicyMode,
   type ProviderId,
+  type ReasoningEffort,
   type RunId,
   type SessionId,
 } from "../contracts/index.ts";
@@ -62,6 +65,14 @@ export interface SessionFlags {
    */
   readonly permission: PermissionMode | undefined;
   readonly profiles: readonly RouteOverride[];
+  /** K6 `--effort <level>` (every tier) or `--effort <tier>=<level>`; this invocation only, never persisted. */
+  readonly efforts: readonly EffortOverride[];
+}
+
+export interface EffortOverride {
+  /** Undefined: every tier. */
+  readonly tier: ModelTier | undefined;
+  readonly level: ReasoningEffort;
 }
 
 export type ParsedCommand =
@@ -101,6 +112,7 @@ const SESSION_OPTIONS = {
   policy: { type: "string" },
   "permission-mode": { type: "string" },
   profile: { type: "string", multiple: true },
+  effort: { type: "string", multiple: true },
 } as const;
 
 export const HARNESS_COMMAND_OPTIONS = {
@@ -190,7 +202,24 @@ function common(command: string, values: { target?: string | undefined; plain?: 
 
 const RUN_PERMISSION_MODES = ["auto", "full"] as const;
 
-function session(command: string, values: { policy?: string | undefined; profile?: string[] | undefined; "permission-mode"?: string | undefined }): SessionFlags {
+function efforts(command: string, entries: readonly string[]): EffortOverride[] {
+  const parsed = entries.map((entry) => {
+    const separator = entry.indexOf("=");
+    const tierText = separator === -1 ? undefined : entry.slice(0, separator);
+    const level = reasoningEffortSchema.safeParse((separator === -1 ? entry : entry.slice(separator + 1)).trim().toLowerCase());
+    const tier = tierText === undefined ? undefined : modelTierSchema.safeParse(tierText);
+    if (!level.success || (tier !== undefined && !tier.success)) {
+      throw new UsageError(`Invalid --effort: ${entry}. Expected <level> or <tier>=<level> with level ${REASONING_EFFORTS.join(", ")} and tier ${modelTierSchema.options.join(", ")}.`, command);
+    }
+    return { tier: tier?.data, level: level.data };
+  });
+  const keys = parsed.map((entry) => entry.tier ?? "*");
+  const duplicate = keys.find((key, index) => keys.indexOf(key) !== index);
+  if (duplicate !== undefined) throw new UsageError(`--effort sets ${duplicate === "*" ? "the default level" : `tier ${duplicate}`} more than once.`, command);
+  return parsed;
+}
+
+function session(command: string, values: { policy?: string | undefined; profile?: string[] | undefined; effort?: string[] | undefined; "permission-mode"?: string | undefined }): SessionFlags {
   const profiles = (values.profile ?? []).map((entry) => {
     const separator = entry.indexOf("=");
     const tier = modelTierSchema.safeParse(separator === -1 ? entry : entry.slice(0, separator));
@@ -205,7 +234,7 @@ function session(command: string, values: { policy?: string | undefined; profile
   if (duplicate !== undefined) throw new UsageError(`--profile sets tier ${duplicate} more than once.`, command);
   const raw = values["permission-mode"];
   const permission = raw === undefined ? undefined : command === "run" ? oneOf(command, "--permission-mode", raw, RUN_PERMISSION_MODES, "auto") : oneOf(command, "--permission-mode", raw, PERMISSION_MODES, "auto");
-  return { policy: oneOf(command, "--policy", values.policy, POLICY_MODES, "autonomous"), permission, profiles };
+  return { policy: oneOf(command, "--policy", values.policy, POLICY_MODES, "autonomous"), permission, profiles, efforts: efforts(command, values.effort ?? []) };
 }
 
 function noPositionals(command: string, positionals: readonly string[]): void {

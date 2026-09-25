@@ -18,7 +18,11 @@ const SESSION = `Session options:
                                risky commands; full prompts for nothing (hard rails stay);
                                plan is read-only. Shift+Tab cycles them. run: auto|full;
                                headless auto turns every question into a refusal.
-      --profile <tier>=<route> Session-only model route override; repeatable, never persisted.`;
+      --profile <tier>=<route> Session-only model route override; repeatable, never persisted.
+      --effort [<tier>=]<level>
+                               Reasoning effort for this invocation (low, medium, high,
+                               xhigh, max, ultra); without a tier every tier. Clamped to
+                               what the model supports. Persist with syn config set effort.<tier>.`;
 
 const EXIT_CODES = `Exit codes:
   0 success, 1 internal, 2 usage, 3 approval, 4 provider/tool, 5 verification,

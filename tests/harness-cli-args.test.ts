@@ -70,7 +70,7 @@ test("every contract command and flag parses into a typed invocation", () => {
   assert.deepEqual(parseHarnessArgs(["agent"]), {
     kind: "agent",
     common: { target: undefined, plain: false, color: "auto" },
-    session: { policy: "autonomous", permission: undefined, profiles: [] },
+    session: { policy: "autonomous", permission: undefined, profiles: [], efforts: [] },
     resume: undefined,
     fork: undefined,
     continue: false,
@@ -84,6 +84,15 @@ test("every contract command and flag parses into a typed invocation", () => {
   assert.deepEqual(agent.session.profiles.map((profile) => profile.tier), ["complex_worker", "fast_worker"]);
   assert.deepEqual(agent.common, { target: "repo", plain: true, color: "never" });
   assert.equal(parseHarnessArgs(["agent", "--resume", SES]).kind, "agent");
+  // K6: --effort <level> (every tier) and --effort <tier>=<level>; unknown levels are usage errors.
+  const effort = parseHarnessArgs(["agent", "--effort", "high", "--effort", "complex_worker=XHIGH"]);
+  assert.ok(effort.kind === "agent");
+  assert.deepEqual(effort.session.efforts, [
+    { tier: undefined, level: "high" },
+    { tier: "complex_worker", level: "xhigh" },
+  ]);
+  assert.throws(() => parseHarnessArgs(["agent", "--effort", "extreme"]), /Invalid --effort/);
+  assert.throws(() => parseHarnessArgs(["agent", "--effort", "low", "--effort", "max"]), /more than once/);
 
   const run = parseHarnessArgs(["run", "fix the failing test", "--mode", "jsonl", "--stream-deltas"]);
   assert.ok(run.kind === "run");

@@ -52,7 +52,9 @@ export {
   type CatalogIdentity,
   type CatalogInput,
   type CatalogModel,
+  type ListedModel,
 } from "./catalog.ts";
+export { clampEffort, isReasoningEffort, resolveEffort, supportedEfforts, type EffortResolution, type EffortTarget } from "./effort.ts";
 export {
   createWebSearchRunner,
   KEYED_SEARCH_BACKENDS,

@@ -7,12 +7,14 @@ import { closestMatch } from "../../domain/suggest.ts";
 import {
   adapterIdSchema,
   AGENT_ROLES,
+  EFFORT_SLOTS,
   EXIT_CODES,
   MODEL_TIERS,
   modelIdSchema,
   PERMISSION_MODES,
   POLICY_MODES,
   providerIdSchema,
+  REASONING_EFFORTS,
 } from "../contracts/index.ts";
 import {
   CONFIG_FILE,
@@ -70,6 +72,17 @@ const PLAIN_SETTINGS: readonly SettingDefinition[] = [
   { key: "web.search.provider", kind: "enum", choices: WEB_SEARCH_PROVIDERS, scope: "user", description: "web_search backend (auto: ChatGPT → Claude Code → OpenAI/Anthropic key → Brave/Tavily/Exa key)", fallback: "auto", yamlPath: ["web", "search", "provider"] },
   { key: "web.search.model", kind: "string", scope: "user", description: "model of the ChatGPT / OpenAI API search sub-request", yamlPath: ["web", "search", "model"] },
   { key: "web.openai_hosted", kind: "boolean", scope: "user", description: "OpenAI routes search natively with the hosted web_search tool (headless only when true)", fallback: "true", yamlPath: ["web", "openai_hosted"] },
+  ...EFFORT_SLOTS.map(
+    (slot): SettingDefinition => ({
+      key: `effort.${slot}`,
+      kind: "enum",
+      choices: REASONING_EFFORTS,
+      scope: "user",
+      description: (MODEL_TIERS as readonly string[]).includes(slot) ? `reasoning effort of the ${slot} tier (clamped to what the model supports)` : `reasoning effort of the ${slot} role (wins over its tier's)`,
+      fallback: "provider default",
+      yamlPath: ["effort", slot],
+    }),
+  ),
 ];
 
 /** `syn config set web.search.api_key <key>`: the key goes to the credential store, never to config.yaml. */
@@ -467,6 +480,7 @@ const NEW_FILE_TEMPLATE = `# Synorch user configuration. \`syn config set <key> 
 # routes:
 #   - { tier: orchestrator, provider: openai, model: gpt-6-sol }
 #   - { tier: complex_worker, provider: anthropic, model: opus-5.5, adapter: claude-code }
+# effort: { session: high, complex_worker: xhigh, fast_worker: low }
 # ui: { permission_mode: auto, mouse: false }
 # budget: { max_wall_time_seconds: 1800 }
 `;

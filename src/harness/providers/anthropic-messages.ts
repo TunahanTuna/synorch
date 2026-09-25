@@ -22,7 +22,8 @@ export const ANTHROPIC_VERSION = "2023-06-01";
 /** Messages requires `max_tokens`; used only when the request does not set one (reported as a warning). */
 export const ANTHROPIC_DEFAULT_MAX_TOKENS = 8192;
 
-const THINKING_BUDGETS = { low: 1024, medium: 4096, high: 16384 } as const;
+/** Budget-token models (Haiku 4.5 and older): effort levels as thinking budgets; the catalog clamps them to low…high. */
+const THINKING_BUDGETS = { low: 1024, medium: 4096, high: 16384, xhigh: 16384, max: 16384, ultra: 16384 } as const;
 
 export interface AnthropicMessagesOptions {
   readonly fetch?: FetchLike;
@@ -191,7 +192,8 @@ function buildMessagesBody(request: ModelRequest): Built | { readonly error: str
   if (request.reasoning_effort !== undefined && ADAPTIVE_THINKING.test(String(body.model))) {
     // Opus 5.x / Sonnet 5 / Fable reject budget_tokens (400): adaptive thinking with an effort level.
     body.thinking = { type: "adaptive" };
-    body.output_config = { effort: request.reasoning_effort };
+    // `output_config.effort` takes low|medium|high|xhigh|max; `ultra` is OpenAI-only.
+    body.output_config = { effort: request.reasoning_effort === "ultra" ? "max" : request.reasoning_effort };
   } else if (request.reasoning_effort !== undefined) {
     const budget = THINKING_BUDGETS[request.reasoning_effort];
     if (budget < maxTokens) body.thinking = { type: "enabled", budget_tokens: budget };

@@ -96,6 +96,8 @@ export interface ActivityState {
 
 export interface FooterState {
   readonly model: string | undefined;
+  /** K6: the conversation's reasoning effort, shown next to the model (`gpt-6-sol · high`). */
+  readonly effort: string | undefined;
   readonly contextPercent: number | undefined;
   readonly quotaPercent: number | undefined;
   readonly costUsd: number | undefined;
@@ -162,6 +164,7 @@ export class ConversationPresenter {
   private quota: number | undefined;
   private cost: number | undefined;
   private model: string | undefined;
+  private effort: string | undefined;
   private contextWindow: number | undefined;
   private ledger: TurnLedger = { files: new Map(), tests: undefined };
   /** The turn's checklist item: later `todo` calls in the same turn update it in place. */
@@ -176,9 +179,10 @@ export class ConversationPresenter {
     this.contextWindow = options.contextWindowTokens;
   }
 
-  /** Header facts known only at start: the conversation model and its context window. */
-  public configure(values: { readonly model?: string | undefined; readonly contextWindowTokens?: number | undefined }): void {
+  /** Live facts of the conversation model (start, `/model`, `/effort`): `effort: null` clears it, undefined keeps it. */
+  public configure(values: { readonly model?: string | undefined; readonly effort?: string | null | undefined; readonly contextWindowTokens?: number | undefined }): void {
     if (values.model !== undefined) this.model = values.model;
+    if (values.effort !== undefined) this.effort = values.effort ?? undefined;
     if (values.contextWindowTokens !== undefined) this.contextWindow = values.contextWindowTokens;
   }
 
@@ -235,6 +239,7 @@ export class ConversationPresenter {
     const window = this.contextWindow;
     return {
       model: this.model,
+      effort: this.effort,
       contextPercent: this.contextTokens === undefined || window === undefined || window <= 0 ? undefined : Math.min(100, Math.round((this.contextTokens / window) * 100)),
       quotaPercent: this.quota,
       costUsd: this.cost,
@@ -366,6 +371,8 @@ export class ConversationPresenter {
       case "web/searched":
         return this.nativeSearch(event);
       case "context/compacted":
+        // The footer's ctx% follows at once, not only at the next request.
+        this.contextTokens = event.data.tokens_after;
         return [this.note("info", `${this.options.glyphs.bullet} Context compacted ${this.options.glyphs.sep} ${formatTokens(event.data.tokens_before)} → ${formatTokens(event.data.tokens_after)} tokens`)];
       case "checkpoint/restored":
         return [];
@@ -1132,7 +1139,7 @@ export function footerText(footer: FooterState, extra: { readonly folder: string
   return [
     extra.folder,
     extra.branch,
-    footer.model,
+    footer.model === undefined ? undefined : footer.effort === undefined ? footer.model : `${footer.model} ${g.sep} ${footer.effort}`,
     extra.mode,
     footer.contextPercent === undefined ? undefined : `ctx ${footer.contextPercent}%`,
     footer.quotaPercent === undefined ? undefined : `quota ${footer.quotaPercent}%`,

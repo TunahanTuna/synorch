@@ -66,6 +66,8 @@ import { DEFAULT_ADAPTER_FOR_PROVIDER } from "./config.ts";
 import type { OrchestrateInput } from "./orchestrate-tool.ts";
 import { OrchestrationTracker } from "./orchestration-view.ts";
 import { runModelCommand } from "./model-picker.ts";
+import { effortLabel, effortTarget, pickEffort, runEffortCommand, type EffortCommandHost } from "./effort-command.ts";
+import { isReasoningEffort } from "../providers/index.ts";
 import { failureInfo } from "./outcome.ts";
 import { createSessionRenderer, type SessionRenderer } from "./renderers.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
@@ -326,6 +328,7 @@ class Conversation implements ConversationCommandHost {
         env: io.env,
         policyMode: this.parsed.session.policy,
         routes: this.parsed.session.profiles,
+        efforts: this.parsed.session.efforts,
         overrides: this.overrides,
         ...(this.parsed.session.permission === undefined ? {} : { permissionMode: this.parsed.session.permission }),
       });
@@ -409,6 +412,7 @@ class Conversation implements ConversationCommandHost {
       await this.renderer.start(this.header(rule));
       const controls = this.renderer.controls;
       controls?.setCommands(conversationPaletteEntries());
+      this.refreshStatus();
       // Shift+Tab / Alt+M in the renderer cycles the permission mode; the session applies the policy.
       unbindControls = controls?.onPermissionModeChange((mode) => this.setMode(mode)) ?? (() => undefined);
       if (runtime.permissionMode() === "full") this.note("error", this.fullAccessNotice());
@@ -1754,9 +1758,42 @@ class Conversation implements ConversationCommandHost {
         ask: (question, options) => this.askUser(question, options, this.outer.signal),
         switchConversation: (tier, save) => this.switchModel(tier, save),
         showFailure: (error) => this.showFailure(failureInfo(error)),
+        pickEffort: async (tier) => {
+          const host = this.effortHost();
+          const target = effortTarget(host, tier === "session" || tier === this.sessionTier ? undefined : tier);
+          if (!("error" in target)) await pickEffort(host, target);
+        },
       },
       argument,
     );
+  }
+
+  public async effort(argument: string): Promise<void> {
+    await runEffortCommand(this.effortHost(), argument);
+  }
+
+  private effortHost(): EffortCommandHost {
+    return {
+      runtime: this.runtime,
+      controls: this.renderer.controls,
+      signal: this.outer.signal,
+      ok: this.glyphs.ok,
+      sep: this.glyphs.sep,
+      conversationRule: () => sessionRouteRule(this.runtime, this.sessionTier),
+      print: (lines) => this.print(lines),
+      showFailure: (error) => this.showFailure(failureInfo(error)),
+      refreshStatus: () => this.refreshStatus(),
+    };
+  }
+
+  /** K3: the footer's model and effort from live state (after start, /model, /effort). */
+  private refreshStatus(): void {
+    const controls = this.renderer.controls;
+    const rule = sessionRouteRule(this.runtime, this.sessionTier);
+    if (controls?.setSessionStatus === undefined || rule === undefined) return;
+    const resolution = this.runtime.effortFor(rule.tier, "session", rule.route);
+    const effort = effortLabel(resolution, rule.route.adapter_id);
+    controls.setSessionStatus({ model: rule.route.model_id, effort: effort === "default" || effort === "n/a" ? undefined : effort });
   }
 
   /** Switches the conversation's route for this session; `save` persists it as the default only after the human confirms. */
@@ -1776,6 +1813,7 @@ class Conversation implements ConversationCommandHost {
     this.routeRecorded = false;
     this.sessionTier = tier;
     this.currentModel = rule.route.model_id;
+    this.refreshStatus();
     this.print([`${g.ok} Conversation model: ${rule.route.model_id} (${tier}) for this conversation${save ? "" : ` ${g.sep} /model ${tier} --save makes it the default`}`]);
     if (!save) return;
     const answer = await this.askUser(`Make ${rule.route.model_id} (${tier}) the default conversation model for new conversations?`, ["Yes", "No"], this.outer.signal).catch(() => "No");
@@ -2402,6 +2440,15 @@ class Conversation implements ConversationCommandHost {
         this.renderer.controls.setMouseMode(change.value === "true");
         effect = "applied now";
       } else if (change.key.startsWith("routes.")) effect = "new conversations use it; /model switches this one";
+      else if (change.key.startsWith("effort.")) {
+        // K6: a tier level also applies to this session at once (role levels apply to new sessions).
+        const tier = MODEL_TIERS.find((candidate) => `effort.${candidate}` === change.key);
+        if (tier !== undefined) {
+          this.runtime.setSessionEffort(tier, change.value === undefined || !isReasoningEffort(change.value) ? undefined : change.value);
+          this.refreshStatus();
+          effect = "applied from the next request";
+        }
+      }
       this.print([`${g.ok} ${change.key} = ${shown}${change.previous !== undefined && change.previous !== change.value ? ` (was ${change.previous})` : ""} ${g.sep} ${effect}`]);
     } catch (error) {
       this.print([`${g.warn} ${error instanceof Error ? error.message : String(error)}`]);

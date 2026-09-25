@@ -5,7 +5,7 @@ import type { ExitCode } from "./errors.ts";
 import type { EventStore, BlobStore } from "./store.ts";
 import type { AttemptId, RequestId, RunId, SessionId, TaskId, TurnId } from "./ids.ts";
 import type { RecalledMemory } from "./memory.ts";
-import type { ContextBlockSource, ModelRequest, ModelRoute, ModelRouter, RouteDecision } from "./model.ts";
+import type { ContextBlockSource, ModelRequest, ModelRoute, ModelRouter, ReasoningEffort, RouteDecision } from "./model.ts";
 import type { CompletionPacket, ReviewPacket, TaskContextPacket } from "./packets.ts";
 import type { EffectivePolicy, PolicyMode } from "./policy.ts";
 import type { RenderEvent, TerminalRenderer } from "./renderer.ts";
@@ -40,6 +40,8 @@ export interface ContextBuildInput {
    * only the step budget is exhausted (`RequestBudgetGate.admit(..., { grace: true })`).
    */
   readonly reportOnly?: string;
+  /** K6: the step's reasoning effort, already clamped to the route model's levels (`ModelRequest.reasoning_effort`). */
+  readonly reasoningEffort?: ReasoningEffort;
 }
 
 export interface ContextBlockReport {

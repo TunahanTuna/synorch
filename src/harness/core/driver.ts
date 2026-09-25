@@ -27,6 +27,7 @@ import {
   type ModelRequest,
   type ModelRoute,
   type ModelStreamEvent,
+  type ReasoningEffort,
   type RequestId,
   type ResolvedCredential,
   type SessionEvent,
@@ -116,6 +117,8 @@ export interface AgentDriverOptions {
   readonly backendApprovals?: BackendApprovalHandler;
   /** Redacts backend tool observations before they are logged (credential values, secret shapes). */
   readonly backendRedact?: (text: string) => string;
+  /** K6: the reasoning effort of a turn's next step (role/tier settings, clamped to the route model); undefined = provider default. */
+  readonly reasoningEffort?: (input: TurnInput) => ReasoningEffort | undefined;
 }
 
 /** Creates the fixed agent loop (ADR-02) over the given seams. */
@@ -150,6 +153,7 @@ interface StepContext {
   readonly turnId: TurnId;
   readonly stepId: StepId;
   readonly requestId: RequestId;
+  readonly effort?: ReasoningEffort;
 }
 
 type Prepared = { readonly kind: "ok"; readonly request: ModelRequest } | { readonly kind: "cancelled" | "failed" | "budget_exceeded" };
@@ -229,7 +233,9 @@ class FixedAgentDriver implements PausableAgentDriver {
         }
         await this.#drainSteers(log);
         steps += 1;
-        const step: StepContext = { input, log, turnId, stepId: createId("step"), requestId: createId("request") };
+        // K6: read per step, so an /effort change applies to the next model request.
+        const effort = this.#deps.reasoningEffort?.(input);
+        const step: StepContext = { input, log, turnId, stepId: createId("step"), requestId: createId("request"), ...(effort === undefined ? {} : { effort }) };
         await log.append("step/started", { step_id: step.stepId, turn_id: turnId, request_id: step.requestId });
         const result = adapter.kind === "model" ? await this.#modelStep(adapter, step, signal) : await this.#backendStep(adapter, step, signal);
         if (result === "continue") continue;
@@ -412,6 +418,7 @@ class FixedAgentDriver implements PausableAgentDriver {
           systemPrompt: prepared.request.system.map((block) => block.text).join("\n\n"),
           maxTurns: input.maxSteps,
           resumeBackendSessionId: this.#backendSessions.get(sessionKey),
+          ...(step.effort === undefined ? {} : { reasoningEffort: step.effort }),
           env: this.#deps.backendEnv ?? currentEnvironment(),
         },
         stepSignal,
@@ -458,6 +465,7 @@ class FixedAgentDriver implements PausableAgentDriver {
           requestId: step.requestId,
           ...(input.sources === undefined ? {} : { sources: input.sources }),
           ...(input.reportOnly === undefined ? {} : { reportOnly: input.reportOnly }),
+          ...(step.effort === undefined ? {} : { reasoningEffort: step.effort }),
         },
         signal,
       );

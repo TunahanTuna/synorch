@@ -75,7 +75,9 @@ import { applyRestore, planRestore, restoreConflicts, rewindPoints, type Restore
 import { runModelCommand } from "./model-picker.ts";
 import { effortLabel, effortTarget, pickEffort, runEffortCommand, type EffortCommandHost } from "./effort-command.ts";
 import { runMcpSlash } from "./mcp-command.ts";
-import { isReasoningEffort } from "../providers/index.ts";
+import { defaultEffort, isReasoningEffort } from "../providers/index.ts";
+import { openBrowser } from "../tui/open-browser.ts";
+import { acknowledgedNotices, acknowledgeNotice, approvalNotice, mcpStartNotices, StartupNotices } from "./startup-notices.ts";
 import { failureInfo } from "./outcome.ts";
 import { createSessionRenderer, type SessionRenderer } from "./renderers.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
@@ -370,6 +372,9 @@ class Conversation implements ConversationCommandHost {
   private turnId: TurnId | undefined;
   private trustAsked = false;
   private exiting = false;
+  /** Startup notices: held until the first-run setup is done, then at most two lines (/status keeps them all). */
+  private notices: StartupNotices | undefined;
+  private mcpStarted: Promise<void> = Promise.resolve();
   private debug = false;
   private submittedAt: number | undefined;
   private readonly timings: string[] = [];
@@ -485,21 +490,25 @@ class Conversation implements ConversationCommandHost {
       this.grants = createCommandGrantStore(runtime.home, runtime.trust.state().root);
       this.grantList = await this.grants.list();
       const resumed = await this.openResumed();
-      await this.renderer.start(this.header(rule, await this.welcomeHint(resumed !== undefined)));
+      const sandboxNoticeSeen = runtime.sandbox.enforcement === "full" || (await acknowledgedNotices(runtime.home)).has("sandbox-partial");
+      this.notices = new StartupNotices((notice) => this.note(notice.level, notice.text), this.glyphs.sep);
+      await this.renderer.start({ ...this.header(rule, await this.welcomeHint(resumed !== undefined)), sandboxNoticeSeen });
+      // The partial-sandbox warning shows once per machine; /permissions keeps it.
+      if (!sandboxNoticeSeen && this.renderer.controls?.appearance !== undefined) void acknowledgeNotice(runtime.home, "sandbox-partial");
       const controls = this.renderer.controls;
       this.refreshPalette();
       this.refreshStatus();
       // K3: MCP servers start in the background (never before the editor); problems become notes.
-      void this.startMcp();
+      this.mcpStarted = this.startMcp().catch(() => undefined);
       // Shift+Tab / Alt+M in the renderer cycles the permission mode; the session applies the policy.
       unbindControls = controls?.onPermissionModeChange((mode) => this.setMode(mode)) ?? (() => undefined);
       if (runtime.permissionMode() === "full") this.note("error", this.fullAccessNotice());
       if (resumed !== undefined) await this.showResumed(resumed);
       else await this.memoryStartLine();
       // Zero-config onboarding: the quiet "Synorch ready · …" line, the memory vault and the first-session memory bootstrap (user scope only).
-      void startOnboarding(runtime, (line) => this.note("info", line), this.glyphs.sep);
+      void startOnboarding(runtime, (line) => this.startupLine({ level: "info", text: line, context: true }), this.glyphs.sep);
       if (this.debug) this.note("info", `harness: runtime ready in ${runtimeMs} ms`);
-      for (const problem of appearance?.problems ?? []) this.note("warning", `${this.glyphs.warn} ${problem}`);
+      for (const problem of appearance?.problems ?? []) this.startupLine({ level: "warning", text: `${this.glyphs.warn} ${problem}` });
       // K8: the subscription's plan label (ChatGPT Plus) resolves from the stored login after the first frame.
       void subscriptionPlan(runtime, rule.route, this.outer.signal)
         .then((plan) => {
@@ -508,6 +517,9 @@ class Conversation implements ConversationCommandHost {
         .catch(() => undefined);
       // K8 first-run setup (interactive terminal only, once; Esc skips) or syn setup.
       if (this.parsed.setup === true || (resumed === undefined && this.shouldOnboard())) await this.setup(true);
+      // Notices after welcome and setup; MCP servers get a moment to settle so their lines join the same group.
+      if (this.renderer.controls?.appearance === undefined) this.notices?.flush();
+      else void Promise.race([this.mcpStarted, delay(1500)]).then(() => this.notices?.flush());
       // Credential pre-resolution (keychain, token refresh) happens in the background, never before the editor.
       void this.routePromise.then((decision) => runtime.credentials(decision.route, this.outer.signal)).catch(() => undefined);
       const input = this.renderer.input;
@@ -549,7 +561,9 @@ class Conversation implements ConversationCommandHost {
   private header(rule: RouteRule, hint?: string): SessionHeaderView {
     const permissionMode = this.runtime.permissionMode();
     const runtime = this.runtime;
-    const effort = effortLabel(runtime.effortFor(rule.tier, "session", rule.route), rule.route.adapter_id);
+    const configured = effortLabel(runtime.effortFor(rule.tier, "session", rule.route), rule.route.adapter_id);
+    // Nothing set: the welcome shows the level the model runs at by default (K6), not a blank.
+    const effort = configured === "default" ? (defaultEffort({ provider: rule.route.provider_id, model: rule.route.model_id, adapterId: rule.route.adapter_id }) ?? configured) : configured;
     const commit = buildCommit();
     const plan = planLabel(runtime, rule.route);
     const workers = workerModels(runtime, rule.tier, rule.route.model_id);
@@ -1280,7 +1294,12 @@ class Conversation implements ConversationCommandHost {
   private async memoryStartLine(): Promise<void> {
     const store = this.runtime.memory as MarkdownMemoryStore;
     const summary = await readLedger(store, this.runtime.projectId, this.runtime.gitBranch).then(ledgerSummary, () => undefined);
-    if (summary !== undefined) this.note("info", `${this.glyphs.bullet} ${summary}`);
+    if (summary !== undefined) this.startupLine({ level: "info", text: `${this.glyphs.bullet} ${summary}`, context: true });
+  }
+
+  private startupLine(notice: { readonly level: "info" | "warning"; readonly text: string; readonly context?: boolean }): void {
+    if (this.notices === undefined) this.note(notice.level, notice.text);
+    else this.notices.add(notice);
   }
 
   /** After a turn: `📌 2 memory proposals · /memory review` when the agent proposed something new this session. */
@@ -2171,13 +2190,46 @@ class Conversation implements ConversationCommandHost {
       `Mode            ${mode === undefined ? `default-deny (no prompts; headless)` : `${mode} ${g.sep} ${MODE_MEANINGS[mode]}`}`,
       `                Shift+Tab cycles ask ${g.name === "rich" ? "→" : "->"} auto ${g.name === "rich" ? "→" : "->"} full ${g.name === "rich" ? "→" : "->"} plan; /permissions <mode> switches`,
       `Trust           ${trust}`,
-      `Sandbox         ${runtime.sandbox.backend} (${runtime.sandbox.enforcement})`,
+      `Sandbox         ${runtime.sandbox.backend} (${runtime.sandbox.enforcement})${runtime.sandbox.enforcement === "full" ? "" : ` ${g.sep} allowed commands can write outside this folder`}`,
       `Always allowed  ${rules.length === 0 ? "none yet (answer \"Always allow\" in a prompt, or /permissions allow <prefix>)" : rules.join(` ${g.sep} `)}`,
       ...(rules.length === 0 ? [] : ["                /permissions remove <prefix> deletes a rule"]),
       `Web             search free except in ask mode; fetch asks at a new domain (auto/plan) ${g.sep} your domains: ${runtime.web.grantedDomains().length === 0 ? "none" : runtime.web.grantedDomains().join(", ")} ${g.sep} /permissions web`,
       `Always asks     destructive commands (force push, publish, recursive delete, reset --hard…), in every mode`,
       `Never           ${HARD_RAILS.filter((rail) => rail !== "destructive-command").join(", ")} (hard rails, every mode); git history changes stay with you`,
     ];
+  }
+
+  /** `/status`: mode, sandbox, MCP servers and every notice of this session's start. */
+  public async status(): Promise<void> {
+    const runtime = this.runtime;
+    const g = this.glyphs;
+    const mode = runtime.permissionMode();
+    const mcp = runtime.mcp.status();
+    const count = (state: string): number => mcp.filter((entry) => entry.state === state).length;
+    const mcpParts = [
+      count("connected") > 0 ? `${count("connected")} connected` : undefined,
+      count("idle") > 0 ? `${count("idle")} ready` : undefined,
+      count("starting") > 0 ? `${count("starting")} starting` : undefined,
+      count("needs-auth") > 0 ? `${count("needs-auth")} need sign-in` : undefined,
+      count("needs-approval") > 0 ? `${count("needs-approval")} need approval` : undefined,
+      count("failed") > 0 ? `${count("failed")} failed` : undefined,
+      count("disabled") > 0 ? `${count("disabled")} off` : undefined,
+    ].filter((part): part is string => part !== undefined);
+    const lines = [
+      `Model           ${this.currentModel ?? "none"}`,
+      `Mode            ${mode === undefined ? "default-deny (no prompts; headless)" : `${mode} ${g.sep} ${MODE_MEANINGS[mode]}`}`,
+      `Sandbox         ${runtime.sandbox.backend} (${runtime.sandbox.enforcement})${runtime.sandbox.enforcement === "full" ? "" : ` ${g.sep} allowed commands can write outside this folder`}`,
+      `MCP             ${mcp.length === 0 ? "no servers" : mcpParts.join(` ${g.sep} `)}${mcp.length === 0 ? "" : ` ${g.sep} /mcp`}`,
+    ];
+    for (const entry of mcp) {
+      if (entry.state === "needs-auth") lines.push(`                ${entry.name}: needs sign-in ${g.sep} /mcp login ${entry.name}`);
+      else if (entry.state === "needs-approval") lines.push(`                ${entry.name}: declared by this repo ${g.sep} /mcp approve ${entry.name}`);
+      else if (entry.state === "failed") lines.push(`                ${entry.name}: ${entry.error ?? "did not start"} ${g.sep} /mcp ${entry.name}`);
+    }
+    const notices = this.notices?.all ?? [];
+    lines.push(`Notices         ${notices.length === 0 ? "none" : notices.length}`);
+    for (const notice of notices) lines.push(`                ${notice.text}`);
+    this.print(lines);
   }
 
   public async trust(): Promise<void> {
@@ -2226,7 +2278,17 @@ class Conversation implements ConversationCommandHost {
 
   /** K3 `/mcp [list | tools [name] | reconnect | enable | disable | approve | revoke <name>]`. */
   public async mcp(argument: string): Promise<void> {
-    await runMcpSlash({ manager: this.runtime.mcp, home: this.runtime.home, sep: this.glyphs.sep, print: (lines) => this.print(lines) }, argument);
+    await runMcpSlash(
+      {
+        manager: this.runtime.mcp,
+        home: this.runtime.home,
+        sep: this.glyphs.sep,
+        print: (lines) => this.print(lines),
+        openBrowser: (url) => openBrowser(url, { platform: process.platform, env: this.io.env }),
+        signal: this.outer.signal,
+      },
+      argument,
+    );
   }
 
   /** K7 `/skills [show | enable | disable <name>]`. */
@@ -2272,16 +2334,13 @@ class Conversation implements ConversationCommandHost {
   /** K3: session start of the MCP servers; approvals the repository needs and start failures become notes. */
   private async startMcp(): Promise<void> {
     const mcp = this.runtime.mcp;
-    for (const problem of mcp.problems) this.note("warning", `MCP ${problem.file}: ${problem.message}`);
-    const pending = mcp.pendingApprovals().map((definition) => definition.name);
-    if (pending.length > 0) {
-      this.note("info", `This repository declares MCP server${pending.length === 1 ? "" : "s"} ${pending.join(", ")}; ${pending.length === 1 ? "it stays" : "they stay"} off until you approve: /mcp approve <name>`);
-    }
+    const sep = this.glyphs.sep;
+    if (mcp.problems.length > 0) this.startupLine({ level: "warning", text: `MCP configuration: ${mcp.problems.length === 1 ? "1 problem" : `${mcp.problems.length} problems`} ${sep} /mcp` });
+    const approval = approvalNotice(mcp.pendingApprovals().map((definition) => definition.name), sep);
+    if (approval !== undefined) this.startupLine(approval);
     await mcp.startSession().catch(() => undefined);
     if (this.exiting) return;
-    for (const entry of mcp.status()) {
-      if (entry.state === "failed") this.note("warning", `MCP ${entry.name} did not start: ${entry.error ?? "unknown error"} ${this.glyphs.sep} /mcp reconnect ${entry.name}`);
-    }
+    for (const notice of mcpStartNotices(mcp.status(), sep)) this.startupLine(notice);
   }
 
   private effortHost(): EffortCommandHost {
@@ -3275,20 +3334,20 @@ class Conversation implements ConversationCommandHost {
     const finish = async (skipped: boolean): Promise<void> => {
       if (first || !skipped) await this.saveQuietly("ui.onboarded", "true");
       if (done.length === 0) this.print([first ? `Setup skipped ${g.sep} /setup runs it any time` : "Setup cancelled"]);
-      else this.print([`${g.ok} ${done.join(` ${g.sep} `)}${skipped ? ` ${g.sep} the rest skipped` : ""} ${g.sep} /theme /welcome /config change it later`]);
+      else this.print([`${g.ok} Saved: ${done.join(", ")}${skipped ? " (rest skipped)" : ""} ${g.sep} /setup to change`]);
     };
     const theme = await appearance.pickTheme(signal, "1/3");
     if (theme === undefined) return finish(true);
     await this.saveQuietly("ui.theme", theme);
-    done.push(`theme ${theme}`);
+    done.push(`${theme} theme`);
     const style = await appearance.pickWelcomeStyle(signal, "2/3");
     if (style === undefined) return finish(true);
     await this.saveQuietly("ui.welcome.style", style);
-    done.push(`welcome ${style}`);
+    done.push(`${style} welcome`);
     const glyphs = await appearance.pickGlyphs(signal, "3/3");
     if (glyphs === undefined) return finish(true);
     await this.saveQuietly("ui.glyphs", glyphs);
-    done.push(`symbols ${glyphs}${glyphs === this.glyphs.name ? "" : " (from the next session)"}`);
+    done.push(`${glyphs} symbols${glyphs === this.glyphs.name ? "" : " (next session)"}`);
     return finish(false);
   }
 

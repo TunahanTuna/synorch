@@ -20,5 +20,7 @@ export {
   type McpSource,
   type McpTrust,
 } from "./config.ts";
+export { friendlyFailure, isAuthFailure, McpStartError, type McpFailureKind } from "./errors.ts";
 export { McpManager, type McpManagerOptions, type McpServerState, type McpServerStatus } from "./manager.ts";
+export { createMcpOAuthStore, loginMcpServer, mcpOAuthRef, McpSignInRequiredError, type McpLoginDependencies, type McpOAuthRecord, type McpOAuthStore } from "./oauth.ts";
 export { createMcpTool, modelSchema, untrustedMcpEnvelope } from "./tools.ts";

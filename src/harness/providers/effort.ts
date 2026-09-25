@@ -65,6 +65,17 @@ export function supportedEfforts(target: EffortTarget): readonly ReasoningEffort
   return listed;
 }
 
+/**
+ * The level a model runs at when nothing is set (for display only; nothing extra is sent): the
+ * Codex models default to `medium`, the Anthropic models with an effort parameter to `high`.
+ */
+export function defaultEffort(target: EffortTarget): ReasoningEffort | undefined {
+  const supported = supportedEfforts(target);
+  if (supported === undefined) return undefined;
+  const preferred: ReasoningEffort = target.provider === "anthropic" ? "high" : "medium";
+  return supported.includes(preferred) ? preferred : undefined;
+}
+
 export interface EffortResolution {
   /** What the settings asked for; undefined = nothing set (provider default). */
   readonly requested: ReasoningEffort | undefined;

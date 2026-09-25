@@ -1,9 +1,12 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { Document, isMap, parseDocument } from "yaml";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createToolRegistry } from "../tools/index.ts";
+import { createCredentialStore } from "../auth/index.ts";
 import {
+  createMcpOAuthStore,
   MCP_SERVER_NAME_PATTERN,
   McpManager,
   mcpConfigSchema,
@@ -12,7 +15,10 @@ import {
   type McpServerStatus,
 } from "../mcp/index.ts";
 import { workspaceIdentity } from "../policy/index.ts";
+import { openBrowser } from "../tui/open-browser.ts";
 import { CONFIG_FILE, loadRuntimeConfig, validateUserConfigText, type ConfigDiscoveryOptions } from "./config.ts";
+import { standaloneExtensions } from "./extensions-command.ts";
+import { isProjectFolder } from "./project-scope.ts";
 
 /**
  * K3 `syn mcp` and `/mcp`: list the configured MCP servers with their state and tools, add or
@@ -23,7 +29,7 @@ import { CONFIG_FILE, loadRuntimeConfig, validateUserConfigText, type ConfigDisc
  *   syn mcp add playwright -- npx @playwright/mcp@latest
  */
 
-export const MCP_SUBCOMMANDS = ["list", "add", "remove", "approve", "revoke", "enable", "disable", "test", "tools", "reconnect"] as const;
+export const MCP_SUBCOMMANDS = ["list", "add", "remove", "approve", "revoke", "enable", "disable", "test", "tools", "reconnect", "login", "logout"] as const;
 
 export const MCP_HELP = `syn mcp — external MCP servers (tools for every provider, under Synorch's policy)
 
@@ -39,6 +45,9 @@ Usage:
   syn mcp revoke <name>                Withdraw that approval.
   syn mcp enable|disable <name>        Turn a user server on or off (saved).
   syn mcp test <name>                  Start the server once and list its tools.
+  syn mcp login <name>                 Sign in to a remote server that asks for it (OAuth in the
+                                       browser; tokens go to Synorch's credential store).
+  syn mcp logout <name>                Forget that sign-in.
 
 Add options:
   --scope user|project                 user (default): <synorch home>/config.yaml;
@@ -52,7 +61,9 @@ Add options:
   --startup lazy|session               lazy (default): start at first use once the tool list is
                                        known; session: start with every session.
 
-In a session, /mcp lists servers and tools; /mcp reconnect|enable|disable|approve <name>.
+In a session, /mcp lists servers and tools; /mcp <name> shows one in detail;
+/mcp reconnect|enable|disable|approve|login|logout <name>. A remote server can also take an
+API key as a header instead of signing in (--header "Authorization: Bearer \${KEY}").
 Tools reach the model as mcp__<server>__<tool>; results are untrusted data. Server stderr is
 logged under <synorch home>/logs/mcp/. Claude Code routes (native mode) run the servers
 themselves through --mcp-config.
@@ -68,6 +79,9 @@ export interface McpCommandIO {
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
   readonly discovery?: ConfigDiscoveryOptions;
+  /** Tests: Claude's home for plugin servers (null reads none). */
+  readonly claudeHome?: string | null;
+  readonly signal?: AbortSignal;
 }
 
 interface AddRequest {
@@ -200,17 +214,19 @@ const STATE_LABEL: Readonly<Record<McpServerStatus["state"], string>> = {
   failed: "failed",
   disabled: "disabled",
   "needs-approval": "needs approval",
+  "needs-auth": "needs sign-in",
 };
 
 /** Lines describing each server (shared by `syn mcp list` and `/mcp`). */
-export function describeServers(status: readonly McpServerStatus[], options: { readonly tools?: boolean; readonly sep?: string } = {}): string[] {
+export function describeServers(status: readonly McpServerStatus[], options: { readonly tools?: boolean; readonly sep?: string; readonly slash?: boolean } = {}): string[] {
   const sep = options.sep ?? "·";
   if (status.length === 0) return ["No MCP servers configured. Add one: syn mcp add playwright -- npx @playwright/mcp@latest"];
   const lines: string[] = [];
   for (const entry of status) {
     const tools = entry.tools.length === 0 ? "" : ` ${sep} ${entry.tools.length} tool${entry.tools.length === 1 ? "" : "s"}`;
     lines.push(`${entry.name} ${sep} ${STATE_LABEL[entry.state]}${tools} ${sep} ${entry.transport} ${entry.target} ${sep} ${entry.source}${entry.trust === "read-only" ? ` ${sep} read-only` : ""}`);
-    if (entry.error !== undefined && entry.state === "failed") lines.push(`  error: ${entry.error}`);
+    if (entry.error !== undefined && entry.state === "failed") lines.push(`  ${entry.error} ${sep} details: ${options.slash === true ? `/mcp ${entry.name}` : entry.logFile}`);
+    if (entry.state === "needs-auth") lines.push(`  sign in with: ${options.slash === true ? "/mcp" : "syn mcp"} login ${entry.name} (or configure an API key header)`);
     if (entry.state === "needs-approval") lines.push(`  declared by the repository (${entry.file}); run it here with: ${options.tools === true ? "/mcp" : "syn mcp"} approve ${entry.name}`);
     if (entry.missingVariables.length > 0) lines.push(`  unset variables: ${entry.missingVariables.join(", ")}`);
     if (options.tools === true && entry.tools.length > 0) lines.push(`  ${entry.tools.join(", ")}`);
@@ -218,8 +234,29 @@ export function describeServers(status: readonly McpServerStatus[], options: { r
   return lines;
 }
 
-async function managerFor(io: McpCommandIO, root: string): Promise<McpManager> {
+/** `/mcp <name>`: one server in detail, the raw failure included (never on the first screen). */
+export function describeServer(entry: McpServerStatus | undefined, sep: string): string[] {
+  if (entry === undefined) return ["No such MCP server; /mcp lists them."];
+  const lines = [
+    `${entry.name} ${sep} ${STATE_LABEL[entry.state]}`,
+    `  where     ${entry.source} (${entry.file})`,
+    `  runs      ${entry.transport} ${entry.target}`,
+    `  trust     ${entry.trust} ${sep} startup ${entry.startup}`,
+    `  tools     ${entry.tools.length === 0 ? "none registered yet" : entry.tools.join(", ")}`,
+  ];
+  if (entry.error !== undefined) lines.push(`  problem   ${entry.error}`);
+  if (entry.detail !== undefined && entry.detail !== entry.error) lines.push(`  details   ${entry.detail.replace(/\s+/g, " ").slice(0, 600)}`);
+  if (entry.missingVariables.length > 0) lines.push(`  unset     ${entry.missingVariables.join(", ")}`);
+  lines.push(`  log       ${entry.logFile}`);
+  if (entry.state === "needs-auth") lines.push(`  next      /mcp login ${entry.name} (or an API key header: syn mcp add ${entry.name} <url> --header "Authorization: Bearer \${KEY}")`);
+  else if (entry.state === "failed") lines.push(`  next      /mcp reconnect ${entry.name}`);
+  else if (entry.state === "needs-approval") lines.push(`  next      /mcp approve ${entry.name}`);
+  return lines;
+}
+
+async function managerFor(io: McpCommandIO, root: string, withPlugins = false): Promise<McpManager> {
   const config = await loadRuntimeConfig(io.home, root, [], { platform: io.platform, ...(io.discovery ?? {}) });
+  const extensions = withPlugins ? await standaloneExtensions({ ...io, ...(io.claudeHome === undefined ? {} : { claudeHome: io.claudeHome }) }, root).catch(() => undefined) : undefined;
   const manager = new McpManager({
     home: io.home,
     workspaceRoot: root,
@@ -230,6 +267,9 @@ async function managerFor(io: McpCommandIO, root: string): Promise<McpManager> {
     user: { config: config.mcp.user, file: config.mcp.userFile },
     project: { config: config.mcp.project, file: config.mcp.projectFile },
     platform: io.platform,
+    oauth: createMcpOAuthStore(() => createCredentialStore(io.home, { env: io.env })),
+    projectScope: isProjectFolder(root, io.env.HOME ?? io.env.USERPROFILE ?? os.homedir(), io.platform),
+    ...(extensions === undefined ? {} : { plugins: () => extensions.mcpServers() }),
   });
   await manager.load();
   return manager;
@@ -300,6 +340,32 @@ export async function mcpCommand(args: readonly string[], target: string | undef
         }
         return 0;
       }
+      case "login":
+      case "logout": {
+        const name = rest[0];
+        if (name === undefined) throw new McpCommandError(`syn mcp ${subcommand} needs a server name`);
+        const manager = await managerFor(io, root, true);
+        try {
+          if (!manager.has(name)) throw new McpCommandError(`no MCP server named ${name}`);
+          if (subcommand === "logout") {
+            io.stdout((await manager.logout(name)) ? `Signed out of ${name}.\n` : `${name} had no stored sign-in.\n`);
+            return 0;
+          }
+          const status = await manager.login(name, {
+            openBrowser: (url) => openBrowser(url, { platform: io.platform, env: io.env }),
+            notify: (line) => io.stdout(`${line}\n`),
+            signal: io.signal ?? new AbortController().signal,
+          });
+          io.stdout(status?.state === "connected" ? `Signed in to ${name}; ${status.tools.length} tool(s).\n` : `Signed in to ${name}${status?.error === undefined ? "" : `, but it did not start: ${status.error}`}.\n`);
+          return status?.state === "connected" ? 0 : 4;
+        } catch (error: unknown) {
+          if (error instanceof McpCommandError) throw error;
+          io.stderr(`Sign-in to ${name} failed: ${error instanceof Error ? error.message : String(error)}\n`);
+          return 4;
+        } finally {
+          await manager.close();
+        }
+      }
       case "enable":
       case "disable": {
         const name = rest[0];
@@ -316,7 +382,7 @@ export async function mcpCommand(args: readonly string[], target: string | undef
       case "tools": {
         const name = rest[0];
         if (name === undefined) throw new McpCommandError(`syn mcp ${subcommand} needs a server name`);
-        const manager = await managerFor(io, root);
+        const manager = await managerFor(io, root, true);
         try {
           if (!manager.has(name)) throw new McpCommandError(`no MCP server named ${name}`);
           const connection = await manager.connection(name);
@@ -345,9 +411,12 @@ export interface McpSlashHost {
   readonly home: string;
   readonly sep: string;
   print(lines: readonly string[]): void;
+  /** Opens the system browser for `/mcp login`. */
+  openBrowser?(url: string): Promise<boolean>;
+  readonly signal?: AbortSignal;
 }
 
-/** `/mcp [list | tools [name] | reconnect <name> | enable <name> | disable <name> | approve <name> | revoke <name>]`. */
+/** `/mcp [list | <name> | tools [name] | reconnect | enable | disable | approve | revoke | login | logout <name>]`. */
 export async function runMcpSlash(host: McpSlashHost, argument: string): Promise<void> {
   const [verb = "list", name] = argument.trim().split(/\s+/).filter((word) => word !== "");
   const manager = host.manager;
@@ -361,7 +430,7 @@ export async function runMcpSlash(host: McpSlashHost, argument: string): Promise
   switch (verb) {
     case "list":
     case "status":
-      host.print([...describeServers(manager.status(), { sep: host.sep }), ...manager.problems.map((problem) => `warning: ${problem.file}: ${problem.message}`), "/mcp tools [name] · /mcp reconnect|enable|disable|approve <name>"]);
+      host.print([...describeServers(manager.status(), { sep: host.sep, slash: true }).map((line) => line.replace(/details: \S+$/, "details: /mcp <name>")), ...manager.problems.map((problem) => `warning: ${problem.file}: ${problem.message}`), `/mcp <name> details ${host.sep} /mcp tools [name] ${host.sep} /mcp reconnect|enable|disable|approve|login|logout <name>`]);
       return;
     case "tools": {
       const status = manager.status().filter((entry) => name === undefined || entry.name === name);
@@ -392,6 +461,27 @@ export async function runMcpSlash(host: McpSlashHost, argument: string): Promise
       host.print(approved ? describeServers(manager.status().filter((entry) => entry.name === target), { sep: host.sep }) : [`${target} is a user server; it needs no approval.`]);
       return;
     }
+    case "login": {
+      const target = need();
+      if (target === undefined) return;
+      try {
+        const status = await manager.login(target, {
+          openBrowser: host.openBrowser ?? (async () => false),
+          notify: (line) => host.print([line]),
+          signal: host.signal ?? new AbortController().signal,
+        });
+        host.print(status?.state === "connected" ? [`Signed in to ${target} ${host.sep} ${status.tools.length} tool${status.tools.length === 1 ? "" : "s"}`] : describeServers(status === undefined ? [] : [status], { sep: host.sep, slash: true }));
+      } catch (error: unknown) {
+        host.print([`Sign-in to ${target} did not finish: ${error instanceof Error ? error.message : String(error)}`]);
+      }
+      return;
+    }
+    case "logout": {
+      const target = need();
+      if (target === undefined) return;
+      host.print([(await manager.logout(target)) ? `Signed out of ${target}.` : `${target} had no stored sign-in.`]);
+      return;
+    }
     case "revoke": {
       const target = need();
       if (target === undefined) return;
@@ -400,6 +490,10 @@ export async function runMcpSlash(host: McpSlashHost, argument: string): Promise
       return;
     }
     default:
-      host.print([`Unknown /mcp ${verb}; try /mcp, /mcp tools, /mcp reconnect <name>, /mcp enable|disable <name>, /mcp approve <name>`]);
+      if (manager.has(verb)) {
+        host.print(describeServer(manager.status().find((entry) => entry.name === verb), host.sep));
+        return;
+      }
+      host.print([`Unknown /mcp ${verb}; try /mcp, /mcp <name>, /mcp tools, /mcp reconnect|login <name>, /mcp enable|disable <name>, /mcp approve <name>`]);
   }
 }

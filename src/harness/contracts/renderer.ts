@@ -31,6 +31,8 @@ export interface SessionHeaderView {
   readonly policyMode: "autonomous" | "ask";
   readonly routes: readonly { readonly tier: string; readonly model: string; readonly source: string }[];
   readonly sandboxEnforcement: "full" | "partial" | "unavailable";
+  /** The partial-sandbox warning was already shown once on this machine: the header leaves it out (/permissions keeps it). */
+  readonly sandboxNoticeSeen?: boolean;
   readonly notices: readonly string[];
   /** Conversation view (ADR-21): harness version, the conversation model's short name and its context window. */
   readonly version?: string;

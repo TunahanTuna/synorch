@@ -1,10 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, mkdirSync, statSync, type WriteStream } from "node:fs";
 import path from "node:path";
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { McpServerDefinition } from "./config.ts";
+import { friendlyFailure, isAuthFailure, McpStartError } from "./errors.ts";
+import { hasConfiguredCredentials } from "./oauth.ts";
 
 /**
  * One live connection to an MCP server through the official TypeScript SDK (stdio, streamable
@@ -43,6 +46,8 @@ export interface McpConnectOptions {
   /** Parent environment for extra pass-through variables (proxies, Windows shell basics). */
   readonly environment: Readonly<Record<string, string | undefined>>;
   readonly platform?: NodeJS.Platform;
+  /** Remote servers: the stored MCP OAuth sign-in (tokens attached and refreshed by the SDK). */
+  readonly authProvider?: OAuthClientProvider;
 }
 
 /** Non-secret variables a spawned server commonly needs beyond the SDK's safe defaults. */
@@ -93,9 +98,15 @@ export class McpConnection {
       connection.tools = await connection.listAllTools(timeout);
     } catch (error: unknown) {
       const tail = connection.stderrTail.trim().split(/\r?\n/).slice(-3).join(" | ");
+      const raw = error instanceof Error ? error.message : String(error);
+      const status = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+      const detail = `${raw}${status === undefined ? "" : ` (code ${String(status)})`}${tail === "" ? "" : ` (stderr: ${tail.slice(0, 500)})`}`;
+      log?.write(`start failed: ${detail}\n`);
       await connection.close().catch(() => undefined);
-      const message = timeout.aborted ? `did not start within ${Math.round(definition.startupTimeoutMs / 1000)} s` : error instanceof Error ? error.message : String(error);
-      throw new Error(`${definition.name}: ${message}${tail === "" ? "" : ` (stderr: ${tail.slice(0, 500)})`}`);
+      const configured = hasConfiguredCredentials(definition);
+      if (!timeout.aborted && definition.transport !== "stdio" && !configured && isAuthFailure(error)) throw new McpStartError(definition.name, "needs-auth", "needs sign-in", detail);
+      const friendly = friendlyFailure(error, { timedOut: timeout.aborted, timeoutMs: definition.startupTimeoutMs, command: definition.command, url: definition.url, configuredCredentials: configured });
+      throw new McpStartError(definition.name, "failed", friendly, detail);
     }
     log?.write(`connected; ${connection.tools.length} tool(s)\n`);
     return connection;
@@ -204,12 +215,13 @@ async function createTransport(definition: McpServerDefinition, options: McpConn
   }
   const url = new URL(definition.url ?? "");
   const requestInit: RequestInit = { headers: { ...definition.headers } };
+  const auth = options.authProvider === undefined ? {} : { authProvider: options.authProvider };
   if (definition.transport === "sse") {
     const { SSEClientTransport } = await import("@modelcontextprotocol/sdk/client/sse.js");
-    return new SSEClientTransport(url, { requestInit }) as Transport;
+    return new SSEClientTransport(url, { requestInit, ...auth }) as Transport;
   }
   const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
-  return new StreamableHTTPClientTransport(url, { requestInit }) as Transport;
+  return new StreamableHTTPClientTransport(url, { requestInit, ...auth }) as Transport;
 }
 
 function openLog(directory: string, name: string): WriteStream | undefined {

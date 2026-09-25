@@ -272,6 +272,7 @@ async function dispatch(parsed: Exclude<ParsedCommand, { kind: "help" }>, io: Ha
         stdout: (text) => void io.stdout.write(text),
         stderr: (text) => void io.stderr.write(text),
         ...(overrides.configCeiling === undefined ? {} : { discovery: { ceiling: overrides.configCeiling, platform } }),
+        ...(overrides.claudeHome === undefined ? (overrides.home === undefined ? {} : { claudeHome: null }) : { claudeHome: overrides.claudeHome }),
       });
     case "skills":
     case "plugin": {

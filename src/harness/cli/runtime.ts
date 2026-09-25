@@ -114,7 +114,8 @@ import {
   type WebSearchSources,
   type ClaudeCodeMode,
 } from "../providers/index.ts";
-import { McpManager } from "../mcp/index.ts";
+import { createMcpOAuthStore, McpManager } from "../mcp/index.ts";
+import { isProjectFolder } from "./project-scope.ts";
 import { createBlobStore, createSessionStore } from "../store/index.ts";
 import { BackgroundProcessManager, createRedactor, createSandboxRunner, createToolGateway, createToolRegistry, createWebSession, probeSandbox, type WebSession } from "../tools/index.ts";
 import { createClaudeNativeApprovals } from "./claude-native-approvals.ts";
@@ -724,6 +725,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       return trustState;
     },
   };
+  // Started in the home folder (or a folder that is no project): the user's own ~/.mcp.json, ~/.claude/skills are not a repository's.
+  const projectScope = isProjectFolder(workspaceRoot, env.HOME ?? env.USERPROFILE ?? os.homedir(), platform);
   // K7: skills, commands and plugins; repository items follow the live trust state.
   const extensions = await createExtensions({
     home,
@@ -736,6 +739,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     canonicalCatalog: canonical.skills,
     canonical: { origin: canonical.origin, skills: canonical.skillEntries },
     skipProjectSynorch: isSynorchHome(path.join(workspaceRoot, ".synorch"), home, platform),
+    skipProjectScope: !projectScope,
   });
   const webSession = createWebSession({ home });
   webHooksState.contentRead = () => webSession.markContentRead();
@@ -845,6 +849,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     onUntrustedContent: () => webSession.markContentRead(),
     addRedaction: (value) => redactionValues.add(value),
     plugins: () => extensions.mcpServers(),
+    oauth: createMcpOAuthStore(credentialStore),
+    projectScope,
   });
   await mcp.load();
   mcpHolder.current = mcp;

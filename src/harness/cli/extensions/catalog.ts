@@ -93,6 +93,8 @@ export interface ExtensionLoadInput {
   readonly canonical?: { readonly origin: "repository" | "builtin"; readonly skills: readonly { readonly name: string; readonly description: string; readonly path: string }[] };
   /** Skip `<repo>/.synorch/*` when the workspace's `.synorch` is the Synorch home itself. */
   readonly skipProjectSynorch?: boolean;
+  /** The folder is no project (the home folder): no project-scope skills or commands at all. */
+  readonly skipProjectScope?: boolean;
 }
 
 const PROJECT_SKILL_DIRS = [".synorch/skills", ".claude/skills", ".agents/skills"] as const;
@@ -126,11 +128,11 @@ export async function loadExtensions(input: ExtensionLoadInput): Promise<Extensi
   const plugins: PluginEntry[] = [];
   const disabledPlugins = new Set(input.disabledPlugins);
 
-  for (const relative of PROJECT_SKILL_DIRS) {
+  for (const relative of input.skipProjectScope === true ? [] : PROJECT_SKILL_DIRS) {
     if (input.skipProjectSynorch === true && relative.startsWith(".synorch/")) continue;
     for (const skill of await scanSkills(path.join(input.workspaceRoot, relative))) items.push(skillItem(skill, "project", { needsTrust: true }));
   }
-  for (const relative of PROJECT_COMMAND_DIRS) {
+  for (const relative of input.skipProjectScope === true ? [] : PROJECT_COMMAND_DIRS) {
     if (input.skipProjectSynorch === true && relative.startsWith(".synorch/")) continue;
     for (const command of await scanCommands(path.join(input.workspaceRoot, relative))) items.push(commandItem(command, "project", { needsTrust: true }));
   }

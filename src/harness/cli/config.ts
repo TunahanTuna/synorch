@@ -103,7 +103,7 @@ export interface WebConfig {
 export const CONFIG_FILE = "config.yaml";
 export const GLYPH_SET_CHOICES = ["auto", "rich", "safe", "ascii"] as const;
 export const WELCOME_STYLE_CHOICES = ["full", "compact", "minimal", "off"] as const;
-export const WELCOME_LOGO_CHOICES = ["on", "off", "custom"] as const;
+export const WELCOME_LOGO_CHOICES = ["on", "art", "glyph", "off", "custom"] as const;
 export const WELCOME_FIELD_CHOICES = ["version", "model", "plan", "workers", "folder", "mode"] as const;
 export type GlyphSetChoice = (typeof GLYPH_SET_CHOICES)[number];
 export const ADAPTER_KINDS_CONFIGURABLE = ["openai-chatgpt", "openai-responses", "anthropic-messages", "claude-code", "scripted"] as const;

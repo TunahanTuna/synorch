@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" data-art-grid="4 4 56 56">
+  <title>Synorch</title>
+  <!--
+    The Synorch mark: a conductor (top diamond) fans out to three parallel workers — two arcs and
+    a lens-shaped core — that resolve into one result (bottom diamond). The gradient runs from the
+    theme's logo1 (teal) through logo2 (blue) to logo3 (violet); the terminal renderer re-tints it
+    per theme. Drawn on a 14-unit grid (scaled ×4) so it hints cleanly to 14×14 terminal pixels.
+    `data-part` marks the separate shapes; the hand-hinted grid in src/harness/tui/logo-art.ts keeps a gap between them.
+  -->
+  <defs>
+    <linearGradient id="synorch-gradient" x1="3" y1="0" x2="11" y2="14" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4fd1c5"/>
+      <stop offset="0.5" stop-color="#63b3ed"/>
+      <stop offset="1" stop-color="#b794f4"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(4 4) scale(4)" fill="url(#synorch-gradient)">
+    <path data-part="conductor" d="M7 0L8.9 1.7L7 3.4L5.1 1.7Z"/>
+    <path data-part="core" d="M7 3.9C8.5 5 9.1 6 9.1 7C9.1 8 8.5 9 7 10.1C5.5 9 4.9 8 4.9 7C4.9 6 5.5 5 7 3.9Z"/>
+    <path data-part="result" d="M7 10.6L8.9 12.3L7 14L5.1 12.3Z"/>
+    <path data-part="left" d="M4.4 2.2C2.2 3.4 1 5 1 7C1 9 2.2 10.6 4.4 11.8L5 11.1C3.8 10.1 2.9 8.8 2.9 7C2.9 5.2 3.8 3.9 5 2.9Z"/>
+    <path data-part="right" d="M9.6 2.2C11.8 3.4 13 5 13 7C13 9 11.8 10.6 9.6 11.8L9 11.1C10.2 10.1 11.1 8.8 11.1 7C11.1 5.2 10.2 3.9 9 2.9Z"/>
+  </g>
+</svg>

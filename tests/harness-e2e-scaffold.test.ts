@@ -101,10 +101,15 @@ test("scaffold via orchestration: one attempt, no review, one install, generated
     );
     const { frames, problems } = parseFrames(run.stdout());
     assert.deepEqual(problems, [], run.stderr());
-    assert.equal(code, 0, `${run.stderr()}\n${frames.at(-1)?.type === "result" ? JSON.stringify(frames.at(-1)) : ""}`);
     const hello = frames[0];
     assert.ok(hello?.type === "hello");
     const runLog = await readSession(sandbox.home, hello.data.session_id);
+    if (code !== 0) {
+      // Platform-only failures (Windows CI) are otherwise opaque: show what the harness ran and what the tools answered.
+      const ran = eventsOf(runLog, "attempt/verification_ran").map((event) => `${event.data.command}: ${event.data.status} (${event.data.duration_ms} ms) ${event.data.output_excerpt.slice(0, 400)}`);
+      const transitions = runLog.filter((event) => event.type === "attempt/state_changed" || event.type === "task/state_changed" || event.type === "attempt/repair_requested").map((event) => `${event.type} ${JSON.stringify(event.data).slice(0, 600)}`);
+      assert.fail(`exit ${code}\n${run.stderr()}\n${JSON.stringify(frames.at(-1))}\nverification:\n${ran.join("\n")}\nstates:\n${transitions.join("\n")}`);
+    }
 
     const plan = eventsOf(runLog, "plan/proposed")[0]?.data.plan;
     assert.deepEqual(plan?.tasks.map((task) => task.key), ["scaffold"], "the planner's reviewer task for a single-task plan is dropped");

@@ -306,10 +306,30 @@ async function atomicWrite(absolute: string, content: Buffer): Promise<void> {
       throw error;
     });
     if (existing?.isSymbolicLink()) throw new ToolScopeViolation(`${absolute} became a link before the write`, "write-outside-scope");
-    await rename(temporary, absolute);
+    await renameWithRetry(temporary, absolute);
   } catch (error: unknown) {
     await unlink(temporary).catch(() => undefined);
     throw error;
+  }
+}
+
+const RETRYABLE_RENAME_CODES: ReadonlySet<string> = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/**
+ * On Windows a rename over a file that another process briefly holds open (an antivirus or indexer
+ * scan of a file that was just written or run) fails transiently with EPERM/EACCES/EBUSY; retry
+ * with a bounded backoff (about 1.3 s in total) before reporting the failure.
+ */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error: unknown) {
+      const code = error instanceof Error && "code" in error ? String(error.code) : "";
+      if (attempt >= 8 || !RETRYABLE_RENAME_CODES.has(code)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 5 * 2 ** attempt));
+    }
   }
 }
 

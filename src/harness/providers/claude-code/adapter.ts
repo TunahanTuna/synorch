@@ -275,12 +275,16 @@ interface SessionConfig {
   readonly onWebContentRead: () => void;
 }
 
+/** sun_path holds 104 bytes on macOS and 108 on Linux, including the terminating NUL. */
+const UNIX_SOCKET_PATH_LIMIT = 100;
+
 class ClaudeCodeSession implements BackendSession {
   public readonly backendSessionId: string;
   private readonly executable: ExecutableSpec;
   private readonly options: BackendSessionOptions;
   private readonly config: SessionConfig;
   private readonly directory: string;
+  private readonly socketDirectory: string | undefined;
   private readonly server: Server;
   private readonly serverAbort = new AbortController();
   private readonly sockets = new Set<Socket>();
@@ -301,11 +305,13 @@ class ClaudeCodeSession implements BackendSession {
     config: SessionConfig,
     directory: string,
     server: Server,
+    socketDirectory: string | undefined,
   ) {
     this.executable = executable;
     this.options = options;
     this.config = config;
     this.directory = directory;
+    this.socketDirectory = socketDirectory;
     this.server = server;
     this.backendSessionId = options.resumeBackendSessionId ?? randomUUID();
     this.resume = options.resumeBackendSessionId !== undefined;
@@ -317,12 +323,19 @@ class ClaudeCodeSession implements BackendSession {
     const directory = await mkdtemp(path.join(config.tempRoot, "synorch-claude-"));
     await chmod(directory, 0o700).catch(() => undefined);
     const token = randomBytes(32).toString("hex");
-    const endpoint =
+    let socketDirectory: string | undefined;
+    let endpoint =
       config.platform === "win32"
         ? `\\\\.\\pipe\\synorch-mcp-${randomBytes(12).toString("hex")}`
         : path.join(directory, "mcp.sock");
+    if (config.platform !== "win32" && Buffer.byteLength(endpoint) > UNIX_SOCKET_PATH_LIMIT) {
+      // A long TMPDIR (macOS /var/folders/..., a nested temp root) overflows sun_path: only the socket moves to /tmp.
+      socketDirectory = await mkdtemp(path.join("/tmp", "syn-mcp-"));
+      await chmod(socketDirectory, 0o700).catch(() => undefined);
+      endpoint = path.join(socketDirectory, "mcp.sock");
+    }
     const server = createServer();
-    const session = new ClaudeCodeSession(executable, options, config, directory, server);
+    const session = new ClaudeCodeSession(executable, options, config, directory, server, socketDirectory);
     const mcp = new McpToolServer(
       {
         list: () => session.active?.tools.list() ?? [],
@@ -824,6 +837,7 @@ class ClaudeCodeSession implements BackendSession {
     for (const socket of this.sockets) socket.destroy();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
     await rm(this.directory, { recursive: true, force: true }).catch(() => undefined);
+    if (this.socketDirectory !== undefined) await rm(this.socketDirectory, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

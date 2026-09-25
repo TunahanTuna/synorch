@@ -15,6 +15,17 @@ export type SyncCommandRunner = (command: string, args: readonly string[], input
 
 const COMMAND_TIMEOUT_MS = 20_000;
 
+/**
+ * Windows PowerShell 5.1 started from PowerShell 7 (the GitHub Actions default shell, or a user's
+ * pwsh terminal) inherits a PSModulePath that lists the 7.x module folders first; autoloading
+ * `Microsoft.PowerShell.Security` (ConvertTo-SecureString) then picks the Core-only copy and fails.
+ * Without the variable, powershell.exe computes its own default module path.
+ */
+function childEnvironment(command: string): NodeJS.ProcessEnv | undefined {
+  if (!/^powershell(?:\.exe)?$/i.test(command)) return undefined;
+  return Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toLowerCase() !== "psmodulepath"));
+}
+
 export const defaultRunner: CommandRunner = (command, args, input) =>
   new Promise((resolve) => {
     let stdout = "";
@@ -26,7 +37,7 @@ export const defaultRunner: CommandRunner = (command, args, input) =>
       clearTimeout(timer);
       resolve(result);
     };
-    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: childEnvironment(command) });
     const timer = setTimeout(() => child.kill(), COMMAND_TIMEOUT_MS);
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
       stdout += chunk;
@@ -41,7 +52,7 @@ export const defaultRunner: CommandRunner = (command, args, input) =>
   });
 
 export const defaultSyncRunner: SyncCommandRunner = (command, args, input) => {
-  const result = spawnSync(command, args, { input: input ?? "", encoding: "utf8", timeout: COMMAND_TIMEOUT_MS, windowsHide: true });
+  const result = spawnSync(command, args, { input: input ?? "", encoding: "utf8", timeout: COMMAND_TIMEOUT_MS, windowsHide: true, env: childEnvironment(command) });
   return {
     code: result.status,
     stdout: result.stdout ?? "",

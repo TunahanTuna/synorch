@@ -78,10 +78,10 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 `/memory graph`: Obsidian graph view benzeri, hafıza notlarının (karar, varsayım, soru, kanıt, kavram, tercih) ilişki yumağını terminalde göster; ilişki türleri + not bağlantıları, filtreler, odakla-genişlet gezinme (ajan grafıyla aynı etkileşim), çelişki vurgusu, `o` ile notu Obsidian'da aç, `--obsidian` ile Obsidian'ın kendi graph view'unu aç. K2 ajanına eklendi.
 
 ### K3 — Güç kullanıcısı
-- Worker'lar arka planda çalışırken sohbet (UX-GATE-02). ✅ (branch `k3-background-orchestration`; tasarım: [conversation-runtime §7](../design/conversation-runtime.md#7-arka-plan-orkestrasyonu-k3-ux-gate-02); gerçek terminal/gerçek model denemesi bekliyor)
+- Worker'lar arka planda çalışırken sohbet (UX-GATE-02). ✅ (`05468f4`; tasarım: [conversation-runtime §7](../design/conversation-runtime.md#7-arka-plan-orkestrasyonu-k3-ux-gate-02); gerçek terminal/gerçek model denemesi bekliyor)
 - Çapraz sağlayıcılı review (K1.5 ile birleşir).
-- MCP client (harici araçlar, gateway altında). ✅ (dal `k3-mcp-client`): `syn mcp list|add|remove|approve|revoke|enable|disable|test`, `/mcp`; stdio + streamable HTTP (resmi SDK); proje server'ları ve `.mcp.json` tek seferlik onayla; Claude native modda `--mcp-config`. Playwright: `syn mcp add playwright -- npx @playwright/mcp@latest`. Ayrıntı: [ADR-13 revizyonu](../decisions/ADR-13-mcp-acp.md).
-- Zamanda yolculuk: oturumun herhangi bir anından fork.
+- MCP client (harici araçlar, gateway altında). ✅ (`f3d13ce`): `syn mcp list|add|remove|approve|revoke|enable|disable|test`, `/mcp`; stdio + streamable HTTP (resmi SDK); proje server'ları ve `.mcp.json` tek seferlik onayla; Claude native modda `--mcp-config`. Playwright: `syn mcp add playwright -- npx @playwright/mcp@latest`. Ayrıntı: [ADR-13 revizyonu](../decisions/ADR-13-mcp-acp.md).
+- ✅ (`e97835b`) Zamanda yolculuk: `/rewind` (Esc Esc; istersen dosyaları da geri al), `/fork`, `/resume` seçicisi. Ayrıca `/commit` seçici staging, efor config canlı, görsel temp temizliği.
 - ✅ (`8ae9e99`) **UI eki — alt durum satırı (ürün sahibi, 2026-09-25):** Hata: `/model` ile model değişince alttaki model/bağlam bilgisi güncellenmiyor. Durum satırı canlı state'ten beslenmeli: model, efor (K6), izin modu, bağlam %, kota; her değişiklikte (`/model`, `/effort`, Shift+Tab, compact) anında yenilenmeli. Görünüm daha okunur ve renkli olmalı: alanlar ayrı renk/ton, bağlam ve kota eşiklere göre renk (yeşil → sarı → kırmızı), dar terminalde öncelik sırasıyla kısalma.
 
 ### K4 — Yetenekler: internet ve araç seti (ürün sahibi isteği, 2026-09-24) ⭐
@@ -113,7 +113,7 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - Tören satırlarını (audit) ekrandan kaldır, yalnız log'da tut.
 
 ### Altyapı / sonra
-- macOS + Windows CI hatalarını düzelt (Ubuntu yeşil; ilk CI run `35917000110`).
+- macOS + Windows CI: ✅ macOS yeşil (`ef6907a`: pwsh7 altında DPAPI, macOS soket yolu, realpath tmp); Windows'ta 1 test (muhtemelen e2e scaffold) hâlâ kırmızı — log için `gh` veya tarayıcı izni gerekli.
 - Windows OS sandbox (AppContainer + job object) — HD-03.
 - Güveni commit/lockfile değişikliğine bağlama.
 - ✅ Paketleme (`31e28fc`): kendi kendine yeten paket, `pnpm run install:global` → global `syn`; [install.md](install.md). npm yayını ve `main`e taşıma ayrı karar.

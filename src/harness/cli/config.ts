@@ -23,6 +23,7 @@ import {
   type RouteRule,
   type RouteSource,
 } from "../contracts/index.ts";
+import { mcpConfigSchema, type McpConfig } from "../mcp/index.ts";
 import { policyConfigSchema, type PolicyConfig } from "../policy/index.ts";
 import { WEB_SEARCH_PROVIDERS, type WebSearchProvider } from "../providers/index.ts";
 import { CLAUDE_CODE_MODES, type ClaudeCodeMode } from "../providers/claude-code/native.ts";
@@ -134,6 +135,8 @@ export const OFFICIAL_ENDPOINTS: Readonly<Record<"openai-chatgpt" | "openai-resp
 
 /** Keys a repository (workspace or project) layer may set; every other known key is ignored with a warning. */
 export const REPOSITORY_LAYER_KEYS = ["policy", "budget"] as const;
+/** Repository keys kept but gated: nothing in them runs until the user approved it (K3 `mcp`). */
+export const REPOSITORY_GATED_KEYS = ["mcp"] as const;
 
 const configFileSchema = z.strictObject({
   policy: policyConfigSchema.optional(),
@@ -172,6 +175,8 @@ const configFileSchema = z.strictObject({
   web: webConfigSchema.optional(),
   /** K6 reasoning effort per tier / worker role (user layer only). */
   effort: effortConfigSchema.optional(),
+  /** K3 MCP servers: user layer as written; a project layer's servers wait for a one-time approval each. */
+  mcp: mcpConfigSchema.optional(),
 });
 type ConfigFile = z.infer<typeof configFileSchema>;
 export type UserConfigFile = ConfigFile;
@@ -245,6 +250,8 @@ export interface RuntimeConfig {
   readonly web: WebConfig;
   /** `effort.*` (user layer only, K6); empty when nothing is set. */
   readonly effort: EffortConfig;
+  /** K3 `mcp` blocks: the user layer's, and the project layer's (approval-gated per server). */
+  readonly mcp: { readonly user: McpConfig | undefined; readonly userFile: string; readonly project: McpConfig | undefined; readonly projectFile: string };
 }
 
 function configError(message: string, file?: string): HarnessError {
@@ -282,7 +289,7 @@ async function readLayer(file: string, repository = false): Promise<ConfigFile |
   if (repository && typeof raw === "object" && !Array.isArray(raw)) {
     // Keys a repository may not set are dropped before validation, so an untrusted file can neither
     // widen trust nor break the run with a malformed value in a key that is ignored anyway.
-    const allowed = new Set<string>(REPOSITORY_LAYER_KEYS);
+    const allowed = new Set<string>([...REPOSITORY_LAYER_KEYS, ...REPOSITORY_GATED_KEYS]);
     const known = new Set(Object.keys(configFileSchema.shape));
     const kept: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
@@ -540,5 +547,6 @@ export async function loadRuntimeConfig(
       allowPrivate: user?.web?.fetch?.allow_private ?? [],
     },
     effort: user?.effort ?? {},
+    mcp: { user: user?.mcp, userFile: userPath, project: project?.mcp, projectFile: projectPath },
   };
 }

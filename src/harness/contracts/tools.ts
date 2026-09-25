@@ -236,6 +236,8 @@ export interface Tool<Input = unknown> {
 
 export interface ToolRegistry {
   register(tool: Tool): void;
+  /** K3: removes a registered tool (an MCP server was disabled or reconnected); false when absent. */
+  unregister?(name: string): boolean;
   get(name: string): Tool | undefined;
   visibleTo(role: AgentRole, policy: EffectivePolicy): readonly ToolDescriptor[];
 }

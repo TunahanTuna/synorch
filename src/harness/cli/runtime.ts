@@ -111,6 +111,7 @@ import {
   type WebSearchSources,
   type ClaudeCodeMode,
 } from "../providers/index.ts";
+import { McpManager } from "../mcp/index.ts";
 import { createBlobStore, createSessionStore } from "../store/index.ts";
 import { BackgroundProcessManager, createRedactor, createSandboxRunner, createToolGateway, createToolRegistry, createWebSession, probeSandbox, type WebSession } from "../tools/index.ts";
 import { createClaudeNativeApprovals } from "./claude-native-approvals.ts";
@@ -219,6 +220,8 @@ export interface Runtime {
   readonly orchestrate: OrchestrateSlot;
   /** K4.1 web state: allowed domains (user grants), the prompt-injection shield, the page cache. */
   readonly web: WebSession;
+  /** K3 MCP client: configured external servers; their tools join the registry as `mcp__<server>__<tool>`. */
+  readonly mcp: McpManager;
   /** Lazily opened: probing the OS keychain can spawn a helper process. */
   credentialStore(): SynorchCredentialStore;
   authProvider(providerId: string, method: AuthProvider["method"], profile: string): AuthProvider | undefined;
@@ -355,6 +358,8 @@ interface WebAdapterHooks {
 /** Claude Code native-mode wiring (owner revision 2026-09-24): the configured mode and the session hooks. */
 interface ClaudeWiring {
   readonly mode: ClaudeCodeMode;
+  /** K3: MCP servers Claude runs itself in native mode (`--mcp-config`), instead of proxying them. */
+  readonly mcpServers: () => Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   readonly permissionMode: () => PermissionMode | undefined;
   readonly onWebContentRead: () => void;
 }
@@ -380,6 +385,7 @@ async function buildAdapter(entry: ConfiguredAdapter, fetch: FetchLike | undefin
         env,
         allowNonSubscriptionAuth: entry.allowNonSubscriptionAuth === true,
         mode: claude.mode,
+        mcpServers: claude.mcpServers,
         permissionMode: claude.permissionMode,
         onWebContentRead: claude.onWebContentRead,
       });
@@ -487,9 +493,12 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     contentRead: () => undefined,
   };
   const webHooks: WebAdapterHooks = { hostedWebSearch: (request, signal) => webHooksState.gate(request, signal), onHostedSearch: (observed) => webHooksState.observe(observed) };
+  // K3: the MCP manager exists once the registry does; Claude Code native mode reads its servers at each process start.
+  const mcpHolder: { current: McpManager | undefined } = { current: undefined };
   // Read at every Claude process start, so a mode change (Shift+Tab, /permissions) applies to the next step.
   const claude: ClaudeWiring = {
     mode: config.claudeCodeMode ?? "native",
+    mcpServers: () => mcpHolder.current?.claudeServers() ?? {},
     permissionMode: () => permission,
     // K4.1: a native WebSearch/WebFetch result arrived; the prompt-injection shield applies to this turn.
     onWebContentRead: () => webHooksState.contentRead(),
@@ -770,6 +779,24 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const orchestrate = createOrchestrateSlot();
   registry.register(createOrchestrateTool(orchestrate) as never);
 
+  // K3 MCP client: servers are resolved now (no process starts); sessions call startSession().
+  const mcp = new McpManager({
+    home,
+    workspaceRoot,
+    workspaceKey: trustState.root,
+    environment: env,
+    registry,
+    clientVersion: SYNORCH_VERSION,
+    user: { config: config.mcp.user, file: config.mcp.userFile },
+    project: { config: config.mcp.project, file: config.mcp.projectFile },
+    platform,
+    // MCP results are untrusted like web content: the outward-action shield applies for the rest of the turn.
+    onUntrustedContent: () => webSession.markContentRead(),
+    addRedaction: (value) => redactionValues.add(value),
+  });
+  await mcp.load();
+  mcpHolder.current = mcp;
+
   // K4.1 native OpenAI search: on in auto/full/plan, one question per session in ask, headless only with web.openai_hosted: true.
   let hostedConsent: boolean | undefined;
   webHooksState.gate = async (_request, signal) => {
@@ -974,6 +1001,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     credentials,
     orchestrate,
     web: webSession,
+    mcp,
     credentialStore,
     authProvider,
     subscribe(listener) {

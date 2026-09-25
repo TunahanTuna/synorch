@@ -203,6 +203,8 @@ export interface ConversationCommandHost {
   cost(): Promise<void>;
   /** K4.2 `/ps [kill <handle|all>]`: background processes. */
   ps(argument: string): Promise<void>;
+  /** K3 `/mcp`: MCP servers, their tools and state; reconnect, enable, disable, approve. */
+  mcp(argument: string): Promise<void>;
   /** K2 `/evidence [turn | <n>]`. */
   evidence(argument: string): Promise<void>;
   why(argument: string): Promise<void>;
@@ -258,6 +260,7 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/memory", argsHint: "[init | review | edit <id> | retire <id> | open [id] | graph]", description: "memory ledger and decision desk: what Synorch remembers, proposals to accept / edit / reject / defer", whileBusy: true, run: (host, argument) => host.report("memory", argument) },
   { name: "/mouse", argsHint: "[on|off]", description: "toggle mouse capture (scroll / select)", whileBusy: true, rendererLocal: true, run: (host, argument) => host.mouse(argument) },
   { name: "/diff", description: "files changed by Synorch in this conversation", whileBusy: true, run: (host, argument) => host.report("diff", argument) },
+  { name: "/mcp", argsHint: "[tools | reconnect | enable | disable | approve <name>]", description: "MCP servers (external tools such as Playwright): state, tools, reconnect, enable / disable, approve a project server", whileBusy: true, run: (host, argument) => host.mcp(argument) },
   { name: "/ps", argsHint: "[kill <handle|all>]", description: "background processes (dev servers, watchers); stop one or all", whileBusy: true, run: (host, argument) => host.ps(argument) },
   { name: "/graph", description: "the plan graph of the current or last worker run", whileBusy: true, run: (host) => host.graph() },
   { name: "/tasks", description: "tasks of this conversation's worker runs", whileBusy: true, run: (host, argument) => host.report("tasks", argument) },

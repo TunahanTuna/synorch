@@ -3,6 +3,8 @@
  * byte (legacy snapshot, AC-1); each runtime command documents itself with `syn <command> --help`.
  */
 
+import { MCP_HELP } from "./mcp-command.ts";
+
 const COMMON = `Common options:
   -t, --target <path>          Workspace root (default: current directory).
       --plain                  Append-only output without cursor movement (also SYN_PLAIN=1, TERM=dumb).
@@ -176,6 +178,7 @@ Keys:
 
 ${COMMON}
 `,
+  mcp: MCP_HELP,
   memory: `syn memory — project memory
 
 Usage:

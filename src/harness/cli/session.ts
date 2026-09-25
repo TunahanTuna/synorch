@@ -198,6 +198,8 @@ async function openSession(
       ...(parsed.session.permission === "full" ? { permissionMode: "full" as const } : {}),
     });
     requireOrchestratorRoute(runtime);
+    // K3: a run's workers see the MCP tools from their first step; failures stay in `syn mcp list`.
+    await runtime.mcp.startSession();
   } catch (error) {
     failure = failureInfo(error);
   }
@@ -253,8 +255,10 @@ async function openSession(
     events,
     questions,
     dispose: () => {
-      // K4.2: background processes of the run's workers never outlive the session.
+      // K4.2: background processes of the run's workers never outlive the session (K3: nor MCP servers).
       runtime.processes.killAllSync();
+      runtime.mcp.killAllSync();
+      void runtime.mcp.close();
       unbind();
       unsubscribe();
       stopNotices();

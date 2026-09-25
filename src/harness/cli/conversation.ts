@@ -1411,7 +1411,7 @@ class Conversation implements ConversationCommandHost {
     // The rationale is audit, not transcript: it is in the session log and in `/runs <id>` (Why:).
     // ADR-07/19: without git, writing workers edit in place one at a time (scoped-dir with a revertable snapshot).
     if (this.workerRuns.length === 1 && !insideGitRepository(runtime.workspaceRoot)) {
-      this.note("info", `No git repository here: workers edit in place one at a time ${g.sep} git init and a first commit give each worker its own worktree`);
+      this.note("info", `No git repository here: workers edit in place one at a time ${this.glyphs.sep} git init and a first commit give each worker its own worktree`);
     }
     if (this.renderer.kind === "tui") views?.setBoard(tracker.view());
     run.done = this.driveRun(run, goal);

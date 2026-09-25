@@ -36,6 +36,8 @@ import type {
   DeviceCodePrompt,
   InteractiveInputControls,
   ModelPickerEntry,
+  PanelActionResult,
+  PanelPage,
   PickerHeading,
   ModelStreamEvent,
   PermissionMode,
@@ -51,6 +53,7 @@ import type {
 } from "../contracts/index.ts";
 import { choiceAnswerText, nextPermissionMode, WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
 import { ChoiceModal, type ChoiceModalOptions } from "./choice-modal.ts";
+import { PanelNavigator, type PanelKey } from "./panels/index.ts";
 import { actionChoices, actionTitle, withApprovalDeadline, type ApprovalAnswer, type ApprovalChoice } from "./approvals.ts";
 import {
   activityText,
@@ -851,6 +854,23 @@ type InputResult = Awaited<ReturnType<UserInputSource["next"]>>;
 /** Two Esc presses within this window on an empty, idle editor open /rewind. */
 const DOUBLE_ESCAPE_MS = 800;
 const BRACKETED_PASTE = /^\x1b\[200~([\s\S]*)\x1b\[201~$/;
+
+/** Panel keys to pi-tui key ids. */
+const PANEL_KEYS: Readonly<Record<PanelKey, string>> = {
+  up: "up",
+  down: "down",
+  left: "left",
+  right: "right",
+  enter: "enter",
+  escape: "escape",
+  backspace: "backspace",
+  tab: "tab",
+  shiftTab: "shift+tab",
+  pageUp: "pageUp",
+  pageDown: "pageDown",
+  home: "home",
+  end: "end",
+};
 const IMAGE_PATH_HINT = /\.(png|jpe?g|gif|webp)['"]?\s*$/i;
 
 interface StreamState {
@@ -942,6 +962,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private cancelArmed: { readonly key: string; readonly at: number } | undefined;
   private readonly delegationIds = new WeakMap<DelegationComponent, string>();
   private delegationCount = 0;
+  /** The open layered panel: it replaces the screen's components until closed (then they come back). */
+  private panel: { readonly nav: PanelNavigator; readonly saved: Component[]; readonly done: (result: PanelActionResult | undefined) => void } | undefined;
 
   /** The prompt that currently owns the input, if any. */
   private get dialog(): DialogEntry | undefined {
@@ -1034,6 +1056,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         this.tui.requestRender();
       },
       inputActivity: () => ({ lastKeyAtMs: this.lastKeyAtMs, draft: this.editor.getText().trim().length > 0 }),
+      openPanel: (page, signal) => this.openPanel(page, signal),
       ...(options.view === "conversation" ? { appearance: this.appearanceControls() } : {}),
     };
     this.queue = new RenderQueue((event) => this.consume(event), {
@@ -1368,6 +1391,11 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   /** The selected task key on the board / graph (undefined when nothing is selected). */
   public get selectedTask(): string | undefined {
     return this.selecting ? this.selectedKey : undefined;
+  }
+
+  /** The open layered panel's navigation state (tests, introspection); undefined when none is open. */
+  public get panelState(): PanelNavigator["state"] | undefined {
+    return this.panel?.nav.state;
   }
 
   /** Key of the open worker view, if any. */
@@ -1927,6 +1955,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     this.spinner = undefined;
     this.workerPane?.dispose();
     for (const dialog of [...this.dialogs].reverse()) dialog.cancel();
+    this.panel?.nav.close();
     this.removeInputListener?.();
     this.tray.discard();
     if (this.mouseOn && !this.selectMode) this.terminal.write(MOUSE_DISABLE_SEQUENCE);
@@ -1940,6 +1969,10 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private onKey(data: string): { consume?: boolean; data?: string } | undefined {
     // K3: typing into the editor (not a prompt) delays a background worker's prompt until a pause.
     if (this.dialog === undefined && !isMouseSequence(data)) this.lastKeyAtMs = Date.now();
+    if (this.panel !== undefined) {
+      const panelKey = this.onPanelKey(data);
+      if (panelKey !== undefined) return panelKey;
+    }
     const worker = isMouseSequence(data) ? undefined : this.onWorkerKey(data);
     if (worker !== undefined) return worker;
     const input = this.onInputKey(data);
@@ -2523,8 +2556,93 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     } else if (top !== undefined) {
       this.dialogOverlay = this.tui.showOverlay(top.component, { anchor: "bottom-center", width: "90%", margin: 1 });
     }
-    this.tui.setFocus(top?.focus ?? this.editor);
+    this.tui.setFocus(top?.focus ?? this.panel?.nav ?? this.editor);
     this.tui.requestRender();
+  }
+
+  // ---- layered panels ------------------------------------------------------------------------------
+
+  /**
+   * Opens a layered panel (`/skills`, `/mcp`…): it takes the whole screen but the inline dialog
+   * slot (an action's question opens there, under the panel). The transcript and the editor are
+   * kept as they are and come back on close; nothing is printed while it is open.
+   */
+  private openPanel(page: PanelPage, signal?: AbortSignal): Promise<void> {
+    if (this.stopped || !this.started || signal?.aborted === true) return Promise.resolve();
+    this.panel?.nav.close();
+    return new Promise((resolve) => {
+      const glyphs = this.presenter?.glyphs ?? this.options.glyphs ?? GLYPH_SETS.rich;
+      const saved = [...this.tui.children];
+      const onAbort = (): void => nav.close();
+      const nav: PanelNavigator = new PanelNavigator(page, {
+        style: this.style,
+        glyphs,
+        isKey: (data, key) => matchesKey(data, PANEL_KEYS[key] as Parameters<typeof matchesKey>[1]),
+        printable: (data) => {
+          const paste = BRACKETED_PASTE.exec(data);
+          if (paste !== null) return (paste[1] ?? "").replace(/\r?\n/g, " ");
+          return decodeKittyPrintable(data) ?? (data.startsWith("\x1b") || data.length === 0 ? undefined : data);
+        },
+        rows: () => {
+          let others = 0;
+          for (const child of this.tui.children) if (child !== nav) others += child.render(this.terminal.columns).length;
+          return this.terminal.rows - others;
+        },
+        markdown: (text, width) => new Markdown(text, 0, 0, this.markdownTheme).render(width),
+        view: (view, width) => new StaticViewComponent(view, this.viewStyle()).render(width),
+        ask: (prompt) => this.askQuestion(prompt, undefined),
+        confirm: async (question) => (await this.askQuestion(question, ["Yes", "No"])) === "Yes",
+        onClose: (result) => entry.done(result),
+        requestRender: () => {
+          if (this.started && !this.stopped) this.tui.requestRender();
+        },
+      });
+      const entry = {
+        nav,
+        saved,
+        done: (result: PanelActionResult | undefined): void => {
+          signal?.removeEventListener("abort", onAbort);
+          if (this.panel !== entry) return;
+          this.panel = undefined;
+          if (!this.stopped) {
+            const children = this.tui.children;
+            children.length = 0;
+            children.push(...entry.saved);
+            this.tui.setFocus(this.dialog?.focus ?? this.editor);
+            if (result?.editorText !== undefined) this.editor.setText(result.editorText);
+            this.tui.requestRender(true);
+          }
+          if (result?.command !== undefined) this.deliver({ kind: "command", text: result.command });
+          resolve();
+        },
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.panel = entry;
+      const children = this.tui.children;
+      children.length = 0;
+      children.push(nav, this.dialogSlot);
+      this.tui.setFocus(this.dialog?.focus ?? nav);
+      this.tui.requestRender(true);
+    });
+  }
+
+  /** Keys while a panel is open: the wheel scrolls it, Ctrl+C closes it; the panel gets the rest (a dialog over it first). */
+  private onPanelKey(data: string): { consume?: boolean; data?: string } | undefined {
+    const panel = this.panel;
+    if (panel === undefined) return undefined;
+    if (isMouseSequence(data)) {
+      const event = parseSgrMouse(data);
+      if (event?.type === "wheel" && this.dialog === undefined) panel.nav.scroll((event.wheel ?? 0) * 3);
+      return { consume: true };
+    }
+    if (matchesKey(data, "ctrl+c")) {
+      if (this.dialog !== undefined) this.dialog.cancel();
+      else panel.nav.close();
+      return { consume: true };
+    }
+    if (this.dialog !== undefined) return undefined;
+    panel.nav.handleInput(data);
+    return { consume: true };
   }
 
   /**

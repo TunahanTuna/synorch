@@ -46,6 +46,8 @@ export function contextReport(events: readonly SessionEvent[]): string[] {
  */
 export interface ConversationCommandHost {
   print(lines: readonly string[]): void;
+  /** `/help` as a command browser (TUI panel); absent prints `conversationHelp()`. */
+  help?(): Promise<void>;
   cancel(): void;
   planMode(goal: string): Promise<void>;
   go(mode: string): Promise<void>;
@@ -113,7 +115,7 @@ export interface SlashCommand {
 }
 
 export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
-  { name: "/help", description: "commands and keys", whileBusy: true, run: async (host) => host.print(conversationHelp()) },
+  { name: "/help", description: "commands and keys", whileBusy: true, run: async (host) => (host.help === undefined ? host.print(conversationHelp()) : host.help()) },
   { name: "/plan", argsHint: "[goal]", description: "plan mode: read-only, discuss and plan before changing anything (Shift+Tab cycles modes)", whileBusy: true, run: (host, argument) => host.planMode(argument) },
   { name: "/go", argsHint: "[workers]", description: "leave plan mode and carry out the plan here, or with workers", run: (host, argument) => host.go(argument) },
   { name: "/workers", argsHint: "<goal>", description: "run a large goal with parallel workers and an independent reviewer; alone: list the workers", whileBusy: true, run: (host, argument) => host.workers(argument) },

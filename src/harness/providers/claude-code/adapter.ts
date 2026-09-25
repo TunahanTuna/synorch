@@ -401,7 +401,8 @@ class ClaudeCodeSession implements BackendSession {
   private externalAllowed(): string[] {
     const mode = this.config.permissionMode();
     if (mode !== "auto" && mode !== "full") return [];
-    return Object.keys(this.config.mcpServers).filter((name) => name !== MCP_SERVER_NAME).map((name) => `mcp__${name}`);
+    // Claude turns every character outside [A-Za-z0-9_-] of a server name into `_` in tool names (`plugin:exa:exa` → `mcp__plugin_exa_exa`).
+    return Object.keys(this.config.mcpServers).filter((name) => name !== MCP_SERVER_NAME).map((name) => `mcp__${name.replace(/[^A-Za-z0-9_-]/g, "_")}`);
   }
 
   /** The relay's tool list: Synorch's registry, minus proxied MCP tools when Claude runs those servers itself. */
@@ -432,7 +433,7 @@ class ClaudeCodeSession implements BackendSession {
       yield { type: "error", error: providerError("invalid_request", "a turn is already running in this backend session") };
       return;
     }
-    const content = trailingUserContent(input);
+    const content = trailingUserContent(input, !this.resume);
     if (content === undefined) {
       yield { type: "error", error: providerError("invalid_request", "a backend turn needs a trailing user message") };
       return;
@@ -883,9 +884,10 @@ type UserBlock = { readonly type: "text"; readonly text: string } | { readonly t
  * The trailing user messages as stream-json content blocks: text, and images as base64 `image`
  * blocks (the driver fills `data` from the blob store right before the turn; K1.5-B).
  */
-function trailingUserContent(input: BackendTurnInput): UserBlock[] | undefined {
+function trailingUserContent(input: BackendTurnInput, fresh = false): UserBlock[] | undefined {
   const blocks: UserBlock[] = [];
-  for (let index = input.messages.length - 1; index >= 0; index -= 1) {
+  let index = input.messages.length - 1;
+  for (; index >= 0; index -= 1) {
     const message = input.messages[index];
     if (message === undefined || message.role !== "user") break;
     const own: UserBlock[] = [];
@@ -899,7 +901,33 @@ function trailingUserContent(input: BackendTurnInput): UserBlock[] | undefined {
     }
     blocks.unshift(...own);
   }
-  return blocks.some((block) => block.type === "text") ? blocks : undefined;
+  if (!blocks.some((block) => block.type === "text")) return undefined;
+  const history = fresh ? priorTranscript(input.messages.slice(0, index + 1)) : undefined;
+  return history === undefined ? blocks : [{ type: "text", text: history }, ...blocks];
+}
+
+const HISTORY_LIMIT = 60_000;
+
+/**
+ * A fresh Claude session (`--session-id`) knows nothing of the Synorch conversation so far: a
+ * resumed Synorch session (`syn agent --resume`, the backend map is in memory only), a model
+ * switch, or a switch from another provider. The earlier turns go in once, as a transcript block;
+ * later steps `--resume` the Claude session and send only the new user message.
+ */
+export function priorTranscript(messages: readonly BackendTurnInput["messages"][number][]): string | undefined {
+  const lines: string[] = [];
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type === "text" && part.text.trim() !== "") lines.push(`${message.role === "assistant" ? "Assistant" : "User"}: ${part.text.trim()}`);
+      else if (part.type === "tool_call") lines.push(`Assistant called ${part.name} ${JSON.stringify(part.arguments).slice(0, 300)}`);
+      else if (part.type === "tool_result") lines.push(`${part.is_error ? "Tool error" : "Tool result"}: ${part.text.replace(/\s+/g, " ").trim().slice(0, 500)}`);
+      else if (part.type === "image") lines.push("User: [an image was attached earlier]");
+    }
+  }
+  if (lines.length === 0) return undefined;
+  let text = lines.join("\n");
+  if (text.length > HISTORY_LIMIT) text = `[earlier turns omitted]\n${text.slice(-HISTORY_LIMIT)}`;
+  return `<conversation_so_far>\nThe earlier turns of this conversation (recorded by Synorch; continue from them, do not repeat them):\n${text}\n</conversation_so_far>`;
 }
 
 /** Recognizes `Login expired · Please run /login` and rate/billing failures in backend output. */

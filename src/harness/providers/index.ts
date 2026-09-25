@@ -13,6 +13,7 @@ export {
   CLAUDE_CODE_MINIMUM_VERSION,
   CLAUDE_TOOL_PREFIX,
   createClaudeCodeAdapter,
+  priorTranscript,
   type ClaudeCodeAdapterOptions,
 } from "./claude-code/adapter.ts";
 export { bridgeEnvironment, findOnPath, type ExecutableSpec } from "./claude-code/process.ts";

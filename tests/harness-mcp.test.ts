@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ToolExecutionContext } from "../src/harness/contracts/index.ts";
-import { expandVariables, McpManager, mcpConfigSchema, modelToolName, readMcpJson } from "../src/harness/mcp/index.ts";
+import { expandVariables, McpManager, mcpConfigSchema, modelToolName, readMcpJson, toDefinition } from "../src/harness/mcp/index.ts";
 import { createToolRegistry } from "../src/harness/tools/index.ts";
 
 const ECHO_SERVER = fileURLToPath(new URL("./fixtures/mcp/echo-server.ts", import.meta.url));
@@ -89,6 +89,31 @@ test("mcp client: a stdio fixture server's tools run through the registry; proje
     await manager.setEnabled("echo", false);
     assert.equal(registry.get("mcp__echo__echo"), undefined);
     assert.deepEqual(Object.keys(manager.claudeServers()), ["proj"]);
+  } finally {
+    await manager.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("claude native: servers of Claude-enabled plugins are passed under Claude's own name (strict-mcp-config skips them)", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "syn-mcp-claude-plugin-"));
+  const plugin = { ...toDefinition("exa", { type: "http", url: "https://mcp.example.com/mcp" }, "claude-plugin", "plugin.json", {}), claudeName: "plugin:exa:exa" };
+  const manager = new McpManager({
+    home,
+    workspaceRoot: home,
+    workspaceKey: home,
+    environment: {},
+    registry: createToolRegistry({ builtins: false }),
+    clientVersion: "test",
+    user: { config: { servers: { mine: { type: "http", url: "https://mine.example.com/mcp" } } }, file: "user.yaml" },
+    project: { config: undefined, file: "project.yaml" },
+    plugins: () => [plugin],
+  });
+  try {
+    await manager.load();
+    const servers = manager.claudeServers();
+    assert.deepEqual(Object.keys(servers).sort(), ["mine", "plugin:exa:exa"]);
+    assert.equal(servers["plugin:exa:exa"]?.url, "https://mcp.example.com/mcp");
   } finally {
     await manager.close();
     await rm(home, { recursive: true, force: true });

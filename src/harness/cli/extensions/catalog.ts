@@ -234,7 +234,8 @@ export function pluginMcpServers(state: ExtensionState, input: { readonly home: 
         problems.push(`plugin ${plugin.key}: MCP server ${name}: ${parsed.error}`);
         continue;
       }
-      servers.push(toDefinition(name, parsed.entry, plugin.origin === "claude" ? "claude-plugin" : "plugin", path.join(plugin.contents.root, ".mcp.json"), environment, { baseDir: plugin.contents.root }));
+      const definition = toDefinition(name, parsed.entry, plugin.origin === "claude" ? "claude-plugin" : "plugin", path.join(plugin.contents.root, ".mcp.json"), environment, { baseDir: plugin.contents.root });
+      servers.push(plugin.origin === "claude" ? { ...definition, claudeName: `plugin:${plugin.contents.name}:${name}` } : definition);
     }
   }
   return { servers, problems };

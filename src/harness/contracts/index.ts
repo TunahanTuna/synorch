@@ -1,4 +1,5 @@
 export * from "./auth.ts";
+export * from "./choice.ts";
 export * from "./common.ts";
 export * from "./digest.ts";
 export * from "./errors.ts";

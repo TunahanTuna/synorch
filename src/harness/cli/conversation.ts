@@ -2,6 +2,11 @@ import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import {
+  askUserSummaryLine,
+  choiceQuestionLines,
+  parseTypedChoice,
+  type ChoiceAnswer,
+  type ChoiceQuestion,
   createId,
   digestOf,
   effectivePolicySchema,
@@ -389,7 +394,10 @@ class Conversation implements ConversationCommandHost {
       this.hub.feed(event);
       this.forward(event);
     });
-    const unbind = io.stdinIsTTY && this.renderer.input !== undefined ? runtime.bindUserPrompt((question, options, signal) => this.askUser(question, options, signal)) : () => undefined;
+    const unbind = io.stdinIsTTY && this.renderer.input !== undefined ? runtime.bindUserPrompt(
+            (question, options, signal) => this.askUser(question, options, signal),
+            (question, signal) => this.chooseForAgent(question, signal),
+          ) : () => undefined;
     runtime.orchestrate.set((input, context) => this.runOrchestration(input, context));
     let unbindControls: () => void = () => undefined;
     const unwatchProcesses = this.watchProcesses();
@@ -959,6 +967,37 @@ class Conversation implements ConversationCommandHost {
    * reads a numbered answer. Either way the answer never becomes a conversation message. A numeric
    * answer resolves to its option's text.
    */
+  /**
+   * K5 structured question (the agent's ask_user, Claude Code's AskUserQuestion): the TUI's choice
+   * modal, or in plain mode the numbered question read from the input. Undefined when dismissed.
+   */
+  private async choose(question: ChoiceQuestion, signal: AbortSignal): Promise<ChoiceAnswer | undefined> {
+    const controls = this.renderer.controls;
+    if (this.renderer.kind === "tui" && controls !== undefined) return controls.choose(question, signal);
+    for (const line of choiceQuestionLines(question)) this.note(line.startsWith("?") ? "warning" : "info", line);
+    const input = this.renderer.input;
+    for (;;) {
+      let typed: string;
+      if (this.readingDuringWorkers || input === undefined) typed = await this.desk.ask(signal);
+      else {
+        const next = await input.next(signal);
+        if (!("text" in next)) return undefined;
+        typed = next.text;
+      }
+      if (typed.trim() === "") continue;
+      const answer = parseTypedChoice(question, typed);
+      if (answer !== undefined) return answer;
+      this.note("info", "  type one of the numbers above");
+    }
+  }
+
+  /** An agent's question leaves one short line in the transcript (`? Auth method → OAuth`), not the modal. */
+  private async chooseForAgent(question: ChoiceQuestion, signal: AbortSignal): Promise<ChoiceAnswer | undefined> {
+    const answer = await this.choose(question, signal);
+    this.note("info", askUserSummaryLine(question, answer));
+    return answer;
+  }
+
   private async askUser(question: string, options: readonly string[] | undefined, signal: AbortSignal): Promise<string> {
     const controls = this.renderer.controls;
     if (this.renderer.kind === "tui" && controls !== undefined) {

@@ -15,6 +15,7 @@ import {
   TuiMainScreen,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
   type Component,
   type Focusable,
   type MarkdownTheme,
@@ -76,6 +77,10 @@ import {
 } from "./terminal-lifecycle.ts";
 import { TOOL_STATUS_LABEL, ToolCardTracker, type ToolCard } from "./tool-cards.ts";
 import { diffLine, renderToolRow, type ToolRowPaint } from "./tool-row.ts";
+import { splitMarker, wrapHanging, type TextWrapper } from "./wrap.ts";
+
+/** Grapheme- and wide-char-aware word wrap for the transcript (plain text in, plain lines out). */
+const wrapText: TextWrapper = (text, width) => wrapTextWithAnsi(text, width);
 import { AttachmentTray } from "./input/attachments.ts";
 import { InputCompletionProvider } from "./input/autocomplete.ts";
 import { imagePathFromPaste, readClipboardImage, type ClipboardImage } from "./input/clipboard.ts";
@@ -283,7 +288,7 @@ function conversationItemView(item: ConversationItem, deps: ItemViewDeps, previo
     case "result":
       return new ResultLineView(item, deps.style, deps.glyphs);
     case "user":
-      return new UserMessageView(item.text, deps.style);
+      return new UserMessageView(item.text, deps.style, deps.glyphs, () => deps.expanded(item.id));
     case "assistant": {
       const view = new AssistantMessageView(new Markdown("", 0, 0, deps.markdownTheme), deps.glyphs.bullet);
       view.setText(item.text);
@@ -292,8 +297,8 @@ function conversationItemView(item: ConversationItem, deps: ItemViewDeps, previo
     case "tool":
       return new ToolLineView(item, deps.style, deps.glyphs, () => deps.expanded(item.id), !(previous instanceof ToolLineView));
     case "note": {
-      const text = item.level === "error" ? deps.style.red(item.text) : item.level === "warning" ? deps.style.yellow(item.text) : deps.style.dim(item.text);
-      return new Text(text, 0, 0);
+      const paint = item.level === "error" ? deps.style.red : item.level === "warning" ? deps.style.yellow : deps.style.dim;
+      return new NoteView(item.text, paint);
     }
   }
 }
@@ -362,7 +367,7 @@ class WorkerPane implements Component {
   }
 
   public addUser(text: string): void {
-    this.items.push(new UserMessageView(sanitizeTerminalText(text), this.deps.style));
+    this.items.push(new UserMessageView(sanitizeTerminalText(text), this.deps.style, this.deps.glyphs, this.deps.allExpanded));
   }
 
   public note(level: "info" | "warning" | "error", text: string): void {
@@ -495,21 +500,52 @@ class SecretInput implements Component, Focusable {
   }
 }
 
-/** Bold `>` user line with a blank line above (TUI §8.2). */
+/** Longer pastes than this collapse to their first lines + `[+N lines]` (Ctrl+O shows all). */
+const USER_COLLAPSE_LINES = 30;
+const USER_COLLAPSED_SHOWN = 12;
+
+/**
+ * Bold `>` user line with a blank line above (TUI §8.2). The user's own message is never cut: it
+ * word-wraps with a hanging indent at the current width. Only a very long paste collapses.
+ */
 class UserMessageView implements Component {
   private readonly text: string;
   private readonly style: Styler;
+  private readonly glyphs: GlyphSet;
+  private readonly expanded: () => boolean;
 
-  public constructor(text: string, style: Styler) {
+  public constructor(text: string, style: Styler, glyphs: GlyphSet, expanded: () => boolean) {
     this.text = text;
     this.style = style;
+    this.glyphs = glyphs;
+    this.expanded = expanded;
   }
 
   public invalidate(): void {}
 
   public render(width: number): string[] {
-    const [first = "", ...rest] = this.text.split("\n");
-    return ["", fit(`${this.style.bold(">")} ${this.style.bold(first)}`, width), ...rest.map((line) => fit(`  ${this.style.bold(line)}`, width))];
+    const lines = wrapHanging("> ", this.text.trimEnd(), width, { wrapText }).map((line) => this.style.bold(line));
+    if (lines.length <= USER_COLLAPSE_LINES || this.expanded()) return ["", ...lines];
+    const hidden = lines.length - USER_COLLAPSED_SHOWN;
+    return ["", ...lines.slice(0, USER_COLLAPSED_SHOWN), this.style.dim(`  ${this.glyphs.ellipsis} [+${hidden} lines] ctrl+o shows all`)];
+  }
+}
+
+/** A notice line: word-wrapped under its marker (`●`, `→`, `1.`) instead of cut or flush-left. */
+class NoteView implements Component {
+  private readonly text: string;
+  private readonly paint: (text: string) => string;
+
+  public constructor(text: string, paint: (text: string) => string) {
+    this.text = text;
+    this.paint = paint;
+  }
+
+  public invalidate(): void {}
+
+  public render(width: number): string[] {
+    const { prefix, body } = splitMarker(this.text);
+    return wrapHanging(prefix, body, width, { wrapText }).map((line) => this.paint(line));
   }
 }
 
@@ -570,7 +606,7 @@ class ToolLineView implements Component {
   public invalidate(): void {}
 
   public render(width: number): string[] {
-    return renderToolRow(this.item, { width, glyphs: this.glyphs, paint: toolPaint(this.style), expanded: this.expanded(), gap: this.gap, measure: visibleWidth, fit });
+    return renderToolRow(this.item, { width, glyphs: this.glyphs, paint: toolPaint(this.style), expanded: this.expanded(), gap: this.gap, measure: visibleWidth, fit, wrapText });
   }
 }
 
@@ -1969,7 +2005,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     }
     const attachments = this.tray.collect(trimmed);
     this.transcript.addChild(
-      this.presenter !== undefined ? new UserMessageView(sanitizeTerminalText(trimmed), this.style) : new Text(`${this.style.cyan(">")} ${sanitizeTerminalText(trimmed)}`, 0, 0),
+      this.presenter !== undefined ? new UserMessageView(sanitizeTerminalText(trimmed), this.style, this.presenter.glyphs, () => this.expanded) :new Text(`${this.style.cyan(">")} ${sanitizeTerminalText(trimmed)}`, 0, 0),
     );
     if (this.presenter !== undefined && !trimmed.startsWith("/")) {
       // The activity line appears with the user line, not when the session reports the turn.

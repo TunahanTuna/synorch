@@ -1040,7 +1040,7 @@ class Conversation implements ConversationCommandHost {
     const orchestration = this.orchestration;
     if (orchestration !== undefined && orchestration.foreground) {
       orchestration.coordinator.steer(text);
-      this.note("info", `${arrow} steering the workers: ${snippet(text, 80)} (applied at the next safe point)`);
+      this.note("info", `${arrow} steering the workers: ${text.trim()} (applied at the next safe point)`);
       return;
     }
     if (this.turnRunning && this.driver !== undefined && attachments.length === 0) {
@@ -1322,8 +1322,10 @@ class Conversation implements ConversationCommandHost {
     const g = this.glyphs;
     if (event.type === "plan/proposed" && event.session_id === tracker.sessionId) {
       const plan = event.data.plan;
-      this.note("info", `${g.bullet} Plan ${g.sep} ${plan.tasks.length} task${plan.tasks.length === 1 ? "" : "s"} ${g.sep} risk ${plan.risk}${this.runtime.policyMode === "autonomous" ? ` ${g.sep} starting now ${g.sep} esc to stop` : ""}`);
-      for (const [index, task] of plan.tasks.entries()) this.note("info", `  ${index + 1}. ${task.key} (${task.role}): ${snippet(task.objective, 90)}`);
+      const stop = orchestration.foreground ? ` ${g.sep} esc to stop` : "";
+      this.note("info", `${g.bullet} Plan ${g.sep} ${plan.tasks.length} task${plan.tasks.length === 1 ? "" : "s"} ${g.sep} risk ${plan.risk}${this.runtime.policyMode === "autonomous" ? ` ${g.sep} starting now${stop}` : ""}`);
+      // Task goals are what the user checks the plan by: shown in full (the renderer wraps them).
+      for (const [index, task] of plan.tasks.entries()) this.note("info", `  ${index + 1}. ${task.key} (${task.role}): ${task.objective.trim()}`);
     }
     if (before === undefined && tracker.sessionId !== undefined) this.orchestratedSessions.push(tracker.sessionId);
     const views = this.renderer.views;
@@ -1353,8 +1355,7 @@ class Conversation implements ConversationCommandHost {
     const background = input.wait !== true && this.canRunInBackground();
     const run = this.startRun(input, !background, context.signal);
     if (!background) return run.done;
-    const g = this.glyphs;
-    this.note("info", `${g.bullet} Workers run in the background (${run.id}) ${g.sep} keep chatting ${g.sep} /runs shows them`);
+    // The tool row's summary is the one on-screen line for this ("Workers running in background (run-1) · keep chatting · /runs").
     const text = [
       `Started worker run ${run.id} in the background. The user sees the plan and a live board; the conversation is not blocked.`,
       `Goal: ${snippet(input.goal, 400)}`,
@@ -1378,7 +1379,6 @@ class Conversation implements ConversationCommandHost {
   }
 
   private startRun(input: OrchestrateInput, foreground: boolean, turnSignal: AbortSignal): ActiveOrchestration {
-    const g = this.glyphs;
     const runtime = this.runtime;
     this.coordinator ??= runtime.createCoordinator(runtime.brokerFor(this.gatedApprovals()));
     const coordinator = this.coordinator;
@@ -1408,7 +1408,7 @@ class Conversation implements ConversationCommandHost {
     this.orchestration = run;
     this.workerRuns.push(run);
     const views = this.renderer.views;
-    this.note("info", `${g.bullet} Starting workers ${g.sep} ${input.reason}`);
+    // The rationale is audit, not transcript: it is in the session log and in `/runs <id>` (Why:).
     // ADR-07/19: without git, writing workers edit in place one at a time (scoped-dir with a revertable snapshot).
     if (this.workerRuns.length === 1 && !insideGitRepository(runtime.workspaceRoot)) {
       this.note("info", `No git repository here: workers edit in place one at a time ${g.sep} git init and a first commit give each worker its own worktree`);
@@ -1520,6 +1520,7 @@ class Conversation implements ConversationCommandHost {
     const lines = [
       `Run ${run.id}${run.tracker.run === undefined ? "" : ` (${run.tracker.run})`}: ${run.status === "running" ? (run.foreground ? "running" : "running in the background") : run.status}`,
       `Goal: ${snippet(run.goal, 300)}`,
+      ...(run.tracker.reason === undefined || run.tracker.reason.trim() === "" ? [] : [`Why: ${snippet(run.tracker.reason, 400)}`]),
       ...run.tracker.statusLines(),
     ];
     if (run.result !== undefined) lines.push("Result:", run.result.text !== "" ? run.result.text : (run.result.error?.message ?? ""));
@@ -1549,11 +1550,11 @@ class Conversation implements ConversationCommandHost {
     if (input.task !== undefined) {
       const result = await run.coordinator.workers.message(input.task, input.message);
       if (!result.ok) return toolError("execution_failed", result.message);
-      this.note("info", `${arrow} Synorch told ${input.task}: ${snippet(input.message, 80)}`);
+      this.note("info", `${arrow} Synorch told ${input.task}: ${input.message.trim()}`);
       return { status: "ok", text: result.message, truncated: false, redactions: 0 };
     }
     run.coordinator.steer(input.message);
-    this.note("info", `${arrow} Synorch steered the workers: ${snippet(input.message, 80)} (applied at the next safe point)`);
+    this.note("info", `${arrow} Synorch steered the workers: ${input.message.trim()} (applied at the next safe point)`);
     return { status: "ok", text: `Queued for the orchestrator of ${run.id}; it applies the message at the next safe point (it may re-plan).`, truncated: false, redactions: 0 };
   }
 
@@ -1729,13 +1730,13 @@ class Conversation implements ConversationCommandHost {
       if (views !== undefined) {
         const assignment = this.workerDirectory?.assignment(data.key);
         views.showView({ kind: "delegation", taskKey: data.key, role: data.role, model: data.model_id, objective: data.objective, ...(assignment === undefined ? {} : { assignment }) });
-      } else this.note("info", `${arrow} ${data.key} (${data.role}, ${data.model_id}): ${snippet(data.objective, 100)}`);
+      } else this.note("info", `${arrow} ${data.key} (${data.role}, ${data.model_id}): ${data.objective.trim()}`);
       return;
     }
     if (this.renderer.kind === "tui") return;
     const key = (taskId: string): string => this.workerDirectory?.list().find((worker) => worker.taskId === taskId)?.key ?? taskId;
     if (recorded.type === "task/user_message") {
-      this.note("info", `${g.name === "rich" ? "↳" : "->"} you ${arrow} ${key(recorded.data.task_id)}: ${snippet(recorded.data.text, 120)}`);
+      this.note("info", `${g.name === "rich" ? "↳" : "->"} you ${arrow} ${key(recorded.data.task_id)}: ${recorded.data.text.trim()}`);
     } else if (recorded.type === "attempt/user_control") {
       const verb = recorded.data.action === "pause" ? "paused" : recorded.data.action === "resume" ? "resumed" : "cancelled";
       this.note(recorded.data.action === "cancel" ? "warning" : "info", `${g.bullet} ${key(recorded.data.task_id)} ${verb} by you`);

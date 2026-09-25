@@ -99,7 +99,7 @@ test("orchestrate tool: the coordinator runs inside the turn and the agent repor
     const stdout = io.stdout();
     assert.equal(code, 0, io.stderr());
     assert.equal(await readFile(path.join(sandbox.workspace, "README.md"), "utf8"), README_FIXED, "the worker's fix was integrated");
-    assert.match(stdout, /Starting workers - Shows the worker path end to end\./);
+    assert.doesNotMatch(stdout, /Starting workers/, "the rationale is audit (session log, /runs), not a transcript line");
     assert.match(stdout, /1\. fix-typo \(implementer\)/, "the plan block is shown before workers start");
     assert.match(stdout, /workers: done in/, "the board's pinned summary");
     assert.match(stdout, /Changed 1 file README\.md/);

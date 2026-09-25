@@ -152,7 +152,7 @@ export function renderAssignment(assignment: WorkerAssignmentView | undefined, c
       });
     });
   };
-  row("objective", [clean(assignment.objective, 600)]);
+  row("objective", [clean(assignment.objective, 4000)]);
   const owned = assignment.owned_paths.map((path) => clean(path, 200)).filter((path) => path !== "");
   if (owned.length > 0) row("owns", expanded ? owned : [truncate(owned.join(", "), valueWidth * 2)]);
   row("accept", assignment.acceptance_criteria.map((item) => `${g.base.bullet === "*" ? "-" : "•"} ${clean(item, 300)}`));
@@ -175,9 +175,9 @@ export function renderDelegation(view: WorkerDelegationView, ctx: ViewContext, e
   const t = ctx.theme;
   const g = ctx.glyphs;
   const who = [clean(view.role, 20), clean(view.model, 20)].filter((part) => part !== "").join(", ");
-  const head = `${g.rightArrow} ${clean(view.taskKey, 40)}${who === "" ? "" : ` (${who})`}: `;
-  const objective = truncate(clean(view.objective, 600), Math.max(10, ctx.width - displayWidth(head)));
-  const lines = [`${t.accent(g.rightArrow)} ${t.bold(clean(view.taskKey, 40))}${t.muted(who === "" ? "" : ` (${who})`)}${t.muted(":")} ${objective}`];
+  // The task goal is what the user reads the delegation by: wrapped in full under the arrow.
+  const head = `${t.accent(g.rightArrow)} ${t.bold(clean(view.taskKey, 40))}${t.muted(who === "" ? "" : ` (${who})`)}${t.muted(":")} `;
+  const lines = hanging(head, clean(view.objective, 4000), ctx.width, 2);
   if (expanded && view.assignment !== undefined) lines.push(...renderAssignment(view.assignment, ctx, { expanded: true, indent: 2 }));
   return finish(lines, ctx);
 }
@@ -186,7 +186,14 @@ export function renderDelegation(view: WorkerDelegationView, ctx: ViewContext, e
 export function renderUserToWorker(taskKey: string, text: string, ctx: ViewContext): string[] {
   const t = ctx.theme;
   const g = ctx.glyphs;
-  return finish([t.muted(`${g.hook} you ${g.rightArrow} ${clean(taskKey, 40)}: `) + clean(text, 1000)], ctx);
+  return finish(hanging(t.muted(`${g.hook} you ${g.rightArrow} ${clean(taskKey, 40)}: `), clean(text, 4000), ctx.width, 2), ctx);
+}
+
+/** `head` then `text` word-wrapped; continuation lines indented by `indent` cells. */
+function hanging(head: string, text: string, width: number, indent: number): string[] {
+  const first = wrap(text, Math.max(10, width - displayWidth(head)))[0] ?? "";
+  const rest = text.slice(first.length).trimStart();
+  return [head + first, ...(rest === "" ? [] : wrap(rest, Math.max(10, width - indent)).map((line) => " ".repeat(indent) + line))];
 }
 
 /** A conversation item as plain lines (the worker snapshot; the TUI uses its own components). */

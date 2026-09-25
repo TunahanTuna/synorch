@@ -86,7 +86,8 @@ test("background orchestrate: the tool returns at once, the chat stays open, and
     const io = capture({ cwd: sandbox.workspace, stdin: input, stdinIsTTY: true });
     const session = runHarnessCommand(["agent", "--plain"], io.io, overridesFor(sandbox, { adapters: [chat, planner(), worker] }));
     input.send("fix the readme typo with workers\n");
-    await waitFor(io.stdout, /Workers run in the background \(run-1\)/);
+    await waitFor(io.stdout, /tool: Workers Fix the typo in README\.md - Workers running in background \(run-1\) \S keep chatting \S \/runs/);
+    assert.doesNotMatch(io.stdout(), /Workers run in the background|Starting workers/, "one concise line, no ceremony");
     await waitFor(io.stdout, /synorch: Workers fixed the typo in README\.md\./, 60_000);
     input.send("/runs\n");
     await waitFor(io.stdout, /run-1\s+succeeded\s+1\/1 tasks/);

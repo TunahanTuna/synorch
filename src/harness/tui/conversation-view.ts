@@ -262,7 +262,8 @@ export class ConversationPresenter {
 
   /** A line the CLI adds itself (slash command output, trust decisions). */
   public note(level: "info" | "warning" | "error" | "debug", text: string): ViewOp {
-    const item: ConversationItem = { kind: "note", id: this.nextId(), level, text: sanitizeInline(text, 2000) };
+    // Leading indentation is layout (plan items, `Workspace` rows under an error): keep it, flatten the rest.
+    const item: ConversationItem = { kind: "note", id: this.nextId(), level, text: `${/^ {0,8}/.exec(text)?.[0] ?? ""}${sanitizeInline(text, 2000)}` };
     this.lastItem = item.id;
     return { op: "append", item };
   }
@@ -569,7 +570,7 @@ export class ConversationPresenter {
     const g = this.options.glyphs;
     if (event.data.state === "denied") {
       state.status = "denied";
-      state.summary = sanitizeInline(result.error?.message ?? "refused", 200);
+      state.summary = sanitizeInline(result.error?.message ?? "refused", 600);
       return [{ op: "update", item: this.toolView(state) }];
     }
     if (event.data.state === "cancelled") {
@@ -640,7 +641,7 @@ export class ConversationPresenter {
     const failed = data.is_error === true;
     state.status = failed ? "failed" : "ok";
     const lines = data.lines_added === undefined ? undefined : `+${data.lines_added} ${g.minus}${data.lines_removed ?? 0}`;
-    const summary = sanitizeInline(lines ?? data.result_summary ?? "", 200);
+    const summary = sanitizeInline(lines ?? data.result_summary ?? "", 600);
     state.summary = summary === "" ? undefined : summary;
     if (!failed && CLAUDE_WRITE_TOOLS.has(data.tool_name) && data.input_summary !== "") {
       const entry = this.ledger.files.get(data.input_summary) ?? { added: 0, removed: 0, created: data.tool_name === "Write" };
@@ -807,7 +808,7 @@ const CLAUDE_WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"
 
 /** A Claude built-in's row title: `Bash pnpm test`, `Edit src/x.ts`, `Search (Claude) "q"`, `Fetch (Claude) host/path`. */
 function claudeToolTitle(name: string, summary: string): string {
-  const detail = sanitizeInline(summary, 120);
+  const detail = sanitizeInline(summary, 2000);
   const label = name === "WebSearch" ? "Search (Claude)" : name === "WebFetch" ? "Fetch (Claude)" : sanitizeInline(name, 40);
   return detail === "" ? label : `${label} ${detail}`;
 }
@@ -829,7 +830,7 @@ function toolTitle(name: string, args: Readonly<Record<string, unknown>>): strin
     case "write_file":
       return `Write ${stringArg(args, "path") ?? "?"}`;
     case "exec": {
-      const command = sanitizeInline(argvOf(args).join(" "), 120);
+      const command = sanitizeInline(argvOf(args).join(" "), 2000);
       if (args.background !== true) return `Run ${command}`;
       const name = stringArg(args, "name");
       return name === undefined ? `Start ${command}` : `${sanitizeInline(name, 40)} (${command})`;
@@ -856,9 +857,11 @@ function toolTitle(name: string, args: Readonly<Record<string, unknown>>): strin
       return `Search "${sanitizeInline(stringArg(args, "query") ?? "", 80)}"`;
     case "web_fetch":
       return `Fetch ${sanitizeInline(shortUrl(stringArg(args, "url") ?? "?"), 100)}`;
+    case "orchestrate":
+      return `Workers ${sanitizeInline(stringArg(args, "goal") ?? "", 2000)}`.trimEnd();
     default: {
       const first = Object.values(args).find((value): value is string => typeof value === "string");
-      return `${name}${first === undefined ? "" : ` ${sanitizeInline(first, 60)}`}`;
+      return `${name}${first === undefined ? "" : ` ${sanitizeInline(first, 2000)}`}`;
     }
   }
 }
@@ -911,7 +914,7 @@ interface ResultSummary {
 }
 
 function textLines(lines: readonly string[]): DiffLine[] {
-  return lines.map((text) => ({ op: " ", text: sanitizeInline(text, 300) }));
+  return lines.map((text) => ({ op: " ", text: sanitizeInline(text, 2000) }));
 }
 
 function summarizeResult(
@@ -1031,10 +1034,18 @@ function summarizeResult(
       const title = /title: (.*?) chars \d+/.exec(header)?.[1];
       return { summary, stat: summary, preview: [], detail: title === undefined ? [] : textLines([title]) };
     }
+    case "orchestrate": {
+      if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
+      // K3: the background start is one concise line; the agent-facing instructions stay in the detail.
+      const started = /^Started worker run (\S+) in the background/.exec(text);
+      const lines = text.split("\n");
+      if (started !== null) return { summary: `Workers running in background (${started[1]}) ${g.sep} keep chatting ${g.sep} /runs`, preview: [], detail: textLines(lines.slice(0, 20)) };
+      return { summary: sanitizeInline(lines[0] ?? "done", 600) || "done", preview: [], detail: textLines(lines.slice(0, 40)) };
+    }
     default: {
       if (result.status === "error") return { summary: failedText, preview: [], detail: [] };
       const lines = text.split("\n");
-      return { summary: sanitizeInline(lines[0] ?? "done", 80) || "done", preview: [], detail: textLines(lines.slice(0, 20)) };
+      return { summary: sanitizeInline(lines[0] ?? "done", 600) || "done", preview: [], detail: textLines(lines.slice(0, 20)) };
     }
   }
 }

@@ -49,7 +49,7 @@ Hedefler:
    - Ana sohbette orchestrator'ın worker'lara verdiği komutlar/delegasyonlar görünür (katlanabilir "→ worker'a gönderildi" satırları).
    - Worker ile iletişim: worker görünümündeyken yazılan mesaj **o worker'a** steer olarak gider (güvenli adım sınırında), orchestrator'a da bildirilir ve audit'e yazılır; worker'ı duraklat/iptal et (`p`/`x`) seçenekleri.
    - Teknik not: her attempt zaten ayrı oturum (session log) — görünüm bu log'un projeksiyonu; attempt başına steer kuyruğu (driver.steer) ve coordinator'a bildirim gerekir.
-0. K1 artıkları: görselleri modele gerçekten gönder (adapter image parts), footer kotasına worker kullanımını kat, `/review` → ADR-09 dispatchReview, `/commit` seçici staging, orkestrasyon 1 saat tool timeout.
+0. K1 artıkları: görselleri modele gerçekten gönder (adapter image parts), footer kotasına worker kullanımını kat ✅ `846b57c` (sağlayıcı başına kota: footer `quota 72% claude`, `/usage` plan·pencere·reset·worker istekleri), `/review` → ADR-09 dispatchReview, `/commit` seçici staging, orkestrasyon 1 saat tool timeout.
 1. **Çoklu sağlayıcı model görünürlüğü:** OpenAI ve Anthropic'e birlikte giriş yapıldıysa `/model` ve model seçici **her iki sağlayıcının modellerini** gösterir (ChatGPT aboneliği modelleri + Claude modelleri; Claude aboneliği Claude Code köprüsüyle, API key ile doğrudan).
 2. **Çapraz sağlayıcılı orkestrasyon:** tier/rol başına farklı sağlayıcı seçilebilir. Örnek hedef yapılandırma:
    - orchestrator → `openai/gpt-6-sol`

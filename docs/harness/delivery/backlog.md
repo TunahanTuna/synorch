@@ -1,6 +1,6 @@
 # Harness geliştirme planı ve hatırlatıcılar
 
-> Durum: yaşayan plan (ürün sahibi + orchestrator). Son güncelleme: 2026-09-24. Bu dosya "ne yapacağız, hangi sırayla, neden" sorusunun tek listesidir. Ayrıntılı tasarım: [ürün gereksinimleri](../foundation/product-requirements.md), [ADR-21](../decisions/ADR-21-conversation-first-runtime.md), [TUI deneyimi](../design/tui-experience.md), [uygulama planı §8](../implementation-plan.md), sahip bağlamı [harness-context.yaml](../harness-context.yaml) / [harness-ux-context.yaml](../harness-ux-context.yaml).
+> Durum: yaşayan plan (ürün sahibi + orchestrator). Son güncelleme: 2026-09-25. Bu dosya "ne yapacağız, hangi sırayla, neden" sorusunun tek listesidir. Ayrıntılı tasarım: [ürün gereksinimleri](../foundation/product-requirements.md), [ADR-21](../decisions/ADR-21-conversation-first-runtime.md), [TUI deneyimi](../design/tui-experience.md), [uygulama planı §8](../implementation-plan.md), sahip bağlamı [harness-context.yaml](../harness-context.yaml) / [harness-ux-context.yaml](../harness-ux-context.yaml).
 
 ## 🔔 Ürün sahibi için hatırlatıcı
 
@@ -97,6 +97,13 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - **Seçim modalı (tek bileşen, tüm istemler için):** editörün yerine/üstünde odaklı katman; oklarla gezin, Enter ile seç, sayı kısayolları; tek seçim ve çoklu seçim (Space ile tikle); "Önerilen" etiketi; her soruda "Diğer…" ile serbest metin; Esc = iptal/ret; plain modda numaralı eşdeğer. `/init`, onay kartları, `/model`, `/config`, trust istemi, karar masası bu bileşeni kullanır.
 - **Agent'ın soru aracı (Claude Code AskUserQuestion benzeri):** `ask_user` yapılandırılmış sorular alır: 1–4 soru, her biri 2–4 seçenek (açıklama + isteğe bağlı önizleme), `multiSelect`, önerilen seçenek; kullanıcı cevabı yapılandırılmış olarak modele döner. Plan modunda ve planlama sırasında agent önerileriyle seçenek sunar; kullanıcı seçer veya kendi alternatifini yazar. Sohbet akışından ayrı bir etkileşim alanı olarak görünür, cevap transkripte kısa bir özet satırı olarak düşer.
 - Claude Code köprüsünde Claude'un kendi AskUserQuestion çağrıları da bu modala yönlendirilir.
+
+### K6 — Model eforu (reasoning effort) ayarı (ürün sahibi isteği, 2026-09-25) ⭐ — akşam başlanacak
+Ürün sahibi: "Kullanılan modelin eforu da değiştirilebilir olmalı; buna dair bir ayar görmedim, istediğimiz eforu kullanabilmeliyiz."
+- **Ayar:** rol başına efor (orchestrator / complex_worker / fast_worker / session) `~/.synorch/config.yaml` ve `syn config` ile; tek seferlik `--effort` bayrağı.
+- **Oturum içinde:** `/effort` komutu + `/model` seçicisinde model yanında efor seçimi (K5 seçim modalıyla); geçerli efor başlık/durum satırında görünür (ör. `gpt-6-sol · high`).
+- **Sağlayıcı eşlemesi:** OpenAI/ChatGPT Responses `reasoning.effort`; Claude Code köprüsünde CLI'nin efor ayarı; Anthropic API'de thinking/effort parametresi. Desteklenen seviyeler modele göre katalogdan gelir; desteklenmeyen seviye sessizce yutulmaz, en yakın seviyeye düşülür ve söylenir. Tam parametre adları uygulamadan önce güncel dokümandan doğrulanır.
+- **Orkestrasyon:** worker'lar rolünün eforunu kullanır; orchestrator görev başına efor önerebilir (trivial → düşük, zor hata ayıklama → yüksek). Kullanıcı ayarı her zaman önceliklidir.
 
 ### Sadeleştirme (K1.5–K3 boyunca)
 - Eski toplu yol: `syn agent --legacy` ve batch `syn run` → yeni çekirdeğe katla; orkestrasyonu `--orchestrate` ile tut.

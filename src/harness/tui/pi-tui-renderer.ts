@@ -50,6 +50,7 @@ import {
   GLYPH_SETS,
   headerLines,
   type ConversationItem,
+  type FooterState,
   type GlyphSet,
   type ViewOp,
 } from "./conversation-view.ts";
@@ -634,10 +635,40 @@ class ActivityLineView implements Component {
   }
 }
 
-/** A footer field: its painted text and when it gives way on a narrow screen (0 never). */
-interface FooterPart {
+/** A footer field: its painted text and when it gives way on a narrow screen (0 never; lower goes first). */
+export interface FooterPart {
   readonly text: string;
   readonly drop: number;
+}
+
+/** Status line thresholds (K3): green below 60 %, yellow up to 85 %, red above. */
+export function usageTone(percent: number, style: Styler): (text: string) => string {
+  return percent > 85 ? (text) => style.bold(style.red(text)) : percent >= 60 ? (text) => style.yellow(text) : (text) => style.green(text);
+}
+
+/**
+ * The status line's left fields from live state (K3 UI): `folder · branch · model · effort · mode ·
+ * ctx% · quota%/$`. Each field has its own tone; ctx and quota are coloured by threshold and keep
+ * their text, so colour is never the only signal (NO_COLOR / plain: the Styler paints nothing).
+ * Narrow screens drop branch, folder, cost, quota, effort, model in that order; mode and ctx stay.
+ */
+export function statusLineParts(
+  footer: FooterState,
+  extra: { readonly folder: string; readonly branch: string | undefined; readonly mode: string | undefined; readonly approvalWaiting: boolean; readonly style: Styler },
+): FooterPart[] {
+  const style = extra.style;
+  const parts: FooterPart[] = [
+    { text: style.dim(extra.folder), drop: 3 },
+    { text: extra.branch === undefined ? "" : style.dim(style.magenta(extra.branch)), drop: 2 },
+    { text: footer.model === undefined ? "" : style.bold(style.cyan(footer.model)), drop: 6 },
+    { text: footer.model === undefined || footer.effort === undefined ? "" : style.magenta(footer.effort), drop: 5 },
+  ];
+  if (extra.mode !== undefined) parts.push({ text: extra.mode, drop: 0 });
+  if (extra.approvalWaiting) parts.push({ text: style.yellow("approval waiting"), drop: 0 });
+  if (footer.contextPercent !== undefined) parts.push({ text: usageTone(footer.contextPercent, style)(`ctx ${footer.contextPercent}%`), drop: 0 });
+  if (footer.quotaPercent !== undefined) parts.push({ text: usageTone(footer.quotaPercent, style)(`quota ${footer.quotaPercent}%`), drop: 4 });
+  else if (footer.costUsd !== undefined) parts.push({ text: style.dim(`$${footer.costUsd.toFixed(2)}`), drop: 3.5 });
+  return parts;
 }
 
 /**
@@ -894,6 +925,11 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         return self.mouseOn;
       },
       setMouseMode: (on) => this.setMouseMode(on),
+      setSessionStatus: (status) => {
+        // The footer reads the presenter on every render: update it and redraw now.
+        this.presenter?.configure({ model: status.model, effort: status.effort ?? null, contextWindowTokens: status.contextWindowTokens });
+        this.tui.requestRender();
+      },
     };
     this.queue = new RenderQueue((event) => this.consume(event), {
       ...(options.queueCapacity === undefined ? {} : { capacity: options.queueCapacity }),
@@ -1018,22 +1054,15 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
 
   /** Footer fields in display order with their drop priority (TUI §10.2). */
   private footerParts(presenter: ConversationPresenter): { readonly left: readonly FooterPart[]; readonly right: FooterPart | undefined } {
-    const footer = presenter.footer();
+    const parts = statusLineParts(presenter.footer(), {
+      folder: this.footerLabel.folder,
+      branch: this.footerLabel.branch,
+      mode: this.modeLabel(presenter.glyphs.sep),
+      approvalWaiting: this.dialog !== undefined && presenter.activity()?.waiting === true,
+      style: this.style,
+    });
+    const left: FooterPart[] = [...parts];
     const dim = this.style.dim;
-    const left: FooterPart[] = [
-      { text: dim(this.footerLabel.folder), drop: 4 },
-      { text: this.footerLabel.branch === undefined ? "" : dim(this.footerLabel.branch), drop: 3 },
-      { text: footer.model === undefined ? "" : dim(footer.model), drop: 5 },
-    ];
-    const mode = this.modeLabel(presenter.glyphs.sep);
-    if (mode !== undefined) left.push({ text: mode, drop: 0 });
-    if (this.dialog !== undefined && presenter.activity()?.waiting === true) left.push({ text: this.style.yellow("approval waiting"), drop: 0 });
-    if (footer.contextPercent !== undefined) {
-      const text = `ctx ${footer.contextPercent}%`;
-      left.push({ text: footer.contextPercent >= 90 ? this.style.red(text) : footer.contextPercent >= 70 ? this.style.yellow(text) : dim(text), drop: 0 });
-    }
-    if (footer.quotaPercent !== undefined) left.push({ text: dim(`quota ${footer.quotaPercent}%`), drop: 2 });
-    else if (footer.costUsd !== undefined) left.push({ text: dim(`$${footer.costUsd.toFixed(2)}`), drop: 2 });
     const right = this.editor.getText().length === 0 && this.workerPane === undefined ? { text: dim("? shortcuts"), drop: 1 } : undefined;
     return { left, right };
   }

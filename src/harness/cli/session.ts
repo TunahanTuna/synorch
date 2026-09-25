@@ -190,6 +190,7 @@ async function openSession(
       env: io.env,
       policyMode: parsed.session.policy,
       routes: parsed.session.profiles,
+      efforts: parsed.session.efforts,
       overrides,
       trustWorkspace: parsed.kind === "run" && parsed.trustWorkspace,
       // Headless auto asks nothing, so it equals the default-deny policy; only full access changes a run.

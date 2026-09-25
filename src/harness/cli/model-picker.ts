@@ -35,6 +35,15 @@ export interface ModelCommandHost {
   /** Switches the conversation to a tier's (possibly just changed) route; `save` keeps the tier for new conversations. */
   switchConversation(tier: ModelTier, save: boolean): Promise<void>;
   showFailure(error: unknown): void;
+  /** K6: after a model is chosen in the picker, offers its reasoning effort levels. */
+  pickEffort?(tier: ModelTier, role: AgentRole | undefined): Promise<void>;
+}
+
+/** K6: `effort high` for a tier row (the conversation row uses the conversation's own level). */
+function effortText(runtime: Runtime, slot: TierSlot, rule: RouteRule | undefined, conversation: ModelTier | undefined): string | undefined {
+  if (rule === undefined || rule.route.adapter_id === "scripted") return undefined;
+  const role = slot.role ?? (slot.tier === "session" || slot.tier === conversation ? "session" : undefined);
+  return `effort ${runtime.effortFor(slot.tier, role, rule.route).effective ?? "default"}`;
 }
 
 const METHOD_PREFERENCE = ["oauth-subscription", "cli-bridge", "api-key"] as const;
@@ -182,7 +191,12 @@ async function interactivePicker(host: ModelCommandHost, controls: InteractiveIn
       model: rule?.route.model_id ?? "not configured",
       auth: rule === undefined ? "none" : authOf(runtime, rule),
       current: slot.role === undefined && slot.tier === conversation,
-      description: slot.tier === "session" ? "the conversation" : slot.role === undefined && slot.tier === conversation ? "the conversation uses this tier" : rule === undefined ? "choose a model for this tier" : `${rule.source} route`,
+      description: [
+        slot.tier === "session" ? "the conversation" : slot.role === undefined && slot.tier === conversation ? "the conversation uses this tier" : rule === undefined ? "choose a model for this tier" : `${rule.source} route`,
+        effortText(runtime, slot, rule, conversation),
+      ]
+        .filter((part) => part !== undefined)
+        .join(" · "),
     };
   });
   const pickedTier = await controls.openModelPicker(tierRows, host.signal).catch(() => undefined);
@@ -198,7 +212,15 @@ async function interactivePicker(host: ModelCommandHost, controls: InteractiveIn
     model: row.model,
     auth: row.badge,
     current: current !== undefined && current.route.adapter_id === row.adapterId && current.route.model_id === row.model,
-    description: [row.label, row.capability === "unknown" ? "capability unknown" : "listed by the provider", row.imageInput === "supported" ? "images" : undefined, `via ${row.adapterId}`].filter((part) => part !== undefined).join(" · "),
+    description: [
+      row.label,
+      row.capability === "unknown" ? "capability unknown" : "listed by the provider",
+      row.imageInput === "supported" ? "images" : undefined,
+      row.efforts === undefined || row.efforts.length === 0 ? undefined : `effort ${row.efforts[0]}–${row.efforts.at(-1)}`,
+      `via ${row.adapterId}`,
+    ]
+      .filter((part) => part !== undefined)
+      .join(" · "),
     ...(row.connected ? {} : { disabled: row.unavailable ?? "not logged in" }),
   }));
   if (modelRows.length === 0) {
@@ -207,8 +229,10 @@ async function interactivePicker(host: ModelCommandHost, controls: InteractiveIn
   }
   const picked = await controls.openModelPicker(modelRows, host.signal).catch(() => undefined);
   const row = picked === undefined ? undefined : catalog[Number(picked.id)];
-  if (row === undefined || picked?.current === true) return;
-  await applyRoute(host, slot, row, save, true);
+  if (row === undefined) return;
+  // Picking the current model again goes straight to its effort levels.
+  if (picked?.current !== true) await applyRoute(host, slot, row, save, true);
+  if (slot.role === undefined) await host.pickEffort?.(slot.tier, slot.role);
 }
 
 async function applyRoute(host: ModelCommandHost, slot: TierSlot, row: CatalogModel, save: boolean, offerSave = false): Promise<void> {

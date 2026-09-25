@@ -39,6 +39,14 @@ export interface SessionHeaderView {
   readonly permissionMode?: PermissionMode;
 }
 
+/** What the footer shows about the conversation's model (K3 status line). */
+export interface SessionStatusView {
+  readonly model: string;
+  /** The effective reasoning effort; undefined = provider default / not applicable. */
+  readonly effort: string | undefined;
+  readonly contextWindowTokens?: number;
+}
+
 export type RenderEvent =
   | { readonly kind: "session-event"; readonly event: SessionEvent }
   | { readonly kind: "stream"; readonly requestId: string; readonly event: ModelStreamEvent }
@@ -144,6 +152,11 @@ export interface InteractiveInputControls {
   readonly permissionMode: PermissionMode;
   setPermissionMode(mode: PermissionMode): void;
   onPermissionModeChange(listener: (mode: PermissionMode) => void): () => void;
+  /**
+   * K3/K6: live session facts for the footer, pushed whenever they change (`/model`, `/effort`,
+   * resume). `effort` undefined shows none. Optional: renderers without a footer ignore it.
+   */
+  setSessionStatus?(status: SessionStatusView): void;
   /** SGR mouse reporting (wheel scroll, click to expand). Off by default: it disables native selection. */
   readonly mouseMode: boolean;
   setMouseMode(on: boolean): void;

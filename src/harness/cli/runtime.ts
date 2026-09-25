@@ -29,6 +29,7 @@ import {
   type PermissionMode,
   type PolicyMode,
   type ProjectId,
+  type ReasoningEffort,
   type RecoveryReport,
   type RenderEvent,
   type ResolvedCredential,
@@ -90,10 +91,12 @@ import {
   createWebSearchRunner,
   fetchCodexModels,
   findOnPath,
+  resolveEffort,
   SEARCH_KEY_ENV,
   SYNORCH_ORIGINATOR,
   type CatalogIdentity,
   type CatalogModel,
+  type EffortResolution,
   type FetchLike,
   type KeyedSearchBackend,
   type ResponsesAdapterOptions,
@@ -104,7 +107,7 @@ import { createBlobStore, createSessionStore } from "../store/index.ts";
 import { BackgroundProcessManager, createRedactor, createSandboxRunner, createToolGateway, createToolRegistry, createWebSession, probeSandbox, type WebSession } from "../tools/index.ts";
 import { createClaudeNativeApprovals } from "./claude-native-approvals.ts";
 import { createCommandGrantStore } from "./command-grants.ts";
-import type { RouteOverride } from "./args.ts";
+import type { EffortOverride, RouteOverride } from "./args.ts";
 import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts";
 import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
 import { withRoleDefinitions } from "./role-policy.ts";
@@ -143,6 +146,8 @@ export interface RuntimeOptions {
   readonly env: Env;
   readonly policyMode: PolicyMode;
   readonly routes?: readonly RouteOverride[];
+  /** K6 `--effort` flags: this invocation only, never persisted. */
+  readonly efforts?: readonly EffortOverride[];
   readonly overrides?: RuntimeOverrides;
   /** `--trust-workspace`: trust the workspace for this runtime only; never persisted (SEC-N1). */
   readonly trustWorkspace?: boolean;
@@ -244,6 +249,14 @@ export interface Runtime {
    * Codex models listing (never used by doctor).
    */
   modelCatalog(signal: AbortSignal, options?: { readonly listing?: boolean }): Promise<CatalogModel[]>;
+  /**
+   * K6: the reasoning effort a tier (and role) runs with on a route: `/effort` and `--effort` for
+   * this session first, then `effort.<role>` and `effort.<tier>` of the user configuration, clamped
+   * to the levels the route's model takes (the resolution says so in `notice`).
+   */
+  effortFor(tier: ModelTier, role: AgentRole | undefined, route: Pick<RouteBinding, "provider_id" | "model_id" | "adapter_id">): EffortResolution;
+  /** K6 `/effort`: sets (or with undefined clears) a tier's level for this session; the next model request uses it. */
+  setSessionEffort(tier: ModelTier, level: ReasoningEffort | undefined): void;
   /** Crash recovery of a session and of every attempt session it started; nothing is re-executed. */
   recover(sessionId: SessionId): Promise<readonly RecoveryReport[]>;
 }
@@ -863,6 +876,30 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       web: { domains: () => webSession.domains(), environment: env },
     });
 
+  // K6 reasoning effort: session levels (`/effort`, `--effort <tier>=`) > `--effort <level>` > config role > config tier.
+  const sessionEfforts = new Map<ModelTier, ReasoningEffort>();
+  for (const entry of options.efforts ?? []) if (entry.tier !== undefined) sessionEfforts.set(entry.tier, entry.level);
+  const flagEffort = options.efforts?.find((entry) => entry.tier === undefined)?.level;
+  const effortNotices = new Set<string>();
+  const effortFor = (tier: ModelTier, role: AgentRole | undefined, route: Pick<RouteBinding, "provider_id" | "model_id" | "adapter_id">): EffortResolution => {
+    // The conversation (role session) may run on the orchestrator route: its own `session` level comes first.
+    const conversation = role === "session";
+    const roleLevel = role === undefined || role === "orchestrator" ? undefined : config.effort[role];
+    const sessionLevel = (conversation ? sessionEfforts.get("session") : undefined) ?? sessionEfforts.get(tier);
+    const requested = sessionLevel ?? flagEffort ?? roleLevel ?? config.effort[tier];
+    return resolveEffort(requested, { provider: route.provider_id, model: route.model_id, adapterId: route.adapter_id });
+  };
+  const stepEffort = (input: { readonly role: AgentRole; readonly route: ModelRoute }): ReasoningEffort | undefined => {
+    const tier: ModelTier = input.route.tier ?? (input.role === "session" ? "session" : input.role === "orchestrator" ? "orchestrator" : "complex_worker");
+    const resolution = effortFor(tier, input.role, input.route);
+    // A clamp is said once per level and model, never silently.
+    if (resolution.notice !== undefined && !effortNotices.has(resolution.notice)) {
+      effortNotices.add(resolution.notice);
+      emit({ kind: "notice", level: "info", message: resolution.notice });
+    }
+    return resolution.effective;
+  };
+
   const createDriver = (broker: ApprovalBroker) => (events: EventStore): AgentDriver =>
     createAgentDriver({
       events,
@@ -874,6 +911,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       credentials,
       backendApprovals: backendApprovals(broker),
       backendRedact,
+      reasoningEffort: stepEffort,
     });
 
   const runtime: Runtime = {
@@ -931,6 +969,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         credentials,
         backendApprovals: backendApprovals(broker),
         backendRedact,
+        reasoningEffort: stepEffort,
       });
     },
     sessionPolicy(commandGrants) {
@@ -1010,6 +1049,11 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       return baseRouter.setSessionRule(tier, role, binding);
     },
     clearSessionRoute: (tier, role) => baseRouter.clearSessionRule(tier, role),
+    effortFor,
+    setSessionEffort(tier, level) {
+      if (level === undefined) sessionEfforts.delete(tier);
+      else sessionEfforts.set(tier, level);
+    },
     async modelCatalog(signal, catalogOptions = {}) {
       const pool: AnyModelAdapter[] = [...adapters];
       for (const id of Object.keys(IMPLICIT_ADAPTERS)) {

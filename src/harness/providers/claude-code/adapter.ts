@@ -21,6 +21,7 @@ import {
   type PermissionMode,
   type ProviderCapabilities,
   type ProviderError,
+  type ReasoningEffort,
   type ToolBridge,
 } from "../../contracts/index.ts";
 import { MessagesMapper } from "../anthropic-messages.ts";
@@ -86,6 +87,8 @@ export interface ClaudeArgsInput {
   readonly resume: boolean;
   /** Native mode: full built-in toolset, Claude's permission mode, and the one workspace root. */
   readonly native?: { readonly permissionMode: ClaudePermissionMode; readonly addDir: string };
+  /** K6: `--effort low|medium|high|xhigh|max` (verified with `claude --help`, 2.1.282); `ultra` is sent as `max`. */
+  readonly effort?: ReasoningEffort;
 }
 
 /**
@@ -120,6 +123,7 @@ export function buildClaudeArgs(input: ClaudeArgsInput): string[] {
     input.systemPromptPath,
     "--model",
     anthropicWireModelId(input.modelId),
+    ...(input.effort === undefined ? [] : ["--effort", input.effort === "ultra" ? "max" : input.effort]),
     ...(input.resume ? ["--resume", input.sessionId] : ["--session-id", input.sessionId]),
     "--max-turns",
     String(input.maxTurns),
@@ -741,6 +745,7 @@ class ClaudeCodeSession implements BackendSession {
       maxTurns: this.options.maxTurns,
       sessionId: this.backendSessionId,
       resume: this.resume,
+      ...(this.options.reasoningEffort === undefined ? {} : { effort: this.options.reasoningEffort }),
       ...(this.config.native ? { native: { permissionMode: claudePermissionMode(this.config.permissionMode()), addDir: this.options.cwd } } : {}),
     });
     let child: ChildProcess;

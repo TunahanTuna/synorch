@@ -8,6 +8,7 @@ import { formatZodIssues } from "../../domain/zod-issues.ts";
 import {
   adapterIdSchema,
   agentRoleSchema,
+  effortConfigSchema,
   HarnessError,
   memoryConfigSchema,
   modelIdSchema,
@@ -15,6 +16,7 @@ import {
   permissionModeSchema,
   profileNameSchema,
   providerIdSchema,
+  type EffortConfig,
   type MemoryConfig,
   type PermissionMode,
   type ModelRouterConfig,
@@ -168,6 +170,8 @@ const configFileSchema = z.strictObject({
     })
     .optional(),
   web: webConfigSchema.optional(),
+  /** K6 reasoning effort per tier / worker role (user layer only). */
+  effort: effortConfigSchema.optional(),
 });
 type ConfigFile = z.infer<typeof configFileSchema>;
 export type UserConfigFile = ConfigFile;
@@ -239,6 +243,8 @@ export interface RuntimeConfig {
   readonly budget: { readonly maxWallTimeSeconds: number | undefined; readonly maxCostUsd: number | undefined };
   /** `web.*` (user layer only, K4.1). */
   readonly web: WebConfig;
+  /** `effort.*` (user layer only, K6); empty when nothing is set. */
+  readonly effort: EffortConfig;
 }
 
 function configError(message: string, file?: string): HarnessError {
@@ -298,6 +304,7 @@ const IGNORED_KEY_REASON: Readonly<Record<string, string>> = {
   routing: "routing preferences are chosen in the user configuration only",
   web: "web search and fetch settings are chosen in the user configuration only",
   claude_code: "the Claude Code bridge mode is chosen in the user configuration only",
+  effort: "reasoning effort is chosen in the user configuration only",
 };
 
 function warningsOf(layer: "workspace" | "project", file: string, read: LayerRead | undefined): ConfigWarning[] {
@@ -532,5 +539,6 @@ export async function loadRuntimeConfig(
       openaiHosted: user?.web?.openai_hosted,
       allowPrivate: user?.web?.fetch?.allow_private ?? [],
     },
+    effort: user?.effort ?? {},
   };
 }

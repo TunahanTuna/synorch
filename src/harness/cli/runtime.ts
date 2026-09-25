@@ -647,6 +647,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     ...(overrides.authOptions ?? {}),
     ...(overrides.fetch === undefined ? {} : { fetch: overrides.fetch }),
     env,
+    // The same auth state file as `syn login` and `syn auth status` (a sign-in inside the session is seen at once).
+    state: new ProfileStateStore(home),
   };
   const authProviders = new Map<string, AuthProvider | undefined>();
   const authProvider = (providerId: string, method: AuthProvider["method"], profile: string): AuthProvider | undefined => {

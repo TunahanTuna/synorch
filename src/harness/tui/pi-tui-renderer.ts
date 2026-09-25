@@ -1744,6 +1744,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     view.info = {
       ...view.info,
       ...(patch.commit === undefined ? {} : { commit: patch.commit }),
+      ...(patch.model === undefined ? {} : { model: patch.model }),
       ...(patch.effort === undefined ? {} : { effort: patch.effort }),
       ...(patch.plan === undefined ? {} : { plan: patch.plan }),
       ...(patch.workers === undefined ? {} : { workers: patch.workers }),

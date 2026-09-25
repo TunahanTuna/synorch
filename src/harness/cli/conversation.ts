@@ -26,6 +26,7 @@ import {
   type ApprovalBroker,
   type ApprovalDecision,
   type ApprovalRequest,
+  type AuthMethodKind,
   type Attachment,
   type BlobRef,
   type Digest,
@@ -100,6 +101,7 @@ import { defaultEffort, isReasoningEffort } from "../providers/index.ts";
 import { openBrowser } from "../tui/open-browser.ts";
 import { acknowledgedNotices, acknowledgeNotice, approvalNotice, mcpStartNotices, StartupNotices } from "./startup-notices.ts";
 import { failureInfo } from "./outcome.ts";
+import { connectProvider, MANUAL_CONNECT_COMMANDS, signIn, type ConnectHost } from "./first-run-connect.ts";
 import { createSessionRenderer, type SessionRenderer } from "./renderers.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
 import type { SessionIO } from "./session.ts";
@@ -231,10 +233,10 @@ function missingRoute(runtime: Runtime): HarnessError {
   const hints = profileHintsFor(runtime.canonical, "orchestrator").map((hint) => `${hint.provider}/${hint.model}`);
   return new HarnessError({
     code: "config_invalid",
-    message: `no model route is configured for the conversation: add a routes entry with tier session (or orchestrator) to ${path.join(runtime.home, "config.yaml")}, or pass --profile session=<provider>/<model>${hints.length === 0 ? "" : ` (the canonical model profiles suggest ${hints.join(" or ")})`}`,
+    message: `no model is connected for the conversation: run ${MANUAL_CONNECT_COMMANDS} (or start syn in an interactive terminal to sign in there; --profile session=<provider>/<model> sets one for a single run)${hints.length === 0 ? "" : `; the canonical model profiles suggest ${hints.join(" or ")}`}`,
     workspace_effect: "none",
     retry_safe: true,
-    next_command: "syn doctor --runtime",
+    next_command: "syn login openai && syn config set routes.session openai/gpt-6-sol",
   });
 }
 
@@ -364,6 +366,8 @@ class Conversation implements ConversationCommandHost {
   private grantList: readonly string[] = [];
   private routePromise: Promise<RouteDecision> | undefined;
   private routeRecorded = false;
+  /** The current turn's model request failed for want of a signed-in identity (a sign-in is offered after it). */
+  private authFailure = false;
   private sessionTier: ModelTier | undefined;
   private currentModel: string | undefined;
   private sessionId: SessionId | undefined;
@@ -489,13 +493,10 @@ class Conversation implements ConversationCommandHost {
     if (this.parsed.session.permission === undefined) runtime.setPermissionMode(this.parsed.session.policy === "ask" ? "ask" : startMode);
     if (runtime.permissionMode() === "plan") this.modeBeforePlan = startMode === "plan" ? DEFAULT_PERMISSION_MODE : startMode;
     this.sessionTier = await savedSessionTier(runtime.home);
-    const rule = sessionRouteRule(runtime, this.sessionTier);
-    if (rule === undefined) return this.fail(failureInfo(missingRoute(runtime)));
-    this.sessionTier = rule.tier;
-    this.currentModel = rule.route.model_id;
-    // Resolving the route may probe the provider's capabilities: it runs while the user types.
-    this.routePromise = runtime.router.resolve({ tier: rule.tier, role: "session" }, this.outer.signal);
-    this.routePromise.catch(() => undefined);
+    let rule = sessionRouteRule(runtime, this.sessionTier);
+    // First run without a route: an interactive terminal connects a provider after the view starts; headless fails with the commands.
+    if (rule === undefined && !this.canConnect()) return this.fail(failureInfo(missingRoute(runtime)));
+    if (rule !== undefined) this.adoptRule(rule);
 
     const ledger = new UsageLedger(runtime.home);
     this.usageLedger = ledger;
@@ -523,9 +524,22 @@ class Conversation implements ConversationCommandHost {
       const resumed = await this.openResumed();
       const sandboxNoticeSeen = runtime.sandbox.enforcement === "full" || (await acknowledgedNotices(runtime.home)).has("sandbox-partial");
       this.notices = new StartupNotices((notice) => this.note(notice.level, notice.text), this.glyphs.sep);
-      await this.renderer.start({ ...this.header(rule, await this.welcomeHint(resumed !== undefined)), sandboxNoticeSeen });
+      const hint = await this.welcomeHint(resumed !== undefined);
+      await this.renderer.start({ ...(rule === undefined ? this.unconnectedHeader(hint) : this.header(rule, hint)), sandboxNoticeSeen });
       // The partial-sandbox warning shows once per machine; /permissions keeps it.
       if (!sandboxNoticeSeen && this.renderer.controls?.appearance !== undefined) void acknowledgeNotice(runtime.home, "sandbox-partial");
+      if (rule === undefined) {
+        const connected = await connectProvider(this.connectHost());
+        rule = connected === undefined ? undefined : sessionRouteRule(runtime, "session");
+        if (rule === undefined) {
+          this.note("info", `No provider connected ${this.glyphs.sep} to set one up by hand: ${MANUAL_CONNECT_COMMANDS}`);
+          await this.renderer.stop("completed");
+          return EXIT_CODES.success;
+        }
+        this.adoptRule(rule);
+        const view = this.header(rule).welcome;
+        this.renderer.controls?.appearance?.updateWelcome({ model: rule.route.model_id, ...(view?.effort === undefined ? {} : { effort: view.effort }), ...(view?.plan === undefined ? {} : { plan: view.plan }) });
+      }
       const controls = this.renderer.controls;
       this.refreshPalette();
       this.refreshStatus();
@@ -552,7 +566,7 @@ class Conversation implements ConversationCommandHost {
       if (this.renderer.controls?.appearance === undefined) this.notices?.flush();
       else void Promise.race([this.mcpStarted, delay(1500)]).then(() => this.notices?.flush());
       // Credential pre-resolution (keychain, token refresh) happens in the background, never before the editor.
-      void this.routePromise.then((decision) => runtime.credentials(decision.route, this.outer.signal)).catch(() => undefined);
+      void this.routePromise?.then((decision) => runtime.credentials(decision.route, this.outer.signal)).catch(() => undefined);
       const input = this.renderer.input;
       if (input === undefined) {
         this.note("warning", "syn agent needs input: attach a terminal or pipe messages on stdin, one per line");
@@ -587,6 +601,74 @@ class Conversation implements ConversationCommandHost {
     await this.renderer.stop("error").catch(() => undefined);
     this.io.stderr.write(formatHarnessError(error));
     return exitCodeFor(error.code);
+  }
+
+  /** A human at a terminal who can pick and sign in to a provider (first run, or a turn that needs sign-in). */
+  private canConnect(): boolean {
+    return this.io.stdinIsTTY && this.renderer.input !== undefined && this.renderer.auth.interactive;
+  }
+
+  private adoptRule(rule: RouteRule): void {
+    this.sessionTier = rule.tier;
+    this.currentModel = rule.route.model_id;
+    // Resolving the route may probe the provider's capabilities: it runs while the user types.
+    this.routePromise = this.runtime.router.resolve({ tier: rule.tier, role: "session" }, this.outer.signal);
+    this.routePromise.catch(() => undefined);
+    this.routeRecorded = false;
+  }
+
+  /** The welcome before a provider is connected (first run). */
+  private unconnectedHeader(hint?: string): SessionHeaderView {
+    const runtime = this.runtime;
+    const permissionMode = runtime.permissionMode();
+    const commit = buildCommit();
+    return {
+      welcome: { ...(commit === undefined ? {} : { commit }), path: shortenPath(runtime.workspaceRoot, userHome(this.io.env)), ...(hint === undefined ? {} : { hint }) },
+      workspaceRoot: runtime.workspaceRoot,
+      gitBranch: runtime.gitBranch,
+      policyMode: runtime.policyMode,
+      routes: [],
+      sandboxEnforcement: runtime.sandbox.enforcement,
+      notices: [...runtime.config.warnings.map((warning) => warning.message), ...runtime.canonical.diagnostics.map((diagnostic) => `canonical .ai: ${diagnostic}`)],
+      version: SYNORCH_VERSION,
+      model: "not connected",
+      contextWindowTokens: DEFAULT_CONTEXT_WINDOW,
+      ...(permissionMode === undefined ? {} : { permissionMode }),
+    };
+  }
+
+  private connectHost(): ConnectHost {
+    return {
+      runtime: this.runtime,
+      renderer: this.renderer,
+      overrides: this.overrides,
+      env: this.io.env,
+      cwd: this.runtime.workspaceRoot,
+      signal: this.outer.signal,
+      ok: this.glyphs.ok,
+      sep: this.glyphs.sep,
+      choose: (question, signal) => this.choose(question, signal),
+      print: (lines) => this.print(lines),
+      warn: (line) => this.note("warning", line),
+    };
+  }
+
+  /** A turn failed because the route's identity is not signed in: offer the sign-in here, then the message can be sent again. */
+  private async offerSignIn(provider: string, method: AuthMethodKind, typed: string): Promise<void> {
+    const label = method === "oauth-subscription" ? "ChatGPT" : method === "cli-bridge" ? "Claude Code" : `${provider === "openai" ? "OpenAI" : "Anthropic"} API key`;
+    const answer = await this.choose(
+      { question: `Sign in to ${label} now?`, header: "Sign in", options: [{ label: "Sign in", recommended: true }, { label: "Not now" }], allowOther: false, escapeLabel: "not now", tone: "neutral" },
+      this.outer.signal,
+    ).catch(() => undefined);
+    if (answer?.kind !== "selected" || answer.indices[0] !== 0) return;
+    if (!(await signIn(this.connectHost(), provider, method))) return;
+    const rule = sessionRouteRule(this.runtime, this.sessionTier);
+    if (rule !== undefined) this.adoptRule(rule);
+    const controls = this.renderer.controls;
+    if (typed.trim() !== "" && controls?.setEditorText !== undefined) {
+      controls.setEditorText(typed);
+      this.print([`${this.glyphs.ok} Signed in ${this.glyphs.sep} press Enter to send your message again`]);
+    } else this.print([`${this.glyphs.ok} Signed in ${this.glyphs.sep} send your message again`]);
   }
 
   private header(rule: RouteRule, hint?: string): SessionHeaderView {
@@ -671,6 +753,7 @@ class Conversation implements ConversationCommandHost {
         return;
       }
       if (recorded.session_id !== this.sessionId) return;
+      if (recorded.type === "model/response_failed" && AUTH_FAILURES.has(recorded.data.error.code)) this.authFailure = true;
       if (recorded.type === "turn/started") this.turnId = recorded.data.turn_id;
       if (recorded.type === "model/request_prepared") {
         this.requests.add(recorded.data.request_id);
@@ -1332,6 +1415,7 @@ class Conversation implements ConversationCommandHost {
     this.active = active;
     this.turnRunning = true;
     let outcome: Awaited<ReturnType<AgentDriver["runTurn"]>> | undefined;
+    this.authFailure = false;
     try {
       outcome = await driver.runTurn(
         {
@@ -1351,11 +1435,20 @@ class Conversation implements ConversationCommandHost {
         active.signal,
       );
     } catch (error) {
-      if (!active.signal.aborted) this.showFailure(failureInfo(error));
+      if (!active.signal.aborted) {
+        const failure = failureInfo(error);
+        if (failure.code === "auth_required" || failure.code === "auth_expired") this.authFailure = true;
+        this.showFailure(failure);
+      }
     } finally {
       this.turnRunning = false;
       if (this.active === active) this.active = undefined;
       this.submittedAt = undefined;
+    }
+    if (this.authFailure && !active.signal.aborted && outcome?.outcome !== "completed" && this.canConnect()) {
+      this.authFailure = false;
+      await this.offerSignIn(route.route.provider_id, route.route.auth_method, followUp ? "" : typed);
+      return false;
     }
     // A message typed while the last step settled could not be delivered in this turn: it starts the next one.
     const leftover = driver.drainSteers?.() ?? [];
@@ -3680,6 +3773,9 @@ class Conversation implements ConversationCommandHost {
     else this.print(tracker.view().tasks.map((task) => `${task.key} (${task.role}) ${task.state.replaceAll("_", " ")}${task.dependsOn === undefined || task.dependsOn.length === 0 ? "" : ` after ${task.dependsOn.join(", ")}`}`));
   }
 }
+
+/** Provider failures a sign-in fixes. */
+const AUTH_FAILURES: ReadonlySet<string> = new Set(["unauthenticated", "auth_expired"]);
 
 const PERMISSION_MODE_WORDS = ["ask", "auto", "full", "plan"] as const;
 

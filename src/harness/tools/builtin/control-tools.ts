@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   AGENT_ROLES,
+  askUserInputSchema,
   memoryIdSchema,
   planProposalSchema,
   PROPOSAL_KINDS,
@@ -9,6 +10,7 @@ import {
   taskIdSchema,
   taskReportInputSchema,
   taskTriageInputSchema,
+  type AskUserInput,
   type PlanProposal,
   type ReviewReportInput,
   type TaskReportInput,
@@ -20,11 +22,9 @@ import {
 import { messageOf } from "./read-tools.ts";
 import { actionOf, builtinMetadata, defineTool, errorResult, okResult } from "./shared.ts";
 
-const askUserInput = z.strictObject({
-  question: z.string().trim().min(1).max(2000),
-  options: z.array(z.string().min(1).max(200)).max(10).optional(),
-});
-export type AskUserInput = z.infer<typeof askUserInput>;
+/** 1-4 structured questions with 2-4 options each (K5, Claude Code's AskUserQuestion shape). */
+const askUserInput = askUserInputSchema;
+export type { AskUserInput } from "../../contracts/index.ts";
 
 /** The packet itself is validated by orchestration (I4) against `taskContextPacketSchema`. */
 const taskSpawnInput = z.strictObject({
@@ -114,7 +114,7 @@ export function createControlTools(callbacks: ControlCallbacks): Tool[] {
     ),
     controlTool(
       "ask_user",
-      "Ask the user a question and wait for the answer. Unavailable in headless runs.",
+      "Ask the user 1-4 multiple-choice questions (2-4 options each, a short header chip, multiSelect when several apply; mark your recommended option). The user may also type their own answer. Returns {answers: {question: [labels] | free text}}. Only for decisions that are genuinely the user's; without a user it tells you to decide.",
       ["orchestrator", "session"],
       askUserInput,
       callbacks.askUser,

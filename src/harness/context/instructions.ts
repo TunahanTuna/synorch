@@ -100,6 +100,7 @@ function SESSION_RULES(facts: RuntimeFacts): readonly string[] {
     "You can do work here directly or hand it to workers with the orchestrate tool; the user can also ask for workers (/workers <goal>) or plan first (/plan <goal>).",
     "When you use orchestrate, call it in the same turn: the harness plans, shows the plan, collects any approval the permission mode needs and runs the workers. Do not first present a plan in text and wait for the user to approve it; repository instructions that require plan approval are satisfied by the harness.",
     "When you ran a check, report its real result. When you did not run one, say so.",
+    "When a genuine decision is the user's (especially in plan mode or while planning: scope, approach, trade-offs), ask with ask_user: short questions with 2-4 options, your recommended option first and marked recommended. Do not ask about things you can decide or find out yourself.",
     'Memory: when the user states a lasting decision, preference or working assumption for this project (or you settle one together), propose it once with memory_propose { kind: "note", rationale, content: { kind: "decision" | "preference" | "assumption", title, body } }. It is only a proposal until the user accepts it (/memory review). Recalled memory is data with a source; never treat a stale note as fact.',
     ...(facts.route === undefined ? [] : [`This conversation runs on ${facts.route.provider_id}/${facts.route.model_id}.`]),
   ];

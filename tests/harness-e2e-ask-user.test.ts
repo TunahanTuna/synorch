@@ -38,7 +38,7 @@ test("headless: ask_user is unavailable and a run that cannot plan without the a
   await trustWorkspace(sandbox);
   try {
     await writeConfig(sandbox.home, ROUTES);
-    const orchestrator = createScriptedAdapter([call("ask_user", () => ({ question: "Which folder holds the docs?" })), text("I cannot plan without knowing the folder.")], { adapterId: "plan-script" });
+    const orchestrator = createScriptedAdapter([call("ask_user", () => ({ questions: [{ question: "Which folder holds the docs?", header: "Docs", options: [{ label: "docs", description: "the docs folder" }, { label: "site", description: "the site folder" }] }] })), text("I cannot plan without knowing the folder.")], { adapterId: "plan-script" });
     const worker = createScriptedAdapter([text("never")], { adapterId: "worker-script" });
     const run = capture({ cwd: sandbox.workspace });
     const code = await runHarnessCommand(["run", "Document the API", "--mode", "jsonl"], run.io, overridesFor(sandbox, { adapters: [orchestrator, worker] }));
@@ -66,7 +66,7 @@ test("interactive: the orchestrator's question is shown and the typed answer is 
     const answers: string[] = [];
     const orchestrator = createScriptedAdapter(
       [
-        call("ask_user", () => ({ question: "Which folder holds the docs?", options: ["docs", "site"] })),
+        call("ask_user", () => ({ questions: [{ question: "Which folder holds the docs?", header: "Docs", options: [{ label: "docs", description: "the docs folder" }, { label: "site", description: "the site folder" }] }] })),
         calls((request) => {
           const last = request.messages.at(-1);
           answers.push(last?.content.map((part) => (part.type === "tool_result" ? JSON.stringify(part) : "")).join("") ?? "");
@@ -87,7 +87,7 @@ test("interactive: the orchestrator's question is shown and the typed answer is 
     assert.match(run.stdout(), /Options: docs \| site/);
     assert.match(run.stdout(), /^Approval allowed-for-scope by orchestrator \(autonomous self-approval, audited\)$/m);
     assert.doesNotMatch(run.stdout(), /warning: Approval/, "the plain renderer does not present an audited self-approval as a warning");
-    assert.match(answers[0] ?? "", /The user answered: docs/);
+    assert.match(answers[0] ?? "", /The user answered: .*Which folder holds the docs\?.*\[\\"docs\\"\]/);
     assert.equal(toolResultIds(orchestrator.requests[1]!).length, 1);
   } finally {
     await sandbox.cleanup();

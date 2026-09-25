@@ -10,6 +10,7 @@ import {
   type SessionEvent,
   type SessionId,
 } from "../contracts/index.ts";
+import { askUserSummaryLine } from "../contracts/index.ts";
 import { formatHarnessError, type InputStream } from "../tui/index.ts";
 import type { ParsedCommand } from "./args.ts";
 import { failureInfo } from "./outcome.ts";
@@ -233,7 +234,17 @@ async function openSession(
   });
   const questions = new QuestionDesk();
   const prompt = userPromptFor(parsed, renderer, questions);
-  const unbind = prompt === undefined ? () => undefined : runtime.bindUserPrompt(prompt);
+  const inputControls = renderer.controls;
+  // K5: in the TUI structured questions open the choice modal and leave one summary line; elsewhere they are asked as numbered text.
+  const choose =
+    renderer.kind === "tui" && inputControls !== undefined
+      ? async (question: Parameters<typeof inputControls.choose>[0], signal: AbortSignal) => {
+          const answer = await inputControls.choose(question, signal);
+          renderer.render({ kind: "notice", level: "info", message: askUserSummaryLine(question, answer) });
+          return answer;
+        }
+      : undefined;
+  const unbind = prompt === undefined ? () => undefined : runtime.bindUserPrompt(prompt, choose);
   return {
     runtime,
     renderer,

@@ -1,4 +1,5 @@
 import type { AuthInteraction } from "./auth.ts";
+import type { ChoiceAnswer, ChoiceQuestion } from "./choice.ts";
 import type { SessionEvent } from "./events.ts";
 import type { ModelStreamEvent } from "./model.ts";
 import type { ApprovalBroker, PermissionMode } from "./policy.ts";
@@ -132,11 +133,17 @@ export interface InteractiveInputControls {
   /** Resolves with the chosen row, or undefined on Esc / abort. */
   openModelPicker(entries: readonly ModelPickerEntry[], signal?: AbortSignal, heading?: PickerHeading): Promise<ModelPickerEntry | undefined>;
   /**
-   * A question that owns the input until answered (K5): with options a picker (arrows + Enter,
-   * number shortcuts, Esc cancels), without a one-line answer field. What is typed never reaches
-   * the conversation. Resolves with the chosen option text or the answer, undefined on Esc / abort.
+   * A question that owns the input until answered (K5): with options the choice modal as a closed
+   * confirmation (arrows + Enter, number shortcuts, Esc cancels, no "Other…"), without a one-line
+   * answer field. What is typed never reaches the conversation. Resolves with the chosen option
+   * text or the answer, undefined on Esc / abort.
    */
   ask(question: string, options: readonly string[] | undefined, signal?: AbortSignal): Promise<string | undefined>;
+  /**
+   * The K5 choice modal: one structured question (single or multi-select, recommended tag,
+   * descriptions, "Other…" free text). Resolves undefined on Esc / abort.
+   */
+  choose(question: ChoiceQuestion, signal?: AbortSignal): Promise<ChoiceAnswer | undefined>;
   /**
    * Permission mode (Shift+Tab / Alt+M cycles ask -> auto -> full -> plan): the renderer shows it in
    * the footer; the session applies the policy and announces the change.

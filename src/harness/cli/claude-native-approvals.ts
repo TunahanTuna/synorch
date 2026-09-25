@@ -1,5 +1,6 @@
 import {
   ALLOWING_OUTCOMES,
+  ASK_USER_HEADLESS_MESSAGE,
   approvalDecisionSchema,
   approvalRequestSchema,
   createId,
@@ -7,6 +8,7 @@ import {
   type ApprovalBroker,
   type ApprovalDecision,
   type ApprovalRequest,
+  type AskUserQuestion,
   type BackendApprovalDecision,
   type PermissionMode,
   type ToolEffect,
@@ -15,6 +17,7 @@ import type { BackendApprovalContext, BackendApprovalHandler } from "../core/ind
 import { hostMatches } from "../policy/index.ts";
 import { claudeInputSummary, claudeToolEffect } from "../providers/index.ts";
 import { egressFindings } from "../tools/index.ts";
+import type { UserQuestionsOutcome } from "./runtime.ts";
 
 /**
  * Claude Code native mode (owner revision 2026-09-24, ADR-08): Claude's own permission prompts
@@ -39,6 +42,37 @@ export interface ClaudeNativeApprovalOptions {
    * query or URL carrying a secret is refused in every mode (secret-egress rail).
    */
   readonly web?: { readonly domains: () => readonly string[]; readonly environment: Readonly<Record<string, string | undefined>> };
+  /**
+   * K5: Claude's own AskUserQuestion is shown in Synorch's choice modal; the answers go back as
+   * `updatedInput.answers` (question text -> label, multi-select labels joined with ", ", or the
+   * user's own text), the Agent SDK's documented contract for the permission callback.
+   */
+  readonly askUser?: (questions: readonly AskUserQuestion[], signal: AbortSignal) => Promise<UserQuestionsOutcome>;
+}
+
+/** Claude's AskUserQuestion input as `ask_user` questions (lenient: Claude validated it already). */
+export function claudeQuestions(input: Readonly<Record<string, unknown>>): AskUserQuestion[] | undefined {
+  if (!Array.isArray(input.questions)) return undefined;
+  const questions: AskUserQuestion[] = [];
+  for (const raw of input.questions.slice(0, 4) as unknown[]) {
+    if (typeof raw !== "object" || raw === null) return undefined;
+    const item = raw as Record<string, unknown>;
+    if (typeof item.question !== "string" || item.question.trim() === "" || !Array.isArray(item.options)) return undefined;
+    const options = (item.options as unknown[]).flatMap((option) => {
+      if (typeof option !== "object" || option === null) return [];
+      const entry = option as Record<string, unknown>;
+      if (typeof entry.label !== "string" || entry.label.trim() === "") return [];
+      return [{ label: entry.label, description: typeof entry.description === "string" ? entry.description : "", ...(typeof entry.preview === "string" ? { preview: entry.preview } : {}) }];
+    });
+    if (options.length === 0) return undefined;
+    questions.push({ question: item.question, header: typeof item.header === "string" && item.header.trim() !== "" ? item.header : "Question", options, multiSelect: item.multiSelect === true });
+  }
+  return questions.length === 0 ? undefined : questions;
+}
+
+/** The answers Claude Code expects in `updatedInput.answers`: one string per question. */
+export function claudeAnswers(answers: Readonly<Record<string, readonly string[] | string>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(answers).map(([question, value]) => [question, typeof value === "string" ? value : value.join(", ")]));
 }
 
 const COMMAND_TOOLS = new Set(["Bash", "PowerShell"]);
@@ -104,6 +138,16 @@ export function createClaudeNativeApprovals(options: ClaudeNativeApprovalOptions
     });
 
   return async (toolName, input, context, signal) => {
+    if (toolName === "AskUserQuestion") {
+      // A question, not a permission: never auto-allowed (that would answer nothing), in every mode.
+      const questions = claudeQuestions(input);
+      if (questions === undefined) return deny("the AskUserQuestion input could not be read; ask in plain text instead");
+      if (options.askUser === undefined || (context.role !== "session" && context.role !== "orchestrator")) return deny(ASK_USER_HEADLESS_MESSAGE);
+      const outcome = await options.askUser(questions, signal).catch((): UserQuestionsOutcome => ({ kind: "dismissed" }));
+      if (outcome.kind === "unavailable") return deny(ASK_USER_HEADLESS_MESSAGE);
+      if (outcome.kind === "dismissed") return deny("the user dismissed the question without answering; do not assume an answer: continue with what you can decide safely, or ask again in plain text");
+      return { allow: true, reason: "the user answered", updatedInput: { ...input, answers: claudeAnswers(outcome.answers.answers) } };
+    }
     const mode = options.permissionMode();
     const effect = claudeToolEffect(toolName);
     const webHost = effect === "network-read" ? webHostOf(input) : undefined;

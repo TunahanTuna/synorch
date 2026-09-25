@@ -3,6 +3,7 @@ import {
   Box,
   Container,
   CURSOR_MARKER,
+  decodeKittyPrintable,
   Editor,
   getNativeClipboard,
   Input,
@@ -27,6 +28,8 @@ import type {
   Attachment,
   AuthInteraction,
   AuthNotice,
+  ChoiceAnswer,
+  ChoiceQuestion,
   CommandPaletteEntry,
   DeviceCodePrompt,
   InteractiveInputControls,
@@ -42,7 +45,8 @@ import type {
   TerminalRenderer,
   UserInputSource,
 } from "../contracts/index.ts";
-import { nextPermissionMode, WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
+import { choiceAnswerText, nextPermissionMode, WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
+import { ChoiceModal } from "./choice-modal.ts";
 import { actionChoices, actionTitle, withApprovalDeadline, type ApprovalAnswer, type ApprovalChoice } from "./approvals.ts";
 import {
   activityText,
@@ -882,6 +886,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       },
       openModelPicker: (entries, signal, heading) => this.openModelPicker(entries, signal, heading),
       ask: (question, options, signal) => this.askQuestion(question, options, signal),
+      choose: (question, signal) => this.chooseQuestion(question, signal),
       get permissionMode() {
         return self.permission;
       },
@@ -1859,44 +1864,26 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   /** `/model` picker: rows come from the session, which also applies the choice (U2). */
   private openModelPicker(entries: readonly ModelPickerEntry[], signal?: AbortSignal, heading?: PickerHeading): Promise<ModelPickerEntry | undefined> {
     if (entries.length === 0 || this.stopped) return Promise.resolve(undefined);
-    return new Promise((resolve) => {
-      const glyphs = this.presenter?.glyphs ?? GLYPH_SETS.rich;
-      const tierWidth = Math.min(14, Math.max(...entries.map((entry) => entry.tier.length)));
-      const items = entries.map((entry, index) => ({
-        value: String(index),
-        label: `${entry.current ? glyphs.bullet : " "} ${entry.tier.padEnd(tierWidth)}  ${entry.label ?? `${entry.provider}/${entry.model}`}`,
-        description: [entry.auth, entry.current ? "current" : undefined, entry.disabled, entry.description].filter((part) => part !== undefined && part !== "").join(` ${glyphs.sep} `),
-      }));
-      const list = new SelectList(items, Math.min(items.length, 10), this.selectTheme, { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 60 });
-      const current = entries.findIndex((entry) => entry.current);
-      if (current >= 0) list.setSelectedIndex(current);
-      const box = new Box(1, 0);
-      box.addChild(new Text(this.style.cyan(heading?.title ?? "Select model"), 0, 0));
-      box.addChild(new Text(this.style.dim(heading?.hint ?? "route per tier · provider/model · auth  —  Enter selects, Esc cancels"), 0, 0));
-      box.addChild(list);
-      let dialog: DialogEntry | undefined;
-      let settled = false;
-      const finish = (entry: ModelPickerEntry | undefined): void => {
-        if (settled) return;
-        settled = true;
-        signal?.removeEventListener("abort", onAbort);
-        this.closeDialog(dialog);
-        resolve(entry);
-      };
-      const onAbort = (): void => finish(undefined);
-      if (signal?.aborted === true) {
-        resolve(undefined);
-        return;
-      }
-      signal?.addEventListener("abort", onAbort, { once: true });
-      list.onSelect = (item) => {
-        const entry = entries[Number(item.value)];
-        if (entry === undefined || entry.disabled !== undefined) return;
-        finish(entry);
-      };
-      list.onCancel = () => finish(undefined);
-      dialog = this.openDialog(box, list, () => finish(undefined));
-    });
+    // K5: the picker is the shared choice modal (neutral tone, no "Other…").
+    const glyphs = this.presenter?.glyphs ?? GLYPH_SETS.rich;
+    const tierWidth = Math.min(14, Math.max(...entries.map((entry) => entry.tier.length)));
+    const current = entries.findIndex((entry) => entry.current);
+    const question: ChoiceQuestion = {
+      question: heading?.title ?? "Select model",
+      subtitle: heading?.hint ?? "route per tier · provider/model · auth  —  Enter selects, Esc cancels",
+      options: entries.map((entry) => {
+        const description = [entry.auth, entry.current ? "current" : undefined, entry.description].filter((part) => part !== undefined && part !== "").join(` ${glyphs.sep} `);
+        return {
+          label: `${entry.current ? glyphs.bullet : " "} ${entry.tier.padEnd(tierWidth)}  ${entry.label ?? `${entry.provider}/${entry.model}`}`,
+          ...(description === "" ? {} : { description }),
+          ...(entry.disabled === undefined ? {} : { disabled: entry.disabled }),
+        };
+      }),
+      allowOther: false,
+      ...(current >= 0 ? { initialIndex: current } : {}),
+      tone: "neutral",
+    };
+    return this.chooseQuestion(question, signal).then((answer) => (answer?.kind === "selected" ? entries[answer.indices[0] ?? -1] : undefined));
   }
 
   private submit(text: string): void {
@@ -2129,6 +2116,10 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
    */
   private askQuestion(question: string, options: readonly string[] | undefined, signal?: AbortSignal): Promise<string | undefined> {
     if (this.stopped || signal?.aborted === true) return Promise.resolve(undefined);
+    if (options !== undefined && options.length > 0) {
+      // Harness confirmations (/init, /commit, the memory desk) parse known answers: no free-text "Other…".
+      return this.chooseQuestion({ question, options: options.map((label) => ({ label })), allowOther: false, tone: "attention" }, signal).then((answer) => (answer === undefined ? undefined : choiceAnswerText(answer)));
+    }
     return new Promise((resolve) => {
       const sep = (this.presenter?.glyphs ?? GLYPH_SETS.rich).sep;
       const box = new Box(1, 0);
@@ -2144,29 +2135,52 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       };
       const onAbort = (): void => finish(undefined);
       signal?.addEventListener("abort", onAbort, { once: true });
-      let focus: Component;
-      if (options !== undefined && options.length > 0) {
-        const items = options.map((option, index) => ({ value: String(index), label: `${index + 1}. ${sanitizeInline(option, 200)}` }));
-        const list = new SelectList(items, Math.min(items.length, 10), this.selectTheme);
-        const handle = list.handleInput.bind(list);
-        list.handleInput = (data: string): void => {
-          const picked = /^[1-9]$/.test(data) ? options[Number(data) - 1] : undefined;
-          if (picked !== undefined) finish(picked);
-          else handle(data);
-        };
-        list.onSelect = (item) => finish(options[Number(item.value)]);
-        list.onCancel = () => finish(undefined);
-        box.addChild(list);
-        box.addChild(new Text(this.style.dim(`  ↑↓ + Enter ${sep} 1-${Math.min(items.length, 9)} ${sep} Esc cancels`), 0, 0));
-        focus = list;
-      } else {
-        const input = new Input({ prompt: "> ", placeholder: "type the answer (Enter sends, Esc cancels)" });
-        input.onSubmit = (value) => finish(value);
-        input.onEscape = () => finish(undefined);
-        box.addChild(input);
-        focus = input;
-      }
-      entry = this.openDialog(box, focus, () => finish(undefined), "attention");
+      const input = new Input({ prompt: "> ", placeholder: `type the answer (Enter sends ${sep} Esc cancels)` });
+      input.onSubmit = (value) => finish(value);
+      input.onEscape = () => finish(undefined);
+      box.addChild(input);
+      entry = this.openDialog(box, input, () => finish(undefined), "attention");
+    });
+  }
+
+  /**
+   * The K5 choice modal (`ChoiceModal`): arrows + Enter, 1-9, Space toggles in multi-select,
+   * "Other…" opens a free-text line, Esc cancels. It owns the input until answered; resolves
+   * undefined on Esc or abort. Every choice prompt of the renderer goes through here.
+   */
+  private chooseQuestion(question: ChoiceQuestion, signal?: AbortSignal): Promise<ChoiceAnswer | undefined> {
+    if (this.stopped || signal?.aborted === true || question.options.length === 0) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      const modal = this.choiceModal(question);
+      let entry: DialogEntry | undefined;
+      let settled = false;
+      const finish = (answer: ChoiceAnswer | undefined): void => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        this.closeDialog(entry);
+        resolve(answer);
+      };
+      const onAbort = (): void => finish(undefined);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      modal.onSubmit = (answer) => finish(answer);
+      modal.onCancel = () => finish(undefined);
+      const box = new Box(1, 0);
+      box.addChild(modal);
+      entry = this.openDialog(box, modal, () => finish(undefined), question.tone ?? "attention");
+    });
+  }
+
+  private choiceModal(question: ChoiceQuestion): ChoiceModal {
+    return new ChoiceModal(question, {
+      style: this.style,
+      glyphs: this.presenter?.glyphs ?? GLYPH_SETS.rich,
+      isKey: (data, key) => matchesKey(data, key),
+      printable: (data) => {
+        const paste = BRACKETED_PASTE.exec(data);
+        if (paste !== null) return (paste[1] ?? "").replace(/\r?\n/g, " ");
+        return decodeKittyPrintable(data) ?? (data.startsWith("\x1b") || data.length === 0 ? undefined : data);
+      },
     });
   }
 
@@ -2212,25 +2226,37 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     return withApprovalDeadline(request, this.options.policyMode, signal, this.clock, (promptSignal) =>
       new Promise<ApprovalAnswer>((resolve, reject) => {
         const trust = request.subject_kind === "workspace-trust";
-        const items: { value: string; label: string }[] = [];
-        if (trust) {
-          // "Not now" first, so the pre-selected answer never trusts anything.
-          for (const choice of WORKSPACE_TRUST_CHOICES) items.push({ value: choice.outcome, label: choice.label });
-        } else {
-          for (const choice of actionChoices(request)) items.push({ value: choice.value, label: `${choice.key}. ${choice.label}` });
-        }
-        const list = new SelectList(items, items.length, this.selectTheme);
+        // K5: the approval card is the shared choice modal; its rows keep the broker's outcomes.
+        const values: string[] = [];
+        const question: ChoiceQuestion = trust
+          ? {
+              question: this.presenter !== undefined ? "Trust this folder?" : "Trust this workspace?",
+              context: [sanitizeInline(request.summary, 2000)],
+              // "Not now" first, so the pre-selected answer never trusts anything; no digit shortcuts either.
+              options: WORKSPACE_TRUST_CHOICES.map((choice) => {
+                values.push(choice.outcome);
+                return { label: choice.label };
+              }),
+              numberShortcuts: false,
+              allowOther: false,
+              escapeLabel: "not now",
+              tone: "attention",
+            }
+          : {
+              // UX-03 action card: what (and the edit itself), where, what allowing means, then the choices.
+              question: actionTitle(request),
+              context: this.approvalLines(request).slice(1),
+              options: actionChoices(request).map((choice) => {
+                values.push(choice.value);
+                return { label: choice.label };
+              }),
+              allowOther: false,
+              escapeLabel: "denies",
+              tone: "attention",
+            };
+        const modal = this.choiceModal(question);
         const box = new Box(1, 0);
-        if (trust) {
-          box.addChild(new Text(this.style.yellow(this.presenter !== undefined ? "Trust this folder?" : "Trust this workspace?"), 0, 0));
-          box.addChild(new Text(sanitizeInline(request.summary, 2000), 0, 0));
-        } else {
-          // UX-03 action card: what (and the edit itself), where, what allowing means, then the choices.
-          for (const line of this.approvalLines(request)) box.addChild(new Text(line, 0, 0));
-        }
-        box.addChild(list);
-        const sep = (this.presenter?.glyphs ?? GLYPH_SETS.rich).sep;
-        box.addChild(new Text(this.style.dim(trust ? `  ↑↓ choose ${sep} Enter confirm ${sep} Esc not now` : `  1-${items.length} or ↑↓ + Enter ${sep} Esc denies`), 0, 0));
+        box.addChild(modal);
         let entry: DialogEntry | undefined;
         let settled = false;
         const finish = (outcome: ApprovalAnswer | undefined): void => {
@@ -2258,16 +2284,12 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
           if (value === "rejected-why") askWhy();
           else finish(value as ApprovalChoice);
         };
-        const handle = list.handleInput.bind(list);
-        list.handleInput = (data: string): void => {
-          const index = /^[1-9]$/.test(data) ? Number(data) - 1 : -1;
-          const item = items[index];
-          if (!trust && item !== undefined) pick(item.value);
-          else handle(data);
+        modal.onSubmit = (answer) => {
+          const value = answer.kind === "selected" ? values[answer.indices[0] ?? -1] : undefined;
+          if (value !== undefined) pick(value);
         };
-        list.onSelect = (item) => pick(item.value);
-        list.onCancel = () => finish("rejected");
-        entry = this.openDialog(box, list, () => finish(undefined), "attention");
+        modal.onCancel = () => finish("rejected");
+        entry = this.openDialog(box, modal, () => finish(undefined), "attention");
       }),
     );
   }
@@ -2311,33 +2333,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       this.appendLine({ level: "warning", text: `notice: ${sanitizeInline(notice.text, 1000)}` });
       return Promise.resolve(true);
     }
-    return new Promise((resolve) => {
-      const list = new SelectList(
-        [
-          { value: "yes", label: "I understand, continue" },
-          { value: "no", label: "Cancel" },
-        ],
-        2,
-        this.selectTheme,
-      );
-      const box = new Box(1, 0);
-      box.addChild(new Text(this.style.yellow(sanitizeInline(notice.text, 1000)), 0, 0));
-      box.addChild(list);
-      let entry: DialogEntry | undefined;
-      let settled = false;
-      const finish = (accepted: boolean): void => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        this.closeDialog(entry);
-        resolve(accepted);
-      };
-      const onAbort = (): void => finish(false);
-      signal.addEventListener("abort", onAbort, { once: true });
-      list.onSelect = (item) => finish(item.value === "yes");
-      list.onCancel = () => finish(false);
-      entry = this.openDialog(box, list, () => finish(false));
-    });
+    const question: ChoiceQuestion = { question: sanitizeInline(notice.text, 1000), options: [{ label: "I understand, continue" }, { label: "Cancel" }], allowOther: false, tone: "neutral" };
+    return this.chooseQuestion(question, signal).then((answer) => answer?.kind === "selected" && answer.indices[0] === 0);
   }
 }
 

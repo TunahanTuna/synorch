@@ -1,18 +1,26 @@
 import os from "node:os";
 import path from "node:path";
 import {
+  ASK_USER_HEADLESS_MESSAGE,
+  askUserAnswerValue,
+  askUserChoiceQuestion,
   createId,
   credentialRefSchema,
   deriveProjectId,
   EVENT_VERSIONS,
   HarnessError,
+  parseTypedChoice,
   providerIdSchema,
   ProviderFailure,
   type AgentDriver,
   type AnyModelAdapter,
   type ApprovalBroker,
+  type AskUserAnswers,
+  type AskUserQuestion,
   type AuthProvider,
   type BlobStore,
+  type ChoiceAnswer,
+  type ChoiceQuestion,
   type Coordinator,
   type CredentialResolver,
   type EffectivePolicy,
@@ -170,6 +178,10 @@ export interface RuntimeTrust {
 
 /** Asks the human attached to the session a question (the `ask_user` tool); resolves with the answer. */
 export type UserPrompt = (question: string, options: readonly string[] | undefined, signal: AbortSignal) => Promise<string>;
+/** K5: one structured question for the attached human (the choice modal); undefined when dismissed (Esc). */
+export type UserChoicePrompt = (question: ChoiceQuestion, signal: AbortSignal) => Promise<ChoiceAnswer | undefined>;
+/** Every question answered, or `dismissed` when the user pressed Esc on one; `unavailable` without a human. */
+export type UserQuestionsOutcome = { readonly kind: "answered"; readonly answers: AskUserAnswers } | { readonly kind: "dismissed" } | { readonly kind: "unavailable" };
 
 export interface Runtime {
   readonly home: string;
@@ -209,9 +221,12 @@ export interface Runtime {
   subscribe(listener: RuntimeListener): () => void;
   /**
    * Binds `ask_user` to a human for the lifetime of a session; returns the unbind function. With no
-   * binding (headless, JSONL, piped input) `ask_user` answers `approval_unavailable`.
+   * binding (headless, JSONL, piped input) `ask_user` answers `approval_unavailable`. `choose`
+   * shows structured questions (the K5 modal); without it they are asked as numbered text.
    */
-  bindUserPrompt(prompt: UserPrompt): () => void;
+  bindUserPrompt(prompt: UserPrompt, choose?: UserChoicePrompt): () => void;
+  /** Asks `ask_user`-shaped questions (also Claude Code's AskUserQuestion in native mode) through the bound human. */
+  askUserQuestions(questions: readonly AskUserQuestion[], signal: AbortSignal): Promise<UserQuestionsOutcome>;
   /** The approval broker for a session: the renderer's interactive broker in `ask` mode or under an interactive permission mode (workers' prompts reach the user, ADR-08 revision 3), the headless one otherwise. */
   brokerFor(interactive: ApprovalBroker | undefined): ApprovalBroker;
   createDriver(broker: ApprovalBroker): (events: EventStore) => AgentDriver;
@@ -680,6 +695,22 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const reports = createReportSlot();
   const skillContext = createSkillContextRegistry();
   let userPrompt: UserPrompt | undefined;
+  let userChoice: UserChoicePrompt | undefined;
+  const askUserQuestions = async (questions: readonly AskUserQuestion[], signal: AbortSignal): Promise<UserQuestionsOutcome> => {
+    const prompt = userPrompt;
+    if (prompt === undefined) return { kind: "unavailable" };
+    const choose = userChoice;
+    const answers: Record<string, readonly string[] | string> = {};
+    for (const question of questions) {
+      const choice = askUserChoiceQuestion(question);
+      let answer: ChoiceAnswer | undefined;
+      if (choose !== undefined) answer = await choose(choice, signal);
+      else answer = parseTypedChoice(choice, await prompt(question.question, question.options.map((option) => option.label), signal));
+      if (answer === undefined) return { kind: "dismissed" };
+      answers[question.question] = askUserAnswerValue(answer);
+    }
+    return { kind: "answered", answers: { answers } };
+  };
   const processes = new BackgroundProcessManager();
   const registry = createToolRegistry({
     processes,
@@ -693,21 +724,23 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       // ContextBuilder, which records what each build injected.
       loadSkill: createSkillLoadCallback({ skills: canonical.skills, registry: skillContext }),
       async askUser(input, context) {
-        const prompt = userPrompt;
-        if ((context.role !== "orchestrator" && context.role !== "session") || prompt === undefined) {
+        if ((context.role !== "orchestrator" && context.role !== "session") || userPrompt === undefined) {
+          return { status: "error", text: "", truncated: false, redactions: 0, error: { code: "approval_unavailable", message: ASK_USER_HEADLESS_MESSAGE } };
+        }
+        const outcome = await askUserQuestions(input.questions, context.signal);
+        if (outcome.kind === "unavailable") {
+          return { status: "error", text: "", truncated: false, redactions: 0, error: { code: "approval_unavailable", message: ASK_USER_HEADLESS_MESSAGE } };
+        }
+        if (outcome.kind === "dismissed") {
           return {
             status: "error",
             text: "",
             truncated: false,
             redactions: 0,
-            error: {
-              code: "approval_unavailable",
-              message: "no human can answer in this session (headless, JSONL or piped input); decide within the approved scope or stop and report what you need",
-            },
+            error: { code: "approval_rejected", message: "the user dismissed the question without answering; do not assume an answer: continue with what you can decide safely, or ask again in plain text" },
           };
         }
-        const answer = (await prompt(input.question, input.options, context.signal)).trim();
-        return { status: "ok", text: `The user answered: ${answer === "" ? "(empty answer)" : answer}`.slice(0, 16 * 1024), truncated: false, redactions: 0 };
+        return { status: "ok", text: `The user answered: ${JSON.stringify(outcome.answers)}`.slice(0, 16 * 1024), truncated: false, redactions: 0 };
       },
       async memoryPropose(input, context) {
         // K2 decision desk: `{ kind, title, body }` is enough; a conversation turn (no run) proposes as `session`.
@@ -861,6 +894,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       commandGrants: () => createCommandGrantStore(home, effectiveTrust().root).list(),
       redact: backendRedact,
       web: { domains: () => webSession.domains(), environment: env },
+      askUser: (questions, signal) => askUserQuestions(questions, signal),
     });
 
   const createDriver = (broker: ApprovalBroker) => (events: EventStore): AgentDriver =>
@@ -908,12 +942,17 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    bindUserPrompt(prompt) {
+    bindUserPrompt(prompt, choose) {
       userPrompt = prompt;
+      userChoice = choose;
       return () => {
-        if (userPrompt === prompt) userPrompt = undefined;
+        if (userPrompt === prompt) {
+          userPrompt = undefined;
+          userChoice = undefined;
+        }
       };
     },
+    askUserQuestions,
     brokerFor(interactive) {
       // Workers follow the session's permission mode (ADR-08 revision 3): what asks in auto/full (outward writes, destructive commands) reaches the user.
       if ((options.policyMode === "ask" || permission !== undefined) && interactive !== undefined && interactive.availability !== "headless") return interactive;

@@ -221,7 +221,7 @@ test("control tools route to injected callbacks and fail clearly when unwired or
   assert.deepEqual(spawned, [{ key: "auth-fix" }]);
   const status = await orchestrator.call("task_status", {});
   assert.equal(status.result.error?.code, "execution_failed");
-  const ask = await orchestrator.call("ask_user", { question: "Which branch?" });
+  const ask = await orchestrator.call("ask_user", { questions: [{ question: "Which branch?", header: "Branch", options: [{ label: "main", description: "" }, { label: "dev", description: "" }] }] });
   assert.equal(ask.result.error?.code, "approval_unavailable");
 
   const worker = harnessFor(root, "implementer", control);

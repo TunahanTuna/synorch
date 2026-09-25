@@ -1,4 +1,9 @@
 import type { ConversationItem, DiffLine, GlyphSet } from "./conversation-view.ts";
+import { wrapHanging, type TextWrapper } from "./wrap.ts";
+
+/** Collapsed tool rows: the headline wraps to 3 lines, the result summary to 2 (Ctrl+O: all). */
+const HEADLINE_LINES = 3;
+const SUMMARY_LINES = 2;
 
 /**
  * One tool call at L0 (TUI §7.4, terminal polish brief): a status glyph, the verb and target, and
@@ -29,6 +34,8 @@ export interface ToolRowOptions {
   /** Visible width of a string (ANSI-aware); the caller's measure. */
   readonly measure: (text: string) => number;
   readonly fit: (text: string, width: number) => string;
+  /** Plain-text word wrapper (the TUI passes pi-tui's grapheme-aware one); defaults to the view kit's. */
+  readonly wrapText?: TextWrapper | undefined;
 }
 
 export function toolGlyph(item: ToolItem, glyphs: GlyphSet, paint: ToolRowPaint): string {
@@ -95,14 +102,33 @@ export function renderToolRow(item: ToolItem, options: ToolRowOptions): string[]
   if (stat !== undefined && !trouble && measure(item.title) + measure(stat) + 4 <= width) {
     lines.push(fit(`${head}  ${paint.dim(stat)}`, width));
   } else {
-    lines.push(fit(head, width));
+    // The headline wraps under the tool name (3 lines, then `…`; Ctrl+O shows it all), never cut at one line.
+    const glyph = background?.glyph ?? toolGlyph(item, g, paint);
+    const slot = " ".repeat(measure(glyph) + 1);
+    const headLines = wrapHanging(slot, item.title, width, { maxLines: options.expanded ? undefined : HEADLINE_LINES, ellipsis: g.ellipsis, wrapText: options.wrapText });
+    headLines.forEach((line, index) => lines.push(index === 0 ? `${glyph} ${paint.bold(line.slice(slot.length))}` : paint.bold(line)));
     if (stat !== undefined) {
-      const painted = item.status === "cancelled" ? paint.warn(stat) : trouble ? paint.fail(stat) : paint.dim(stat);
-      lines.push(fit(`  ${paint.dim(g.result)} ${painted}`, width));
+      const tone = (text: string): string => (item.status === "cancelled" ? paint.warn(text) : trouble ? paint.fail(text) : paint.dim(text));
+      const lead = `  ${g.result} `;
+      const statLines = wrapHanging(lead, stat, width, { maxLines: options.expanded ? undefined : SUMMARY_LINES, ellipsis: g.ellipsis, wrapText: options.wrapText });
+      statLines.forEach((line, index) => lines.push(index === 0 ? `  ${paint.dim(g.result)} ${tone(line.slice(lead.length))}` : tone(line)));
     }
   }
-  const body = options.expanded && item.detail.length > 0 ? item.detail : item.preview;
-  for (const line of body) lines.push(fit(`    ${diffLine(line, g, paint)}`, width));
+  const full = options.expanded && item.detail.length > 0;
+  const body = full ? item.detail : item.preview;
+  // Expanded (Ctrl+O) detail wraps so nothing is lost; the collapsed preview stays one line per row.
+  for (const line of body) {
+    if (full) {
+      const mark = line.op === "+" ? "+ " : line.op === "-" ? `${g.minus} ` : line.op === "…" ? `${g.ellipsis} ` : "  ";
+      const slot = `    ${" ".repeat(measure(mark))}`;
+      const tone = line.op === "+" ? paint.ok : line.op === "-" ? paint.fail : paint.dim;
+      wrapHanging(slot, line.text, width, { wrapText: options.wrapText }).forEach((piece, index) => {
+        const text = piece.slice(slot.length);
+        lines.push(index === 0 ? `    ${diffLine({ op: line.op, text }, g, paint)}` : `${slot}${tone(text)}`);
+      });
+    }
+    else lines.push(fit(`    ${diffLine(line, g, paint)}`, width));
+  }
   return lines;
 }
 

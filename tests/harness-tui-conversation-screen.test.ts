@@ -207,3 +207,67 @@ test("/diff view: removals before additions with line numbers and context", () =
     "   7 + g",
   ]);
 });
+
+const LONG_PROMPT = "Bana finansla alakalı etkileyici bir landing page yapacaksın. Şirketin amacı da teknik analiz eğitimleri satacak tamam mı? Hayali bir şirket olsun, adını da sen koy; renkler koyu ve premium dursun 📈.";
+const GOAL = "Create a visually striking Turkish-language HTML landing page for a fictional fintech company that sells technical analysis courses, with a premium dark editorial design.";
+const OBJECTIVE = "Tek başına açılabilen index.html içinde özgün premium koyu editoryal fintech tasarımını, duyarlı düzeni ve erişilebilir içerik yapısını eksiksiz uygula.";
+
+/** The owner's orchestrated turn (screenshot, 2026-09-25): what the session emits for a background run. */
+function orchestratedTurn(tui: PiTuiRenderer, terminal: VirtualTerminal): void {
+  terminal.type(LONG_PROMPT);
+  terminal.type("\r");
+  tui.render(event("turn/started", { turn_id: createId("turn"), trigger: "user" }));
+  const run = toolCall("orchestrate", { goal: GOAL, reason: "A complete landing page benefits from coordinated implementation and proportionate independent verification." });
+  tui.render(run.event);
+  tui.render(finished(run.id, { text: "Started worker run run-1 in the background. The user sees the plan and a live board; the conversation is not blocked.\nGoal: …\nEnd your turn now with one short line to the user." }));
+  tui.render(event("message/recorded", { role: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Hayali bir marka için Türkçe landing page'i worker'lara verdim; bitince sonucu paylaşacağım." }] } }));
+  tui.render(event("turn/ended", { turn_id: createId("turn"), outcome: "completed" }));
+  tui.render({ kind: "notice", level: "info", message: "● Plan · 1 task · risk standard · starting now" });
+  tui.render({ kind: "notice", level: "info", message: `  1. landing-page (implementer): ${OBJECTIVE}` });
+  tui.showView({ kind: "delegation", taskKey: "landing-page", role: "implementer", model: "gpt-6-sol", objective: OBJECTIVE });
+}
+
+test("owner screen: the user's message, tool headline, plan goal and delegation wrap in full; no ceremony lines", async () => {
+  const { tui, terminal } = await open(120, 40);
+  orchestratedTurn(tui, terminal);
+  const shown = await screen(tui, terminal);
+  if (process.env.SYN_PRINT_SCREEN === "1") console.log(shown);
+  const rows = shown.split("\n");
+  const body = rows.slice(1, rows.findIndex((line) => line.startsWith("──"))).join("\n");
+  assert.equal(
+    body,
+    [
+      "",
+      "> Bana finansla alakalı etkileyici bir landing page yapacaksın. Şirketin amacı da teknik analiz eğitimleri satacak tamam",
+      "  mı? Hayali bir şirket olsun, adını da sen koy; renkler koyu ve premium dursun 📈.",
+      "",
+      "✓ Workers Create a visually striking Turkish-language HTML landing page for a fictional fintech company that sells",
+      "  technical analysis courses, with a premium dark editorial design.",
+      "  ⎿ Workers running in background (run-1) · keep chatting · /runs",
+      "",
+      "● Hayali bir marka için Türkçe landing page'i worker'lara verdim; bitince sonucu paylaşacağım.",
+      "● Plan · 1 task · risk standard · starting now",
+      "  1. landing-page (implementer): Tek başına açılabilen index.html içinde özgün premium koyu editoryal fintech",
+      "     tasarımını, duyarlı düzeni ve erişilebilir içerik yapısını eksiksiz uygula.",
+      "→ landing-page (implementer, gpt-6-sol): Tek başına açılabilen index.html içinde özgün premium koyu editoryal fintech",
+      "  tasarımını, duyarlı düzeni ve erişilebilir içerik yapısını eksiksiz uygula.",
+    ].join("\n"),
+  );
+  assert.doesNotMatch(shown, /Starting workers|Workers run in the background|Started worker run/);
+  assert.doesNotMatch(shown, /\.\.\.|…/, "nothing is cut");
+  await tui.stop("completed");
+});
+
+test("wrapping follows the width: 40 columns keep every word, the tool headline caps at 3 lines until Ctrl+O", async () => {
+  const { tui, terminal } = await open(40, 40);
+  orchestratedTurn(tui, terminal);
+  const shown = await screen(tui, terminal);
+  for (const line of shown.split("\n")) assert.ok([...line].length <= 40, `wider than 40: ${line}`);
+  assert.match(shown.replace(/\n +/g, " "), /dursun 📈\./, "the whole prompt is there");
+  const head = shown.split("\n").findIndex((line) => line.startsWith("✓ Workers"));
+  assert.ok(shown.split("\n")[head + 2]?.endsWith("…"), "headline capped at 3 lines");
+  terminal.type("\x0f");
+  const expanded = await screen(tui, terminal);
+  assert.match(expanded.replace(/\n +/g, " "), /premium dark editorial design\./, "Ctrl+O shows the full headline");
+  await tui.stop("completed");
+});

@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -46,7 +47,9 @@ export interface Sandbox {
 }
 
 export async function createSandbox(files: Readonly<Record<string, string>>, options: { readonly git?: boolean } = {}): Promise<Sandbox> {
-  const root = await mkdtemp(path.join(os.tmpdir(), "syn-e2e-"));
+  // The physical path: a child `syn` process reports its cwd resolved (macOS /var -> /private/var), and
+  // the project id of a workspace is derived from its path, so both sides must spell it the same way.
+  const root = realpathSync(await mkdtemp(path.join(os.tmpdir(), "syn-e2e-")));
   const home = path.join(root, "home");
   const workspace = path.join(root, "ws");
   await mkdir(home, { recursive: true });

@@ -101,7 +101,12 @@ test("fixture 5 (B3): crash recovery unlinks dependency links before removing a 
 test("fixture 8 (B7): a tracked path that is long only inside the worktree still checks out (core.longpaths)", async () => {
   const repo = await createFixtureRepo({}, { baseName: "syn-wf-long-" });
   try {
-    const relative = `src/${"modulo-deep-directory-name/".repeat(5)}file-with-a-reasonably-long-name.ts`;
+    // As deep as the main tree allows under 250 characters: the temp root's length differs per OS
+    // (a long macOS /var/folders/... root, an 8.3 Windows runner temp), and a fixed depth overflows it.
+    const segment = "modulo-deep-directory-name/";
+    const file = "file-with-a-reasonably-long-name.ts";
+    const depth = Math.max(1, Math.min(5, Math.floor((245 - path.join(repo.root, "src", file).length) / segment.length)));
+    const relative = `src/${segment.repeat(depth)}${file}`;
     const mainLength = path.join(repo.root, relative).length;
     assert.ok(mainLength < 250, `the main path stays short (${mainLength})`);
     await repo.write(relative, "x\n");

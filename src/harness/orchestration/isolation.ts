@@ -322,10 +322,26 @@ async function writeSafe(root: string, relative: string, bytes: Buffer, platform
   const temporary = `${target}.synorch-${process.pid}-${Date.now()}.tmp`;
   await writeFile(temporary, bytes, { flag: "wx" });
   try {
-    await rename(temporary, target);
+    await renameWithRetry(temporary, target);
   } catch (error: unknown) {
     await unlink(temporary).catch(() => undefined);
     throw error;
+  }
+}
+
+const RETRYABLE_RENAME_CODES: ReadonlySet<string> = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/** Windows: a rename over a file another process briefly holds open fails transiently; retry with a bounded backoff. */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error: unknown) {
+      const code = error instanceof Error && "code" in error ? String(error.code) : "";
+      if (attempt >= 8 || !RETRYABLE_RENAME_CODES.has(code)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 5 * 2 ** attempt));
+    }
   }
 }
 
@@ -404,7 +420,7 @@ async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}-${Date.now()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  await rename(temporary, file);
+  await renameWithRetry(temporary, file);
 }
 
 async function readJson(file: string): Promise<unknown> {

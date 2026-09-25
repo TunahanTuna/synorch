@@ -332,7 +332,7 @@ class FixedAgentDriver implements PausableAgentDriver {
       const ref: ToolCallRef = { toolCallId, providerCallId: call.providerCallId, name: bridgeToolName(call.name), arguments: call.arguments };
       if (input.reportOnly !== undefined && ref.name !== input.reportOnly) return { isError: true, text: `not executed: this is a report-only turn; call ${input.reportOnly} now` };
       try {
-        const outcome = await this.#invokeRecorded(step, ref, AbortSignal.any([stepSignal, callSignal]));
+        const outcome = await this.#invokeRecorded(step, ref, AbortSignal.any([stepSignal, callSignal]), adapter.nativeTools === true);
         const text = renderToolResultText(outcome.ref, outcome.result);
         await this.#recordToolResult(step, ref, { isError: outcome.result.status === "error", text, blob: outcome.result.blob });
         return { isError: outcome.result.status === "error", text };
@@ -526,12 +526,12 @@ class FixedAgentDriver implements PausableAgentDriver {
   }
 
   /** Every call goes through the gateway, which must leave a durable record before anything else runs. */
-  async #invokeRecorded(step: StepContext, call: ToolCallRef, signal: AbortSignal): Promise<ToolCallOutcome> {
+  async #invokeRecorded(step: StepContext, call: ToolCallRef, signal: AbortSignal, claudeNative = false): Promise<ToolCallOutcome> {
     const { input } = step;
     const before = this.#deps.events.lastSeq;
     const outcome = await this.#deps.gateway.invoke(
       { tool_call_id: call.toolCallId, provider_call_id: call.providerCallId, tool_name: call.name, arguments: { ...call.arguments } },
-      { runId: input.runId, taskId: input.taskId, attemptId: input.attemptId, role: input.role, policy: input.policy },
+      { runId: input.runId, taskId: input.taskId, attemptId: input.attemptId, role: input.role, policy: input.policy, ...(claudeNative ? { backend: "claude-native" as const } : {}) },
       signal,
     );
     if (this.#deps.events.lastSeq <= before) {

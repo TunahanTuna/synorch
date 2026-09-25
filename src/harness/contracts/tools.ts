@@ -271,6 +271,11 @@ export interface ToolInvocationScope {
    * Absent: the call comes from the model of `role`.
    */
   readonly actor?: "system";
+  /**
+   * K7: the call reached the gateway through a Claude Code native backend's tool bridge. Claude
+   * Code runs its own plugins' hooks there, so Claude-sourced hooks are not run a second time.
+   */
+  readonly backend?: "claude-native";
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   type PolicyMode,
   type RunId,
   type SessionId,
+  type TaskModelTier,
 } from "../contracts/index.ts";
 import { buildAttemptLog, latestReport, readEvents } from "./attempt-log.ts";
 import { extractJsonBlock } from "./claims.ts";
@@ -227,6 +228,22 @@ export interface ModelPlannerDependencies {
   readonly maxSteps?: number;
   /** The detected project's real commands (zero-config profile), so plan verification uses existing scripts. */
   readonly projectHint?: () => string | undefined;
+  /** K7: the plugin agents a task may name as `agent` (one line each), or undefined when there are none. */
+  readonly personaHint?: () => string | undefined;
+  /** K7: a named agent's model hint as a task tier; it replaces the task's tier (the user's routes for that tier still decide). */
+  readonly personaTier?: (agent: string) => TaskModelTier | undefined;
+}
+
+/** K7: a task naming a plugin agent with a model hint runs on the hinted tier. */
+function applyPersonaTiers(raw: Record<string, unknown>, tierOf: ((agent: string) => TaskModelTier | undefined) | undefined): Record<string, unknown> {
+  if (tierOf === undefined || !Array.isArray(raw.tasks)) return raw;
+  const tasks = raw.tasks.map((task: unknown) => {
+    if (typeof task !== "object" || task === null) return task;
+    const record = task as Record<string, unknown>;
+    const tier = typeof record.agent === "string" ? tierOf(record.agent) : undefined;
+    return tier === undefined ? record : { ...record, model_tier: tier };
+  });
+  return { ...raw, tasks };
 }
 
 export function createModelPlanner(deps: ModelPlannerDependencies): Planner {
@@ -242,7 +259,7 @@ export function createModelPlanner(deps: ModelPlannerDependencies): Planner {
           route: input.route,
           policy: input.policy,
           packet: undefined,
-          userMessage: renderPlanningPrompt(input, deps.projectHint?.()),
+          userMessage: renderPlanningPrompt(input, [deps.projectHint?.(), deps.personaHint?.()].filter((part): part is string => part !== undefined && part !== "").join("\n\n") || undefined),
           trigger: "orchestrator",
           maxSteps: deps.maxSteps ?? 20,
         },
@@ -252,7 +269,7 @@ export function createModelPlanner(deps: ModelPlannerDependencies): Planner {
       const raw = latestReport(log, REPORT_TOOL_NAMES.plan) ?? extractJsonBlock(log.finalAssistantText ?? "");
       if (typeof raw !== "object" || raw === null) return raw;
       return {
-        ...(raw as Record<string, unknown>),
+        ...applyPersonaTiers(raw as Record<string, unknown>, deps.personaTier),
         schema_version: 1,
         plan_id: input.planId,
         run_id: input.runId,

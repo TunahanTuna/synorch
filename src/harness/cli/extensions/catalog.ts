@@ -214,15 +214,20 @@ export function resolveItems(items: readonly ExtensionItem[], options: ResolveOp
   return statuses.sort((a, b) => (a.item.name < b.item.name ? -1 : a.item.name > b.item.name ? 1 : SOURCE_RANK[a.item.source] - SOURCE_RANK[b.item.source]));
 }
 
+/** A plugin's persistent data directory (`${CLAUDE_PLUGIN_DATA}`): Claude's for a Claude plugin, Synorch's otherwise. */
+export function pluginDataDir(plugin: Pick<PluginEntry, "key" | "origin">, input: { readonly home: string; readonly claudeHome: string | undefined }): string {
+  const safeId = plugin.key.replace(/[^A-Za-z0-9_-]/g, "-");
+  const claudeHome = input.claudeHome ?? pluginsHome(input.home);
+  return plugin.origin === "claude" ? path.join(claudeDirectory(claudeHome, "plugins"), "data", safeId) : path.join(pluginsHome(input.home), "data", safeId);
+}
+
 /** Plugin MCP servers as client definitions (`${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` expanded). */
 export function pluginMcpServers(state: ExtensionState, input: { readonly home: string; readonly env: Readonly<Record<string, string | undefined>>; readonly claudeHome: string | undefined }): { readonly servers: McpServerDefinition[]; readonly problems: string[] } {
   const servers: McpServerDefinition[] = [];
   const problems: string[] = [];
-  const claudeHome = input.claudeHome ?? pluginsHome(input.home);
   for (const plugin of state.plugins) {
     if (!plugin.enabled) continue;
-    const safeId = plugin.key.replace(/[^A-Za-z0-9_-]/g, "-");
-    const data = plugin.origin === "claude" ? path.join(claudeDirectory(claudeHome, "plugins"), "data", safeId) : path.join(pluginsHome(input.home), "data", safeId);
+    const data = pluginDataDir(plugin, input);
     const environment = { ...input.env, CLAUDE_PLUGIN_ROOT: plugin.contents.root, CLAUDE_PLUGIN_DATA: data };
     for (const [name, raw] of Object.entries(plugin.contents.mcpServers)) {
       if (!MCP_SERVER_NAME_PATTERN.test(name)) {

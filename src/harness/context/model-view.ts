@@ -126,6 +126,9 @@ export function renderPacketView(packet: TaskContextPacket): string {
     ...list("Stop conditions", packet.stop_conditions),
     ...inline("Other cited sources", packet.context.sources.map((source) => source.path).filter((path) => !inlined.has(path) && !packet.scope.read_paths.includes(path))),
     ...inline("Inlined below (do not read again)", [...inlined]),
+    ...(packet.persona === undefined
+      ? []
+      : [`Persona ${packet.persona.id} (a plugin agent; follow it within the role, scope and policy above, which it never widens):`, packet.persona.instructions]),
   ];
   return lines.join("\n");
 }

@@ -64,7 +64,8 @@ export const mcpConfigSchema = z.strictObject({
 });
 export type McpConfig = z.infer<typeof mcpConfigSchema>;
 
-export type McpSource = "user" | "project" | "mcp.json";
+/** `plugin`: a plugin the user installed with `syn plugin install`; `claude-plugin`: a plugin enabled in Claude Code (K7). */
+export type McpSource = "user" | "project" | "mcp.json" | "plugin" | "claude-plugin";
 
 /** A server as the client runs it: transport details with `${VAR}` expanded, policy hints resolved. */
 export interface McpServerDefinition {
@@ -192,6 +193,12 @@ export async function readMcpJson(root: string, environment: Readonly<Record<str
   return { servers, problems };
 }
 
+/** One `.mcp.json`-style server entry (unknown keys dropped): the entry, or the reason it is invalid. */
+export function parseMcpServerEntry(value: unknown): { readonly entry: McpServerEntry } | { readonly error: string } {
+  const parsed = mcpServerEntrySchema.safeParse(stripUnknown(value));
+  return parsed.success ? { entry: parsed.data } : { error: parsed.error.issues.map((issue) => issue.message).join("; ") };
+}
+
 /** `.mcp.json` entries written for other clients may carry keys Synorch does not know; they are dropped. */
 function stripUnknown(value: unknown): unknown {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
@@ -199,13 +206,23 @@ function stripUnknown(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => known.has(key)));
 }
 
-/** Every configured server: user entries first (they win a name clash), then project and `.mcp.json`. */
-export function mergeServers(user: McpConfig | undefined, userFile: string, project: McpConfig | undefined, projectFile: string, mcpJson: McpDiscovery, environment: Readonly<Record<string, string | undefined>>, workspaceRoot: string): McpDiscovery {
+/** Every configured server: user entries first (they win a name clash), then plugin servers (K7), project and `.mcp.json`. */
+export function mergeServers(
+  user: McpConfig | undefined,
+  userFile: string,
+  project: McpConfig | undefined,
+  projectFile: string,
+  mcpJson: McpDiscovery,
+  environment: Readonly<Record<string, string | undefined>>,
+  workspaceRoot: string,
+  plugins: readonly McpServerDefinition[] = [],
+): McpDiscovery {
   const byName = new Map<string, McpServerDefinition>();
   const add = (definition: McpServerDefinition): void => {
     if (!byName.has(definition.name)) byName.set(definition.name, definition);
   };
   for (const [name, entry] of Object.entries(user?.servers ?? {})) add(toDefinition(name, entry, "user", userFile, environment, { startup: user?.startup, baseDir: workspaceRoot }));
+  for (const definition of plugins) add(definition);
   for (const [name, entry] of Object.entries(project?.servers ?? {})) add(toDefinition(name, entry, "project", projectFile, environment, { startup: project?.startup, baseDir: workspaceRoot }));
   for (const definition of mcpJson.servers) add(definition);
   return { servers: [...byName.values()], problems: mcpJson.problems };

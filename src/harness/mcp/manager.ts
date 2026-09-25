@@ -49,6 +49,8 @@ export interface McpManagerOptions {
   /** Secret-looking values from expanded env/headers join the gateway's redaction set. */
   readonly addRedaction?: (value: string) => void;
   readonly approvals?: McpApprovalStore;
+  /** K7: servers of enabled plugins (installed by the user or enabled in Claude Code): trusted like user servers. */
+  readonly plugins?: () => readonly McpServerDefinition[];
 }
 
 interface ServerSlot {
@@ -87,7 +89,7 @@ export class McpManager {
   /** Reads `.mcp.json` and resolves every server definition (no process is started). */
   public async load(): Promise<void> {
     const mcpJson = await readMcpJson(this.options.workspaceRoot, this.options.environment);
-    const merged = mergeServers(this.options.user.config, this.options.user.file, this.options.project.config, this.options.project.file, mcpJson, this.options.environment, this.options.workspaceRoot);
+    const merged = mergeServers(this.options.user.config, this.options.user.file, this.options.project.config, this.options.project.file, mcpJson, this.options.environment, this.options.workspaceRoot, this.options.plugins?.() ?? []);
     this.loadProblems = [...merged.problems];
     const next = new Map<string, ServerSlot>();
     for (const definition of merged.servers) {
@@ -208,7 +210,7 @@ export class McpManager {
   /** Approves a project server's current definition for this workspace (user scope) and starts it. */
   public async approve(name: string, start = true): Promise<boolean> {
     const slot = this.slots.get(name);
-    if (slot === undefined || slot.definition.source === "user") return false;
+    if (slot === undefined || slot.definition.source === "user" || slot.definition.source === "plugin" || slot.definition.source === "claude-plugin") return false;
     await this.approvals.approve(this.options.workspaceKey, name, slot.definition.digest);
     if (start && this.usable(slot) && !this.closed) await this.connect(slot).catch(() => undefined);
     return true;
@@ -230,6 +232,8 @@ export class McpManager {
     for (const slot of this.slots.values()) {
       if (!this.usable(slot)) continue;
       const definition = slot.definition;
+      // K7: Claude Code loads the plugins enabled in its own settings itself; passing them again would duplicate them.
+      if (definition.source === "claude-plugin") continue;
       servers[definition.name] =
         definition.transport === "stdio"
           ? { type: "stdio", command: definition.command, args: [...definition.args], env: { ...definition.env } }
@@ -248,7 +252,9 @@ export class McpManager {
   }
 
   private needsApproval(definition: McpServerDefinition): boolean {
-    return definition.source !== "user" && !this.approvals.isApproved(this.options.workspaceKey, definition.name, definition.digest);
+    // A user server, or one from a plugin the user installed or enabled in Claude Code, is the user's own choice.
+    if (definition.source === "user" || definition.source === "plugin" || definition.source === "claude-plugin") return false;
+    return !this.approvals.isApproved(this.options.workspaceKey, definition.name, definition.digest);
   }
 
   private usable(slot: ServerSlot): boolean {

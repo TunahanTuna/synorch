@@ -11,6 +11,7 @@ export {
   mcpServerEntrySchema,
   mergeServers,
   modelToolName,
+  parseMcpServerEntry,
   readMcpJson,
   toDefinition,
   type McpConfig,

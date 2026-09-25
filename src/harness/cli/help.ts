@@ -4,6 +4,7 @@
  */
 
 import { MCP_HELP } from "./mcp-command.ts";
+import { PLUGIN_HELP, SKILLS_HELP } from "./extensions-command.ts";
 
 const COMMON = `Common options:
   -t, --target <path>          Workspace root (default: current directory).
@@ -180,6 +181,8 @@ Keys:
 ${COMMON}
 `,
   mcp: MCP_HELP,
+  skills: SKILLS_HELP,
+  plugin: PLUGIN_HELP,
   memory: `syn memory — project memory
 
 Usage:

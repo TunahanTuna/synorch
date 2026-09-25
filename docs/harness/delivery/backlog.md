@@ -112,7 +112,7 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - Claude'un skill/komut/açık plugin'leri yerinde okunur, tüm sağlayıcılarda kullanılır (`skills.include_claude` / `plugins.include_claude`, varsayılan açık); `~/.claude` altında yalnız skills/commands/plugins + `enabledPlugins` okunur.
 - Bekleyen: gerçek makinede `syn plugin list` doğrulaması; Claude rotasında `--strict-mcp-config` altında Claude plugin MCP'lerinin yüklenip yüklenmediği; plugin `agents/` ve `hooks/` desteği.
 - ✅ UI (`983683a`): mesajlar tam ve sarılı, araç satırı 3 satır + Ctrl+O, "Starting workers" gibi tören satırları kaldırıldı. ✅ Çapraz sağlayıcılı review + `/review` + görev başına efor (`6749755`). ✅ Sadeleştirme: `--legacy` kaldırıldı, `syn run` ince headless sarmalayıcı (`83961a6`).
-### K8 — Karşılama ekranı ve temalar (ürün sahibi isteği, 2026-09-25) ⭐ UX — sürüyor
+### ✅ K8 — Karşılama ekranı ve temalar (ürün sahibi isteği, 2026-09-25) ⭐ UX — yapıldı `32e634a` (8 tema, `/theme` canlı önizleme, `/welcome`, `/setup`; gerçek terminalde deneme bekliyor)
 Ürün sahibi: Claude Code'un açılış ekranı gibi şık bir karşılama; birebir kopya değil, kendi tarzımız; ilk kurulumda özelleştirilebilsin, tema değiştirilebilsin; terminalin kısıtlı alanı iyi kullanılsın.
 - Özgün Synorch logosu + sürüm, model · efor · sağlayıcı, worker ekibi, klasör/dal, izin modu, bağlama göre ipucu satırı; ekran boyutuna göre tam/kompakt/minimal.
 - Semantik renk token'larıyla tema sistemi (6–8 hazır tema + `~/.synorch/themes`), `/theme` canlı önizleme, `/welcome` özelleştirme, ilk açılışta kısa kurulum sihirbazı (`/setup`).

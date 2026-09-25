@@ -82,6 +82,7 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - Çapraz sağlayıcılı review (K1.5 ile birleşir).
 - MCP client (harici araçlar, gateway altında).
 - Zamanda yolculuk: oturumun herhangi bir anından fork.
+- **UI eki — alt durum satırı (ürün sahibi, 2026-09-25):** Hata: `/model` ile model değişince alttaki model/bağlam bilgisi güncellenmiyor. Durum satırı canlı state'ten beslenmeli: model, efor (K6), izin modu, bağlam %, kota; her değişiklikte (`/model`, `/effort`, Shift+Tab, compact) anında yenilenmeli. Görünüm daha okunur ve renkli olmalı: alanlar ayrı renk/ton, bağlam ve kota eşiklere göre renk (yeşil → sarı → kırmızı), dar terminalde öncelik sırasıyla kısalma.
 
 ### K4 — Yetenekler: internet ve araç seti (ürün sahibi isteği, 2026-09-24) ⭐
 Ürün sahibi harness'la konuşurken internete çıkamadığını ve bazı yeteneklerin eksik olduğunu fark etti: "yetenekli bir aracımız olsun". Önce araştırma + bağlam, sonra uygulama.

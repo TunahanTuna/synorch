@@ -3,9 +3,10 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
-import { sha256 } from "../src/harness/contracts/index.ts";
+import { deriveProjectId, sha256 } from "../src/harness/contracts/index.ts";
 import { runHarnessCommand } from "../src/harness/cli/index.ts";
 import { createScriptedAdapter } from "../src/harness/providers/index.ts";
+import { createSessionStore } from "../src/harness/store/index.ts";
 import {
   call,
   calls,
@@ -24,8 +25,9 @@ import {
 } from "./fixtures/cli/runtime/support.ts";
 
 /**
- * Verification level 3, "user correction while running": in a terminal `syn agent` session a line
- * typed during a run is queued as steering, applied at the next safe boundary (before the next
+ * Verification level 3, "user correction while running": in a terminal `syn agent` conversation
+ * whose agent runs workers in the foreground (`orchestrate {wait: true}`), a line typed during the
+ * run is queued as steering for the coordinator, applied at the next safe boundary (before the next
  * dispatch, never inside a running attempt), the orchestrator is consulted (`task_status`,
  * `task_spawn`), and the plan is re-versioned: the old plan is superseded only once the revision is
  * approved, and the tasks that start afterwards receive the steering in their packets.
@@ -64,11 +66,16 @@ test("steering typed during a run is applied at a safe boundary through a re-ver
   await trustWorkspace(sandbox);
   try {
     await writeConfig(sandbox.home, [
+      { tier: "session" as never, adapter: "chat-script", model: "chat" },
       { tier: "orchestrator", adapter: "plan-script", model: "planner" },
       { tier: "complex_worker", adapter: "worker-script", model: "worker" },
       { tier: "fast_worker", adapter: "worker-script", model: "worker" },
     ]);
     const input = new TypedInput();
+    const chat = createScriptedAdapter(
+      [call("orchestrate", () => ({ goal: "Edit a then b", reason: "Two dependent edits.", wait: true })), text("Workers finished both edits.")],
+      { adapterId: "chat-script" },
+    );
     const consultSaw: string[] = [];
     const orchestrator = createScriptedAdapter(
       [
@@ -121,18 +128,21 @@ test("steering typed during a run is applied at a safe boundary through a re-ver
     );
 
     const io = capture({ cwd: sandbox.workspace, stdin: input, stdinIsTTY: true });
-    const session = runHarnessCommand(["agent", "--legacy", "--plain"], io.io, overridesFor(sandbox, { adapters: [orchestrator, worker] }));
+    const session = runHarnessCommand(["agent", "--plain"], io.io, overridesFor(sandbox, { adapters: [chat, orchestrator, worker] }));
     input.send("Edit a then b\n");
-    await waitFor(io.stdout, /Run run_\S+ (succeeded|failed) \(exit \d+\)/, 60_000);
+    await waitFor(io.stdout, /synorch: Workers finished both edits\./, 60_000);
     input.send("/exit\n");
     const code = await session;
     assert.equal(code, 0, `${io.stdout()}\n${io.stderr()}`);
-    assert.match(io.stdout(), /queued as steering for the next safe boundary/);
-    assert.match(io.stdout(), /Run run_\S+ succeeded \(exit 0\)/);
+    assert.match(io.stdout(), /steering the workers: use tabs, not spaces/);
 
-    const sessionId = /Session saved: (ses_\S+)/.exec(io.stderr())?.[1];
-    assert.ok(sessionId !== undefined, io.stderr());
-    const log = await readSession(sandbox.home, sessionId);
+    // The run lives in its own session (ADR-21): the one that holds the plans.
+    const summaries = await createSessionStore(sandbox.home).list(deriveProjectId(sandbox.workspace, process.platform));
+    let log: Awaited<ReturnType<typeof readSession>> = [];
+    for (const summary of summaries) {
+      const events = await readSession(sandbox.home, summary.manifest.session_id);
+      if (eventsOf(events, "plan/proposed").length > 0) log = events;
+    }
     assert.deepEqual(projectionIssues(log), [], "the re-versioned plan replays cleanly");
     assert.equal(eventsOf(log, "steer/queued")[0]?.data.text, "use tabs, not spaces");
     const plans = eventsOf(log, "plan/proposed").map((event) => event.data.plan);

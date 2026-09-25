@@ -114,7 +114,7 @@ test("a session held by another writer exits 8 and names the fork command (AC-3)
     });
     try {
       const agent = capture({ cwd: sandbox.workspace });
-      const code = await runHarnessCommand(["agent", "--legacy", "--resume", held.sessionId, "--plain"], agent.io, overridesFor(sandbox, { adapters: [planner(), createScriptedAdapter([text("unused")], { adapterId: "worker-script" })] }));
+      const code = await runHarnessCommand(["agent", "--resume", held.sessionId, "--plain"], agent.io, overridesFor(sandbox, { adapters: [planner(), createScriptedAdapter([text("unused")], { adapterId: "worker-script" })] }));
       assert.equal(code, 8, agent.stderr());
       assert.match(agent.stderr(), /Error \[session_locked\]/);
       assert.match(agent.stderr(), new RegExp(`next: syn agent --fork ${held.sessionId}`));

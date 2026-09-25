@@ -74,7 +74,6 @@ test("every contract command and flag parses into a typed invocation", () => {
     resume: undefined,
     fork: undefined,
     continue: false,
-    legacy: false,
     debug: false,
   });
   const agent = parseHarnessArgs(["agent", "--fork", `${SES}@12`, "--policy", "ask", "--profile", "complex_worker=openai/gpt-5.5", "--profile", "fast_worker=anthropic/haiku", "-t", "repo", "--plain", "--color", "never"]);
@@ -103,6 +102,8 @@ test("every contract command and flag parses into a typed invocation", () => {
   assert.ok(alias.kind === "run" && alias.jsonl);
   const stdin = parseHarnessArgs(["run", "-"]);
   assert.ok(stdin.kind === "run" && stdin.goalFromStdin);
+  assert.equal(parseHarnessArgs(["run", "--orchestrate", "x"]).kind, "run");
+  assert.throws(() => parseHarnessArgs(["agent", "--legacy"]), /Unknown option --legacy/);
 
   assert.deepEqual(parseHarnessArgs(["runs", "--json"]), { kind: "runs", common: { target: undefined, plain: false, color: "auto" }, json: true });
   const show = parseHarnessArgs(["show", RUN, "--json"]);

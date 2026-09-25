@@ -48,7 +48,6 @@ Conversation:
   -c, --continue      Reopen the most recent conversation of this workspace.
   --resume <session>  Reopen a saved conversation.
   --debug             Show the raw event lines under the conversation (also SYN_DEBUG=1).
-  --legacy            The previous orchestrated session (every message is a worker run).
 
 ${SESSION}
 
@@ -56,17 +55,19 @@ ${COMMON}
 
 ${KEYS} Ctrl+O shows tool details.
 
-In-session commands: /undo /allow <command> /trust /plan <goal> /diff /context /permissions
-/model /log /cancel /help /exit (with --legacy: /plan /tasks /context /permissions /model /diff
-/evidence /cancel /memory /help /exit)
+In-session commands: /help lists them all (/plan /workers /undo /diff /model /permissions ...).
 
 ${EXIT_CODES}
 `,
-  run: `syn run — run one goal to completion
+  run: `syn run — run one goal to completion with workers (headless entry point)
 
 Usage:
   syn run "<goal>" [--mode jsonl | --json] [--stream-deltas] [--trust-workspace] [options]
   syn run - [options]            Read the goal from stdin.
+
+  The goal goes straight to worker orchestration (plan, workers, independent review), the
+  same core the conversation's workers use; for a conversation use syn agent. --orchestrate
+  states this explicitly and is accepted for scripts.
 
 Output:
   A terminal gets the interactive view; pipes, CI and --plain get append-only lines.

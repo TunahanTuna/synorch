@@ -56,7 +56,6 @@ export interface RendererRequest {
   readonly wantsInput: boolean;
   /** A human can answer prompts (stdin is a TTY). */
   readonly interactive: boolean;
-  readonly fallbackSessionId: SessionId | undefined;
   readonly onInterrupt: () => void;
   readonly onExit: () => void;
   /** `conversation`: the quiet conversation view of `syn agent` (ADR-21). */
@@ -138,7 +137,7 @@ export class DeferredJsonlRenderer implements SessionRenderer {
   }
 
   private ensure(): JsonlRenderer {
-    return this.inner ?? this.open(createId("run"), this.request.fallbackSessionId ?? createId("session"));
+    return this.inner ?? this.open(createId("run"), createId("session"));
   }
 
   public async result(data: ResultData): Promise<void> {

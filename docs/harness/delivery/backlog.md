@@ -107,9 +107,9 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - **Orkestrasyon:** worker'lar rolünün eforunu kullanır; orchestrator görev başına efor önerebilir (trivial → düşük, zor hata ayıklama → yüksek). Kullanıcı ayarı her zaman önceliklidir.
 
 ### Sadeleştirme (K1.5–K3 boyunca)
-- Eski toplu yol: `syn agent --legacy` ve batch `syn run` → yeni çekirdeğe katla; orkestrasyonu `--orchestrate` ile tut.
-- Explorer yalnız orkestrasyonda (session ajanı keşfi kendisi yapar).
-- scoped-dir izolasyonunu basitleştir veya git olmayan klasörde orkestrasyonu kapat.
+- ✅ Eski toplu yol: `syn agent --legacy` kaldırıldı (agent e2e'leri konuşma yoluna taşındı; crash-recovery özeti konuşmanın resume kartında). `syn run` headless giriş noktası olarak kaldı: aynı coordinator çekirdeğini süren ince sarmalayıcı, JSONL sözleşmesi aynı; `--orchestrate` açık yazım olarak kabul edilir.
+- ✅ Explorer yalnız orkestrasyonda: session yolunda explorer alt-run'ı yok (yalnız planner planlar); session ajanı keşfi kendisi yapar.
+- ✅ scoped-dir: olduğu gibi kaldı (git'siz klasör, commit'siz depo, worktree hatası için test edilmiş yedek; crash recovery buna dayanır). Git'siz klasörde ilk worker run'ı tek satırla `git init` önerir. Orkestrasyonu kapatmak e2e'lerin çoğunu git'e çevirmeyi ve git'siz kullanıcıyı worker'sız bırakmayı gerektirirdi.
 - Tören satırlarını (audit) ekrandan kaldır, yalnız log'da tut.
 
 ### Altyapı / sonra

@@ -20,6 +20,9 @@ export interface ToolRowPaint {
   running(text: string): string;
   dim(text: string): string;
   bold(text: string): string;
+  /** Diff lines (K8 theme tokens); default to ok / fail. */
+  add?(text: string): string;
+  remove?(text: string): string;
 }
 
 type ToolItem = Extract<ConversationItem, { kind: "tool" }>;
@@ -121,7 +124,7 @@ export function renderToolRow(item: ToolItem, options: ToolRowOptions): string[]
     if (full) {
       const mark = line.op === "+" ? "+ " : line.op === "-" ? `${g.minus} ` : line.op === "…" ? `${g.ellipsis} ` : "  ";
       const slot = `    ${" ".repeat(measure(mark))}`;
-      const tone = line.op === "+" ? paint.ok : line.op === "-" ? paint.fail : paint.dim;
+      const tone = line.op === "+" ? (paint.add ?? paint.ok) : line.op === "-" ? (paint.remove ?? paint.fail) : paint.dim;
       wrapHanging(slot, line.text, width, { wrapText: options.wrapText }).forEach((piece, index) => {
         const text = piece.slice(slot.length);
         lines.push(index === 0 ? `    ${diffLine({ op: line.op, text }, g, paint)}` : `${slot}${tone(text)}`);
@@ -133,8 +136,8 @@ export function renderToolRow(item: ToolItem, options: ToolRowOptions): string[]
 }
 
 export function diffLine(line: DiffLine, glyphs: GlyphSet, paint: ToolRowPaint): string {
-  if (line.op === "+") return paint.ok(`+ ${line.text}`);
-  if (line.op === "-") return paint.fail(`${glyphs.minus} ${line.text}`);
+  if (line.op === "+") return (paint.add ?? paint.ok)(`+ ${line.text}`);
+  if (line.op === "-") return (paint.remove ?? paint.fail)(`${glyphs.minus} ${line.text}`);
   if (line.op === "…") return paint.dim(`${glyphs.ellipsis} ${line.text}`);
   return paint.dim(`  ${line.text}`);
 }

@@ -23,6 +23,7 @@ import {
   type Terminal,
 } from "@earendil-works/pi-tui";
 import type {
+  AppearanceControls,
   ApprovalBroker,
   ApprovalDecision,
   ApprovalRequest,
@@ -42,12 +43,14 @@ import type {
   RenderEvent,
   SessionEvent,
   SessionHeaderView,
+  SessionWelcomeView,
   StatusLine,
   TerminalRenderer,
   UserInputSource,
+  WelcomePreferences,
 } from "../contracts/index.ts";
 import { choiceAnswerText, nextPermissionMode, WORKSPACE_TRUST_CHOICES } from "../contracts/index.ts";
-import { ChoiceModal } from "./choice-modal.ts";
+import { ChoiceModal, type ChoiceModalOptions } from "./choice-modal.ts";
 import { actionChoices, actionTitle, withApprovalDeadline, type ApprovalAnswer, type ApprovalChoice } from "./approvals.ts";
 import {
   activityText,
@@ -66,7 +69,19 @@ import { openBrowser, type BrowserEnvironment, type BrowserLauncher } from "./op
 import { chunkForConPty } from "./output-chunks.ts";
 import { RenderQueue } from "./render-queue.ts";
 import { sanitizeInline, sanitizeTerminalText } from "./sanitize.ts";
-import { createStyler, type Styler } from "./style.ts";
+import { createStyler, type Styler, type ThemedStyler } from "./style.ts";
+import { BUILTIN_THEMES, type ColorDepth, type ThemeDefinition } from "./theme.ts";
+import {
+  FULL_MIN_ROWS,
+  logoLines,
+  MINIMAL_WELCOME,
+  renderWelcome,
+  themePreview,
+  WELCOME_FIELDS,
+  type WelcomeField,
+  type WelcomeInfo,
+  type WelcomeSettings,
+} from "./welcome.ts";
 import {
   ConsoleCodepageGuard,
   EMERGENCY_RESTORE_SEQUENCE,
@@ -155,6 +170,13 @@ export interface PiTuiRendererOptions {
   readonly readClipboardImage?: () => Promise<ClipboardImage | undefined>;
   /** Clipboard text reader used when Ctrl+V reaches the app instead of the terminal pasting. */
   readonly readClipboardText?: () => Promise<string | undefined>;
+  /** K8: the theme to paint with (default: the 16-colour ANSI mapping) and the colour depth it is resolved at. */
+  readonly theme?: ThemeDefinition;
+  readonly colorDepth?: ColorDepth;
+  /** K8: every theme `/theme` offers (default: the built-ins). */
+  readonly themes?: readonly ThemeDefinition[];
+  /** K8: the welcome header (conversation view). Default: the one-line title of before K8. */
+  readonly welcome?: WelcomeSettings;
 }
 
 /** Wraps a pi-tui terminal so that no single write exceeds the ConPTY-safe size. */
@@ -524,7 +546,7 @@ class UserMessageView implements Component {
   public invalidate(): void {}
 
   public render(width: number): string[] {
-    const lines = wrapHanging("> ", this.text.trimEnd(), width, { wrapText }).map((line) => this.style.bold(line));
+    const lines = wrapHanging("> ", this.text.trimEnd(), width, { wrapText }).map((line) => this.style.user(line));
     if (lines.length <= USER_COLLAPSE_LINES || this.expanded()) return ["", ...lines];
     const hidden = lines.length - USER_COLLAPSED_SHOWN;
     return ["", ...lines.slice(0, USER_COLLAPSED_SHOWN), this.style.dim(`  ${this.glyphs.ellipsis} [+${hidden} lines] ctrl+o shows all`)];
@@ -576,7 +598,7 @@ class AssistantMessageView implements Component {
 }
 
 function toolPaint(style: Styler): ToolRowPaint {
-  return { ok: style.green, fail: style.red, warn: style.yellow, running: style.cyan, dim: style.dim, bold: style.bold };
+  return { ok: style.success, fail: style.danger, warn: style.warning, running: style.accent, dim: style.muted, bold: style.tool, add: style.diffAdd, remove: style.diffRemove };
 }
 
 /** `✓ Verb target  stat` (+ `⎿ reason` on trouble) + an edit diff of at most 8 lines (Ctrl+O shows the detail). */
@@ -675,6 +697,28 @@ class ActivityLineView implements Component {
   }
 }
 
+/**
+ * K8 welcome header: laid out for the current width (and terminal height) at render time, so a
+ * theme or style change repaints it. It is the first child of the main screen and scrolls away.
+ */
+class WelcomeView implements Component {
+  public info: WelcomeInfo;
+  public settings: WelcomeSettings;
+  private readonly frame: () => { readonly rows: number; readonly glyphs: GlyphSet; readonly style: Styler };
+
+  public constructor(info: WelcomeInfo, settings: WelcomeSettings, frame: () => { readonly rows: number; readonly glyphs: GlyphSet; readonly style: Styler }) {
+    this.info = info;
+    this.settings = settings;
+    this.frame = frame;
+  }
+
+  public invalidate(): void {}
+
+  public render(width: number): string[] {
+    return renderWelcome(this.info, this.settings, { width, ...this.frame() });
+  }
+}
+
 /** A footer field: its painted text and when it gives way on a narrow screen (0 never; lower goes first). */
 export interface FooterPart {
   readonly text: string;
@@ -699,7 +743,7 @@ export function statusLineParts(
   const style = extra.style;
   const parts: FooterPart[] = [
     { text: style.dim(extra.folder), drop: 3 },
-    { text: extra.branch === undefined ? "" : style.dim(style.magenta(extra.branch)), drop: 2 },
+    { text: extra.branch === undefined ? "" : style.secondary(extra.branch), drop: 2 },
     { text: footer.model === undefined ? "" : style.bold(style.cyan(footer.model)), drop: 6 },
     { text: footer.model === undefined || footer.effort === undefined ? "" : style.magenta(footer.effort), drop: 5 },
   ];
@@ -819,7 +863,11 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   public readonly approvals: ApprovalBroker;
   public readonly auth: AuthInteraction;
   private readonly options: PiTuiRendererOptions;
-  private readonly style: Styler;
+  private readonly style: ThemedStyler;
+  /** K8: the themes `/theme` offers and the welcome header (conversation view). */
+  private readonly themes: readonly ThemeDefinition[];
+  private welcomeSettings: WelcomeSettings;
+  private welcomeView: WelcomeView | undefined;
   private readonly clock: () => Date;
   private readonly now: () => number;
   private readonly terminal: ChunkedTerminal;
@@ -902,7 +950,9 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
 
   public constructor(options: PiTuiRendererOptions) {
     this.options = options;
-    this.style = createStyler(options.color);
+    this.style = createStyler(options.color, { theme: options.theme, depth: options.colorDepth });
+    this.themes = options.themes ?? BUILTIN_THEMES;
+    this.welcomeSettings = options.welcome ?? MINIMAL_WELCOME;
     this.clock = options.clock ?? (() => new Date());
     this.now = options.now ?? (() => Date.now());
     this.terminal = new ChunkedTerminal(options.terminal ?? new ProcessTerminal());
@@ -911,23 +961,23 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     this.status = new StatusBar(this.style);
     const style = this.style;
     this.selectTheme = {
-      selectedPrefix: (text) => style.cyan(text),
+      selectedPrefix: (text) => style.accent(text),
       selectedText: (text) => style.bold(text),
-      description: (text) => style.dim(text),
-      scrollInfo: (text) => style.dim(text),
-      noMatch: (text) => style.dim(text),
+      description: (text) => style.muted(text),
+      scrollInfo: (text) => style.muted(text),
+      noMatch: (text) => style.muted(text),
     };
     this.markdownTheme = {
-      heading: (text) => style.bold(style.cyan(text)),
-      link: (text) => style.cyan(text),
-      linkUrl: (text) => style.dim(text),
-      code: (text) => style.yellow(text),
+      heading: (text) => style.bold(style.heading(text)),
+      link: (text) => style.link(text),
+      linkUrl: (text) => style.muted(text),
+      code: (text) => style.code(text),
       codeBlock: (text) => text,
-      codeBlockBorder: (text) => style.dim(text),
-      quote: (text) => style.dim(text),
-      quoteBorder: (text) => style.dim(text),
-      hr: (text) => style.dim(text),
-      listBullet: (text) => style.cyan(text),
+      codeBlockBorder: (text) => style.border(text),
+      quote: (text) => style.muted(text),
+      quoteBorder: (text) => style.border(text),
+      hr: (text) => style.border(text),
+      listBullet: (text) => style.accent(text),
       bold: (text) => style.bold(text),
       italic: (text) => text,
       strikethrough: (text) => text,
@@ -937,8 +987,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       options.view === "conversation"
         ? new ConversationPresenter({ glyphs: options.glyphs ?? GLYPH_SETS.rich, echoesUser: true, debug: options.debug === true, now: () => this.now() })
         : undefined;
-    this.editor = new ChatEditor(this.tui, { borderColor: (text) => style.dim(text), selectList: this.selectTheme });
-    this.editor.placeholderStyle = (text) => style.dim(text);
+    this.editor = new ChatEditor(this.tui, { borderColor: (text) => style.border(text), selectList: this.selectTheme });
+    this.editor.placeholderStyle = (text) => style.muted(text);
     this.editorSlot = new EditorSlot(this.editor);
     this.editor.onSubmit = (text) => this.submit(text);
     this.completions = new InputCompletionProvider(mergeCommands(DEFAULT_COMMAND_PALETTE), options.fileIndex);
@@ -984,6 +1034,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         this.tui.requestRender();
       },
       inputActivity: () => ({ lastKeyAtMs: this.lastKeyAtMs, draft: this.editor.getText().trim().length > 0 }),
+      ...(options.view === "conversation" ? { appearance: this.appearanceControls() } : {}),
     };
     this.queue = new RenderQueue((event) => this.consume(event), {
       ...(options.queueCapacity === undefined ? {} : { capacity: options.queueCapacity }),
@@ -1086,17 +1137,32 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       warnings: header.notices,
       glyphs: presenter.glyphs,
     });
-    // The header is the first line of the main screen and is never redrawn (a change above the
-    // viewport forces a full repaint), so it holds only what cannot change: product and folder.
-    // Model and permission mode live in the footer, which updates in place.
+    // K8 welcome: the first lines of the main screen. They scroll away with the transcript; a change
+    // above the viewport forces a full repaint, so only explicit actions (/theme, /welcome) change
+    // them. Live facts (model, effort, permission mode) are the footer's, which updates in place.
     const g = presenter.glyphs;
-    const title = `${this.style.bold(this.style.cyan("Synorch"))}${header.version === undefined || header.version === "" ? "" : this.style.dim(` ${header.version}`)} ${this.style.dim(g.sep)} ${this.style.bold(folder)}${header.gitBranch === undefined ? "" : this.style.dim(` (${header.gitBranch})`)}`;
-    this.header.setText([title, ...(warning === undefined ? [] : [this.style.yellow(warning)])].join("\n"));
-    this.editor.prompt = (text) => this.style.bold(this.style.cyan(text));
+    const welcome = header.welcome;
+    const info: WelcomeInfo = {
+      version: header.version ?? "",
+      commit: welcome?.commit,
+      model: header.model,
+      effort: welcome?.effort,
+      contextWindowTokens: header.contextWindowTokens,
+      plan: welcome?.plan,
+      workers: welcome?.workers,
+      folder,
+      path: welcome?.path,
+      branch: header.gitBranch,
+      mode: header.permissionMode ?? (header.policyMode === "ask" ? "ask" : undefined),
+      hint: welcome?.hint,
+      warning,
+    };
+    this.welcomeView = new WelcomeView(info, this.welcomeSettings, () => ({ rows: this.terminal.rows, glyphs: presenter.glyphs, style: this.style }));
+    this.editor.prompt = (text) => this.style.bold(this.style.accent(text));
     this.editor.ascii = g.name === "ascii";
     this.editor.sep = g.sep;
     this.editor.placeholder = MAIN_PLACEHOLDER;
-    this.tui.addChild(this.header);
+    this.tui.addChild(this.welcomeView ?? this.header);
     this.tui.addChild(this.viewport);
     this.tui.addChild(this.boardSlot);
     this.tui.addChild(new ActivityLineView(presenter, this.style, () => this.now()));
@@ -1594,6 +1660,257 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     return action;
   }
 
+  // ---- K8 appearance: themes and the welcome header -------------------------------------------
+
+  private appearanceControls(): AppearanceControls {
+    const self = this;
+    return {
+      get themes() {
+        return self.themes.map((theme) => ({ name: theme.name, description: theme.description, custom: theme.custom === true }));
+      },
+      get theme() {
+        return self.style.themeName;
+      },
+      get welcome() {
+        return welcomePreferences(self.welcomeSettings);
+      },
+      pickTheme: (signal, step) => this.pickTheme(signal, step),
+      pickWelcome: (signal) => this.pickWelcome(signal),
+      pickWelcomeStyle: async (signal, step) => {
+        const style = await this.chooseWelcomeStyle(this.welcomeSettings, signal, step);
+        if (style !== undefined) this.applyWelcome({ ...this.welcomeSettings, style });
+        return style;
+      },
+      pickGlyphs: (signal, step) => this.pickGlyphs(signal, step),
+      setTheme: (name) => this.applyTheme(name),
+      setWelcome: (preferences) => this.applyWelcome({ ...this.welcomeSettings, ...preferences }),
+      updateWelcome: (patch) => this.patchWelcome(patch),
+    };
+  }
+
+  /** Repaints everything after a theme or welcome change (cached Markdown included). */
+  private repaintAll(): void {
+    if (!this.started || this.stopped) return;
+    this.tui.invalidate();
+    this.tui.requestRender(true);
+  }
+
+  private applyTheme(name: string): boolean {
+    const theme = this.themes.find((candidate) => candidate.name === name);
+    if (theme === undefined) return false;
+    this.style.setTheme(theme);
+    this.repaintAll();
+    return true;
+  }
+
+  private applyWelcome(settings: WelcomeSettings): void {
+    this.welcomeSettings = settings;
+    if (this.welcomeView !== undefined) this.welcomeView.settings = settings;
+    this.repaintAll();
+  }
+
+  private patchWelcome(patch: SessionWelcomeView): void {
+    const view = this.welcomeView;
+    if (view === undefined || this.stopped) return;
+    view.info = {
+      ...view.info,
+      ...(patch.commit === undefined ? {} : { commit: patch.commit }),
+      ...(patch.effort === undefined ? {} : { effort: patch.effort }),
+      ...(patch.plan === undefined ? {} : { plan: patch.plan }),
+      ...(patch.workers === undefined ? {} : { workers: patch.workers }),
+      ...(patch.path === undefined ? {} : { path: patch.path }),
+      ...(patch.hint === undefined ? {} : { hint: patch.hint }),
+    };
+    if (this.started) this.tui.requestRender();
+  }
+
+  /** Option rows that fit next to a preview of `previewLines` lines (question, hint and frame included). */
+  private listRows(previewLines: number): number {
+    return Math.max(3, Math.min(10, this.terminal.rows - previewLines - 8));
+  }
+
+  private pickerGlyphs(): GlyphSet {
+    return this.presenter?.glyphs ?? this.options.glyphs ?? GLYPH_SETS.rich;
+  }
+
+  /** `/theme` and the setup wizard: the highlighted theme previews live; Enter applies it, Esc changes nothing. */
+  private async pickTheme(signal?: AbortSignal, step?: string): Promise<string | undefined> {
+    const themes = this.themes;
+    const current = Math.max(0, themes.findIndex((theme) => theme.name === this.style.themeName));
+    const glyphs = this.pickerGlyphs();
+    const stylers = new Map<number, Styler>();
+    const styler = (index: number): Styler => {
+      const cached = stylers.get(index);
+      if (cached !== undefined) return cached;
+      const created = createStyler(this.style.enabled, { theme: themes[index], depth: this.style.depth });
+      stylers.set(index, created);
+      return created;
+    };
+    const off = this.style.enabled ? "" : `colour is off (NO_COLOR or --color never): the theme applies once colour is on ${glyphs.sep} `;
+    const answer = await this.chooseQuestion(
+      {
+        question: "Pick a theme",
+        ...(step === undefined ? {} : { header: step }),
+        subtitle: `${off}↑↓ previews ${glyphs.sep} Enter applies and saves ${glyphs.sep} Esc keeps ${themes[current]?.name ?? "the current one"}`,
+        options: themes.map((theme) => ({ label: theme.name, description: `${theme.description}${theme.custom === true ? " (yours)" : ""}` })),
+        allowOther: false,
+        tone: "neutral",
+        initialIndex: current,
+        escapeLabel: step === undefined ? "keeps the current theme" : "skips setup",
+      },
+      signal,
+      { livePreview: (selected, _checked, width) => themePreview(styler(selected), glyphs, width), maxVisible: this.listRows(8) },
+    );
+    if (answer?.kind !== "selected") return undefined;
+    const name = themes[answer.indices[0] ?? -1]?.name;
+    if (name === undefined) return undefined;
+    this.applyTheme(name);
+    return name;
+  }
+
+  private welcomeInfo(): WelcomeInfo {
+    return { ...(this.welcomeView?.info ?? { version: "", folder: this.footerLabel.folder }), warning: undefined };
+  }
+
+  /** The welcome as it would look with `settings` (full shown whenever the width allows). */
+  private welcomePreview(settings: WelcomeSettings, width: number): string[] {
+    const lines = renderWelcome(this.welcomeInfo(), settings, { width, rows: Math.max(this.terminal.rows, FULL_MIN_ROWS), glyphs: this.pickerGlyphs(), style: this.style });
+    return lines.length === 0 ? [this.style.muted("(no welcome header; warnings still show)")] : lines;
+  }
+
+  private async chooseWelcomeStyle(base: WelcomeSettings, signal?: AbortSignal, step?: string, escapeLabel?: string): Promise<WelcomeSettings["style"] | undefined> {
+    const styles = ["full", "compact", "minimal", "off"] as const;
+    const meaning: Readonly<Record<(typeof styles)[number], string>> = {
+      full: "the mark, version, model, team, folder and a tip (compact on small screens)",
+      compact: "one info line and a tip",
+      minimal: "one line: Synorch, version and folder",
+      off: "no header (warnings still show)",
+    };
+    const answer = await this.chooseQuestion(
+      {
+        question: "Welcome screen",
+        ...(step === undefined ? {} : { header: step }),
+        options: styles.map((style) => ({ label: style, description: meaning[style] })),
+        allowOther: false,
+        tone: "neutral",
+        initialIndex: Math.max(0, styles.indexOf(base.style)),
+        escapeLabel: escapeLabel ?? (step === undefined ? "cancels" : "skips setup"),
+      },
+      signal,
+      { livePreview: (selected, _checked, width) => this.welcomePreview({ ...base, style: styles[selected] ?? base.style }, width), maxVisible: 4 },
+    );
+    return answer?.kind === "selected" ? styles[answer.indices[0] ?? -1] : undefined;
+  }
+
+  /** `/welcome`: style, logo, fields and tips with a live preview; applied after the last step, nothing on Esc. */
+  private async pickWelcome(signal?: AbortSignal): Promise<WelcomePreferences | undefined> {
+    const style = await this.chooseWelcomeStyle(this.welcomeSettings, signal, "1/4", "cancels");
+    if (style === undefined) return undefined;
+    let draft: WelcomeSettings = { ...this.welcomeSettings, style };
+    if (style === "full" || style === "compact") {
+      const logos = ["on", "off", "custom"] as const;
+      const hasCustom = draft.customLogo !== undefined && draft.customLogo.length > 0;
+      const logo = await this.chooseQuestion(
+        {
+          question: "Logo",
+          header: "2/4",
+          options: [
+            { label: "on", description: "the Synorch mark: a conductor, three workers, one outcome" },
+            { label: "off", description: "text only" },
+            { label: "custom", description: "your text art from ~/.synorch/logo.txt (up to 6 rows × 32 columns)", ...(hasCustom ? {} : { disabled: "create ~/.synorch/logo.txt first" }) },
+          ],
+          allowOther: false,
+          tone: "neutral",
+          initialIndex: Math.max(0, logos.indexOf(draft.logo === "custom" && !hasCustom ? "on" : draft.logo)),
+        },
+        signal,
+        { livePreview: (selected, _checked, width) => this.welcomePreview({ ...draft, logo: logos[selected] ?? "on" }, width), maxVisible: 3 },
+      );
+      if (logo?.kind !== "selected") return undefined;
+      draft = { ...draft, logo: logos[logo.indices[0] ?? 0] ?? "on" };
+      const labels: Readonly<Record<WelcomeField, string>> = {
+        version: "version and build",
+        model: "model, effort and context window",
+        plan: "provider and plan",
+        workers: "worker models (when they differ)",
+        folder: "folder and git branch",
+        mode: "permission mode",
+      };
+      const fieldsFrom = (indices: readonly number[]): WelcomeField[] => indices.map((index) => WELCOME_FIELDS[index]).filter((field): field is WelcomeField => field !== undefined);
+      const fields = await this.chooseQuestion(
+        {
+          question: "Show",
+          header: "3/4",
+          options: WELCOME_FIELDS.map((field) => ({ label: labels[field] })),
+          multiSelect: true,
+          initialChecked: WELCOME_FIELDS.flatMap((field, index) => (draft.fields.includes(field) ? [index] : [])),
+          allowOther: false,
+          tone: "neutral",
+        },
+        signal,
+        { livePreview: (_selected, checked, width) => this.welcomePreview({ ...draft, fields: fieldsFrom(checked) }, width), maxVisible: WELCOME_FIELDS.length },
+      );
+      if (fields?.kind !== "selected") return undefined;
+      draft = { ...draft, fields: fieldsFrom(fields.indices) };
+      const tips = await this.chooseQuestion(
+        {
+          question: "Tip line",
+          header: "4/4",
+          options: [
+            { label: "on", description: "one useful hint: resume a conversation, a shortcut, a command" },
+            { label: "off", description: "no hint" },
+          ],
+          allowOther: false,
+          tone: "neutral",
+          initialIndex: draft.tips ? 0 : 1,
+        },
+        signal,
+        { livePreview: (selected, _checked, width) => this.welcomePreview({ ...draft, tips: selected === 0 }, width), maxVisible: 2 },
+      );
+      if (tips?.kind !== "selected") return undefined;
+      draft = { ...draft, tips: tips.indices[0] === 0 };
+    }
+    this.applyWelcome(draft);
+    return welcomePreferences(draft);
+  }
+
+  /** Glyph set with the mark and a tool row drawn in each; the session saves it (applies from the next session). */
+  private async pickGlyphs(signal?: AbortSignal, step?: string): Promise<"rich" | "safe" | "ascii" | undefined> {
+    const sets = ["rich", "safe", "ascii"] as const;
+    const meaning: Readonly<Record<(typeof sets)[number], string>> = {
+      rich: "Unicode: Windows Terminal, VS Code, macOS and Linux terminals",
+      safe: "classic Windows console fonts (no braille, square corners)",
+      ascii: "plain 7-bit characters, works everywhere",
+    };
+    const current = Math.max(0, sets.indexOf(this.pickerGlyphs().name));
+    const answer = await this.chooseQuestion(
+      {
+        question: "Symbols",
+        ...(step === undefined ? {} : { header: step }),
+        subtitle: "pick the row that looks right in your terminal (boxes or ? mean the font lacks them)",
+        options: sets.map((set) => ({ label: set, description: meaning[set] })),
+        allowOther: false,
+        tone: "neutral",
+        initialIndex: current,
+        escapeLabel: step === undefined ? "cancels" : "skips setup",
+      },
+      signal,
+      {
+        livePreview: (selected, _checked, width) => {
+          const glyphs = GLYPH_SETS[sets[selected] ?? "rich"];
+          const logo = logoLines({ glyphs, style: this.style });
+          const sample = [
+            `${this.style.success(glyphs.ok)} ${this.style.tool("Edit src/app.ts")}  ${this.style.muted(`+2 ${glyphs.minus}1`)}`,
+            `  ${this.style.muted(glyphs.result)} ${this.style.danger(`${glyphs.fail} 1 failed`)} ${this.style.muted(glyphs.sep)} ${this.style.accent(`${glyphs.spinner.slice(0, 4).join("")} working${glyphs.ellipsis}`)}`,
+          ];
+          return logo.lines.map((line, index) => fit(`${line}${" ".repeat(Math.max(0, logo.width - visibleWidth(line)) + 3)}${index === 1 ? (sample[0] ?? "") : index === 2 ? (sample[1] ?? "") : ""}`, width));
+        },
+        maxVisible: 3,
+      },
+    );
+    return answer?.kind === "selected" ? sets[answer.indices[0] ?? -1] : undefined;
+  }
+
   /** Renders synchronously; used by tests and before handing the terminal back. */
   public flush(): void {
     this.queue.flush();
@@ -1754,7 +2071,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   }
 
   private borderFor(mode: PermissionMode): (text: string) => string {
-    return mode === "plan" ? (text) => this.style.cyan(text) : mode === "full" ? (text) => this.style.red(text) : (text) => this.style.dim(text);
+    return mode === "plan" ? (text) => this.style.accent(text) : mode === "full" ? (text) => this.style.danger(text) : (text) => this.style.border(text);
   }
 
   /** Keys owned by the input layer; undefined lets the rest of `onKey` and the editor see them. */
@@ -2199,7 +2516,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     const top = this.dialog;
     if (this.presenter !== undefined) {
       this.dialogSlot.clear();
-      if (top !== undefined) this.dialogSlot.addChild(new DialogFrame(top.component, top.tone === "attention" ? (text) => this.style.yellow(text) : (text) => this.style.dim(text)));
+      if (top !== undefined) this.dialogSlot.addChild(new DialogFrame(top.component, top.tone === "attention" ? (text) => this.style.warning(text) : (text) => this.style.border(text)));
       this.editorSlot.hidden = top !== undefined;
     } else if (top !== undefined) {
       this.dialogOverlay = this.tui.showOverlay(top.component, { anchor: "bottom-center", width: "90%", margin: 1 });
@@ -2247,10 +2564,10 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
    * "Other…" opens a free-text line, Esc cancels. It owns the input until answered; resolves
    * undefined on Esc or abort. Every choice prompt of the renderer goes through here.
    */
-  private chooseQuestion(question: ChoiceQuestion, signal?: AbortSignal): Promise<ChoiceAnswer | undefined> {
+  private chooseQuestion(question: ChoiceQuestion, signal?: AbortSignal, extra: Pick<ChoiceModalOptions, "livePreview" | "maxVisible"> = {}): Promise<ChoiceAnswer | undefined> {
     if (this.stopped || signal?.aborted === true || question.options.length === 0) return Promise.resolve(undefined);
     return new Promise((resolve) => {
-      const modal = this.choiceModal(question);
+      const modal = this.choiceModal(question, extra);
       let entry: DialogEntry | undefined;
       let settled = false;
       const finish = (answer: ChoiceAnswer | undefined): void => {
@@ -2270,8 +2587,9 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     });
   }
 
-  private choiceModal(question: ChoiceQuestion): ChoiceModal {
+  private choiceModal(question: ChoiceQuestion, extra: Pick<ChoiceModalOptions, "livePreview" | "maxVisible"> = {}): ChoiceModal {
     return new ChoiceModal(question, {
+      ...extra,
       style: this.style,
       glyphs: this.presenter?.glyphs ?? GLYPH_SETS.rich,
       isKey: (data, key) => matchesKey(data, key),
@@ -2435,6 +2753,10 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     const question: ChoiceQuestion = { question: sanitizeInline(notice.text, 1000), options: [{ label: "I understand, continue" }, { label: "Cancel" }], allowOther: false, tone: "neutral" };
     return this.chooseQuestion(question, signal).then((answer) => answer?.kind === "selected" && answer.indices[0] === 0);
   }
+}
+
+function welcomePreferences(settings: WelcomeSettings): WelcomePreferences {
+  return { style: settings.style, logo: settings.logo, fields: [...settings.fields], tips: settings.tips };
 }
 
 export function formatStatus(status: StatusLine): string {

@@ -102,6 +102,9 @@ export interface WebConfig {
 
 export const CONFIG_FILE = "config.yaml";
 export const GLYPH_SET_CHOICES = ["auto", "rich", "safe", "ascii"] as const;
+export const WELCOME_STYLE_CHOICES = ["full", "compact", "minimal", "off"] as const;
+export const WELCOME_LOGO_CHOICES = ["on", "off", "custom"] as const;
+export const WELCOME_FIELD_CHOICES = ["version", "model", "plan", "workers", "folder", "mode"] as const;
 export type GlyphSetChoice = (typeof GLYPH_SET_CHOICES)[number];
 export const ADAPTER_KINDS_CONFIGURABLE = ["openai-chatgpt", "openai-responses", "anthropic-messages", "claude-code", "scripted"] as const;
 export type ConfigurableAdapterKind = (typeof ADAPTER_KINDS_CONFIGURABLE)[number];
@@ -165,6 +168,19 @@ const configFileSchema = z.strictObject({
       mouse: z.boolean().optional(),
       /** Glyph set of the interactive view; `auto` (or unset) detects it. `SYN_GLYPHS` still wins. */
       glyphs: z.enum(GLYPH_SET_CHOICES).optional(),
+      /** K8 colour theme: a built-in name or `<synorch home>/themes/<name>.yaml`. */
+      theme: z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/).optional(),
+      /** K8 welcome header. */
+      welcome: z
+        .strictObject({
+          style: z.enum(WELCOME_STYLE_CHOICES).optional(),
+          logo: z.enum(WELCOME_LOGO_CHOICES).optional(),
+          fields: z.array(z.enum(WELCOME_FIELD_CHOICES)).optional(),
+          tips: z.boolean().optional(),
+        })
+        .optional(),
+      /** K8: the first-run setup (theme, welcome, symbols) was shown; `/setup` runs it again. */
+      onboarded: z.boolean().optional(),
     })
     .optional(),
   /** Router preferences (user layer only). */
@@ -270,6 +286,15 @@ export interface RuntimeConfig {
   readonly mouse: boolean | undefined;
   /** `ui.glyphs` (user layer only); `auto` or undefined detects the set. */
   readonly glyphs: GlyphSetChoice | undefined;
+  /** K8 `ui.theme`, `ui.welcome.*`, `ui.onboarded` (user layer only). */
+  readonly theme: string | undefined;
+  readonly welcome: {
+    readonly style: (typeof WELCOME_STYLE_CHOICES)[number] | undefined;
+    readonly logo: (typeof WELCOME_LOGO_CHOICES)[number] | undefined;
+    readonly fields: readonly (typeof WELCOME_FIELD_CHOICES)[number][] | undefined;
+    readonly tips: boolean | undefined;
+  };
+  readonly onboarded: boolean | undefined;
   /** `claude_code.mode` (user layer only); undefined means `native`. */
   readonly claudeCodeMode: ClaudeCodeMode | undefined;
   readonly budget: { readonly maxWallTimeSeconds: number | undefined; readonly maxCostUsd: number | undefined };
@@ -576,6 +601,9 @@ export async function loadRuntimeConfig(
     reviewCrossProvider: user?.review?.cross_provider,
     mouse: user?.ui?.mouse,
     glyphs: user?.ui?.glyphs,
+    theme: user?.ui?.theme,
+    welcome: { style: user?.ui?.welcome?.style, logo: user?.ui?.welcome?.logo, fields: user?.ui?.welcome?.fields, tips: user?.ui?.welcome?.tips },
+    onboarded: user?.ui?.onboarded,
     claudeCodeMode: user?.claude_code?.mode,
     budget: {
       maxWallTimeSeconds: smallest(layers.map((layer) => layer?.budget?.max_wall_time_seconds)),

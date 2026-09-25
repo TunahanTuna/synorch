@@ -23,6 +23,11 @@ export interface ChoiceModalOptions {
   readonly printable?: (data: string) => string | undefined;
   /** Option rows shown at once before the list scrolls. */
   readonly maxVisible?: number;
+  /**
+   * K8 live preview: trusted, already painted lines for the highlighted row (and the checked rows
+   * of a multi-select), drawn under the list in place of the row's own text preview.
+   */
+  readonly livePreview?: (selected: number, checked: readonly number[], width: number) => readonly string[];
 }
 
 interface Row {
@@ -149,7 +154,12 @@ export class ChoiceModal {
     }
     const hidden = this.rows.length - (this.offset + count);
     if (hidden > 0) lines.push(style.dim(`   ${ascii ? "v" : "↓"} ${hidden} more`));
-    const preview = this.rows[this.selected]?.preview;
+    const live = this.options.livePreview;
+    if (live !== undefined && !this.typing) {
+      const bar = style.dim(ascii ? "|" : "│");
+      for (const line of live(this.selected, [...this.checked].sort((a, b) => a - b), Math.max(10, width - 5))) lines.push(`   ${bar} ${line}`);
+    }
+    const preview = live === undefined ? this.rows[this.selected]?.preview : undefined;
     if (preview !== undefined && preview.trim() !== "" && !this.typing) {
       const bar = style.dim(ascii ? "|" : "│");
       const previewLines = preview.replace(/\r\n/g, "\n").split("\n");

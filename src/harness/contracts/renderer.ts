@@ -38,6 +38,59 @@ export interface SessionHeaderView {
   readonly contextWindowTokens?: number;
   /** The conversation's interactive permission mode (ADR-08 revision 2026-09-24); absent outside one. */
   readonly permissionMode?: PermissionMode;
+  /** K8 welcome header facts beyond the ones above (interactive renderer only). */
+  readonly welcome?: SessionWelcomeView;
+}
+
+/** K8: what the welcome header shows besides version, model, folder and mode. */
+export interface SessionWelcomeView {
+  /** Short commit of the build (`syn --version`). */
+  readonly commit?: string;
+  readonly effort?: string;
+  /** Provider / plan label: `ChatGPT Plus`, `Claude Code`, `OpenAI API`. */
+  readonly plan?: string;
+  /** Worker models that differ from the conversation model. */
+  readonly workers?: readonly string[];
+  /** `~`-shortened workspace path. */
+  readonly path?: string;
+  /** The one contextual hint line. */
+  readonly hint?: string;
+}
+
+/** K8 welcome header preferences (`ui.welcome.*`). */
+export interface WelcomePreferences {
+  readonly style: "full" | "compact" | "minimal" | "off";
+  readonly logo: "on" | "off" | "custom";
+  readonly fields: readonly ("version" | "model" | "plan" | "workers" | "folder" | "mode")[];
+  readonly tips: boolean;
+}
+
+/**
+ * K8 appearance: the theme and welcome pickers with live preview. The renderer owns painting and
+ * previews; the session saves what was chosen to the user configuration.
+ */
+export interface AppearanceControls {
+  /** Every theme the renderer can apply (built-ins, then the user's). */
+  readonly themes: readonly { readonly name: string; readonly description: string; readonly custom: boolean }[];
+  /** The active theme's name. */
+  readonly theme: string;
+  readonly welcome: WelcomePreferences;
+  /**
+   * Theme picker with a live preview of the highlighted theme; Enter applies it (and resolves its
+   * name), Esc keeps the current one (undefined). `step` labels a wizard step (`1/3`).
+   */
+  pickTheme(signal?: AbortSignal, step?: string): Promise<string | undefined>;
+  /** The whole welcome customization (style, logo, fields, tips) with live preview; applied on the last step. */
+  pickWelcome(signal?: AbortSignal): Promise<WelcomePreferences | undefined>;
+  /** Only the welcome style (the setup wizard's step), applied when chosen. */
+  pickWelcomeStyle(signal?: AbortSignal, step?: string): Promise<WelcomePreferences["style"] | undefined>;
+  /** Glyph set with a sample row per choice; applies from the next session. */
+  pickGlyphs(signal?: AbortSignal, step?: string): Promise<"rich" | "safe" | "ascii" | undefined>;
+  /** Applies a theme by name; false when it is unknown. */
+  setTheme(name: string): boolean;
+  setWelcome(preferences: WelcomePreferences): void;
+  /** Late welcome facts (the plan label resolves after start); redrawn while the header is on screen. */
+  updateWelcome(patch: SessionWelcomeView): void;
 }
 
 /** What the footer shows about the conversation's model (K3 status line). */
@@ -174,6 +227,8 @@ export interface InteractiveInputControls {
   /** SGR mouse reporting (wheel scroll, click to expand). Off by default: it disables native selection. */
   readonly mouseMode: boolean;
   setMouseMode(on: boolean): void;
+  /** K8 theme and welcome customization (interactive renderer with the conversation view). */
+  readonly appearance?: AppearanceControls;
 }
 
 export type UserInputResult =

@@ -39,7 +39,7 @@ import { trustCommand } from "./trust.ts";
  * dynamic `import("./harness/cli/index.ts")`, so `inspect/init/sync/doctor` never load it. The
  * composition root itself is `createRuntime()` in `runtime.ts`.
  */
-export const HARNESS_COMMANDS = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust", "config", "mcp", "skills", "plugin"] as const;
+export const HARNESS_COMMANDS = ["agent", "setup", "run", "runs", "show", "login", "logout", "auth", "memory", "trust", "config", "mcp", "skills", "plugin"] as const;
 export type HarnessCommand = (typeof HARNESS_COMMANDS)[number];
 
 export { harnessCommandFlags, parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";

@@ -128,8 +128,8 @@ function renderFile(file: DiffFileView, ctx: ViewContext): string[] {
     const number = t.muted(padStart(line.line === undefined ? "" : String(line.line), gutter));
     const room = Math.max(8, ctx.width - gutter - 6);
     const body = displayWidth(text) > room ? `${text.slice(0, room - 1)}${g.ellipsis}` : text;
-    if (line.op === "+") out.push(`  ${number} ${t.success(`+ ${body}`)}`);
-    else if (line.op === "-") out.push(`  ${number} ${t.error(`${g.minus} ${body}`)}`);
+    if (line.op === "+") out.push(`  ${number} ${t.diffAdd(`+ ${body}`)}`);
+    else if (line.op === "-") out.push(`  ${number} ${t.diffRemove(`${g.minus} ${body}`)}`);
     else out.push(`  ${number} ${t.muted(`  ${body}`)}`);
   }
   if (file.lines.length > shown.length) out.push(t.muted(`  ${" ".repeat(gutter)} ${g.ellipsis} ${file.lines.length - shown.length} more lines ${g.sep} git diff -- ${clean(file.path, 200)}`));

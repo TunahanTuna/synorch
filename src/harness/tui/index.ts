@@ -37,7 +37,33 @@ export { chunkForConPty, CONPTY_MAX_WRITE_BYTES } from "./output-chunks.ts";
 export { PlainLineRenderer, type PlainLifecycle, type PlainLineRendererOptions } from "./plain-line-renderer.ts";
 export { DEFAULT_RENDER_QUEUE_CAPACITY, isDeltaEvent, RenderQueue } from "./render-queue.ts";
 export { sanitizeInline, sanitizeTerminalText } from "./sanitize.ts";
-export { createStyler, type Styler } from "./style.ts";
+export { createStyler, type Styler, type ThemedStyler } from "./style.ts";
+export {
+  BUILTIN_THEMES,
+  builtinTheme,
+  customTheme,
+  DEFAULT_THEME,
+  defaultThemeName,
+  detectColorDepth,
+  THEME_NAME,
+  THEME_TOKENS,
+  type ColorDepth,
+  type ThemeDefinition,
+  type ThemeToken,
+} from "./theme.ts";
+export {
+  DEFAULT_WELCOME,
+  MINIMAL_WELCOME,
+  pickHint,
+  renderWelcome,
+  shortenPath,
+  WELCOME_FIELDS,
+  welcomeFields,
+  type HintContext,
+  type WelcomeField,
+  type WelcomeInfo,
+  type WelcomeSettings,
+} from "./welcome.ts";
 export {
   ConsoleCodepageGuard,
   EMERGENCY_RESTORE_SEQUENCE,

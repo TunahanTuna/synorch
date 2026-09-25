@@ -64,6 +64,8 @@ export interface RendererRequest {
   readonly debug?: boolean;
   /** `ui.mouse`: start with mouse capture on (interactive renderer only; SYN_MOUSE still applies when unset). */
   readonly mouse?: boolean;
+  /** K8 appearance of the interactive renderer: theme, the themes `/theme` offers, colour depth, welcome header. */
+  readonly appearance?: Pick<PiTuiRendererOptions, "theme" | "themes" | "colorDepth" | "welcome">;
 }
 
 export interface SessionRenderer extends TerminalRenderer {
@@ -237,6 +239,7 @@ export async function createSessionRenderer(io: RendererIO, request: RendererReq
         ...(request.glyphs === undefined ? {} : { glyphs: request.glyphs }),
         ...(request.debug === undefined ? {} : { debug: request.debug }),
         ...(request.mouse === undefined ? {} : { mouse: request.mouse }),
+        ...(request.appearance ?? {}),
         ...(io.terminal === undefined ? {} : { terminal: io.terminal }),
       }),
     );

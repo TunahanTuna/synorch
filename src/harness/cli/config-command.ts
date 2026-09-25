@@ -21,6 +21,9 @@ import {
   DEFAULT_ADAPTER_FOR_PROVIDER,
   GLYPH_SET_CHOICES,
   loadRuntimeConfig,
+  WELCOME_FIELD_CHOICES,
+  WELCOME_LOGO_CHOICES,
+  WELCOME_STYLE_CHOICES,
   validateUserConfigText,
   type ConfigDiscoveryOptions,
   type RuntimeConfig,
@@ -29,6 +32,7 @@ import { failureInfo } from "./outcome.ts";
 import { createCredentialStore } from "../auth/index.ts";
 import { KEYED_SEARCH_BACKENDS, REVIEW_CROSS_PROVIDER_MODES, WEB_SEARCH_PROVIDERS, type KeyedSearchBackend } from "../providers/index.ts";
 import { CLAUDE_CODE_MODES } from "../providers/claude-code/native.ts";
+import { BUILTIN_THEMES, DEFAULT_THEME, THEME_NAME } from "../tui/theme.ts";
 
 /**
  * `syn config` (K1.5-3) and the settings model behind the in-session `/config` screen. Only the
@@ -41,7 +45,7 @@ import { CLAUDE_CODE_MODES } from "../providers/claude-code/native.ts";
 export const CONFIG_SUBCOMMANDS = ["list", "get", "set", "unset", "edit", "path"] as const;
 export type ConfigSubcommand = (typeof CONFIG_SUBCOMMANDS)[number];
 
-export type SettingKind = "enum" | "boolean" | "int" | "number" | "string" | "route";
+export type SettingKind = "enum" | "boolean" | "int" | "number" | "string" | "route" | "list";
 export type SettingSource = "user" | "workspace" | "project" | "default";
 
 export interface SettingDefinition {
@@ -62,6 +66,12 @@ const PLAIN_SETTINGS: readonly SettingDefinition[] = [
   { key: "ui.color", kind: "boolean", scope: "user", description: "colour output (unset: detect; --color and NO_COLOR still apply)", fallback: "auto", yamlPath: ["ui", "color"] },
   { key: "ui.mouse", kind: "boolean", scope: "user", description: "start with mouse capture on (wheel scroll, click to expand)", fallback: "false", yamlPath: ["ui", "mouse"] },
   { key: "ui.glyphs", kind: "enum", choices: GLYPH_SET_CHOICES, scope: "user", description: "glyph set of the interactive view (SYN_GLYPHS wins)", fallback: "auto", yamlPath: ["ui", "glyphs"] },
+  { key: "ui.theme", kind: "string", scope: "user", description: `colour theme: ${BUILTIN_THEMES.map((theme) => theme.name).join(", ")} or <synorch home>/themes/<name>.yaml (/theme previews)`, fallback: DEFAULT_THEME, yamlPath: ["ui", "theme"] },
+  { key: "ui.welcome.style", kind: "enum", choices: WELCOME_STYLE_CHOICES, scope: "user", description: "welcome header: full (compact on small screens), compact, minimal or off (/welcome previews)", fallback: "full", yamlPath: ["ui", "welcome", "style"] },
+  { key: "ui.welcome.logo", kind: "enum", choices: WELCOME_LOGO_CHOICES, scope: "user", description: "welcome logo: the Synorch mark, off, or custom (<synorch home>/logo.txt)", fallback: "on", yamlPath: ["ui", "welcome", "logo"] },
+  { key: "ui.welcome.fields", kind: "list", choices: WELCOME_FIELD_CHOICES, scope: "user", description: `welcome facts, comma-separated: ${WELCOME_FIELD_CHOICES.join(",")}`, fallback: WELCOME_FIELD_CHOICES.join(","), yamlPath: ["ui", "welcome", "fields"] },
+  { key: "ui.welcome.tips", kind: "boolean", scope: "user", description: "the hint line under the welcome header", fallback: "true", yamlPath: ["ui", "welcome", "tips"] },
+  { key: "ui.onboarded", kind: "boolean", scope: "user", description: "the first-run setup was shown (false shows it again; /setup any time)", fallback: "false", yamlPath: ["ui", "onboarded"] },
   { key: "routing.prefer_different_provider", kind: "boolean", scope: "user", description: "reviewers prefer a provider other than the implementer's", fallback: "true", yamlPath: ["routing", "prefer_different_provider"] },
   { key: "review.cross_provider", kind: "enum", choices: REVIEW_CROSS_PROVIDER_MODES, scope: "user", description: "reviewer on another provider than the implementer's: prefer (when logged in), off, require (fail without one); routes.<tier>.reviewer wins", fallback: "prefer", yamlPath: ["review", "cross_provider"] },
   { key: "claude_code.mode", kind: "enum", choices: CLAUDE_CODE_MODES, scope: "user", description: "Claude Code bridge: native (Claude's own tools, Synorch approvals) or restricted (Synorch tools only)", fallback: "native", yamlPath: ["claude_code", "mode"] },
@@ -162,9 +172,20 @@ const TRUE_WORDS = ["true", "on", "yes", "1"];
 const FALSE_WORDS = ["false", "off", "no", "0"];
 
 /** Parses a typed value for `definition`; friendly errors with the accepted values. */
-export function parseSettingValue(definition: SettingDefinition, raw: string): string | number | boolean | RouteValue {
+export function parseSettingValue(definition: SettingDefinition, raw: string): string | number | boolean | RouteValue | string[] {
   const value = raw.trim();
   switch (definition.kind) {
+    case "list": {
+      const choices = definition.choices ?? [];
+      if (/^(none|-)$/i.test(value)) return [];
+      const items = value.split(/[\s,]+/).filter((item) => item !== "").map((item) => item.toLowerCase());
+      const unknown = items.filter((item) => !choices.includes(item));
+      if (unknown.length > 0) {
+        const match = closestMatch(unknown[0] ?? "", choices);
+        throw new ConfigCommandError(`Invalid value "${raw}" for ${definition.key}. Expected a comma-separated list of ${choices.join(", ")}.${match === undefined ? "" : ` Did you mean ${match}?`}`);
+      }
+      return choices.filter((choice) => items.includes(choice));
+    }
     case "enum": {
       const choices = definition.choices ?? [];
       const exact = choices.find((choice) => choice === value.toLowerCase());
@@ -191,6 +212,17 @@ export function parseSettingValue(definition: SettingDefinition, raw: string): s
     case "route":
       return parseRoute(value, definition.key);
   }
+}
+
+/** `ui.theme` names a built-in theme or a file under `<synorch home>/themes/`. */
+async function assertThemeExists(home: string, name: string): Promise<void> {
+  if (BUILTIN_THEMES.some((theme) => theme.name === name)) return;
+  if (!THEME_NAME.test(name)) throw new ConfigCommandError(`Invalid theme name "${name}": lower-case letters, digits and dashes.`);
+  const file = path.join(home, "themes", `${name}.yaml`);
+  if (existsSync(file) || existsSync(path.join(home, "themes", `${name}.yml`))) return;
+  const known = BUILTIN_THEMES.map((theme) => theme.name);
+  const match = closestMatch(name, known);
+  throw new ConfigCommandError(`Unknown theme "${name}".${match === undefined ? "" : ` Did you mean ${match}?`} Built-in: ${known.join(", ")}; or create ${file}.`);
 }
 
 // ---- the user document ----------------------------------------------------------------------
@@ -271,6 +303,7 @@ function currentValue(document: Document, definition: SettingDefinition): string
     return formatRoute(entry);
   }
   const value = document.getIn([...(definition.yamlPath ?? [])]);
+  if (isSeq(value)) return (value.toJSON() as unknown[]).map(String).join(",");
   return value === undefined || value === null ? undefined : String(value);
 }
 
@@ -309,6 +342,7 @@ export interface SettingChange {
 export async function setUserSetting(home: string, key: string, raw: string): Promise<SettingChange> {
   const definition = settingFor(key);
   const value = parseSettingValue(definition, raw);
+  if (definition.key === "ui.theme") await assertThemeExists(home, String(value));
   const document = await userDocument(home);
   const previous = currentValue(document, definition);
   applyValue(document, definition, value);

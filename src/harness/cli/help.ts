@@ -57,6 +57,8 @@ ${COMMON}
 ${KEYS} Ctrl+O shows tool details.
 
 In-session commands: /help lists them all (/plan /workers /undo /diff /model /permissions ...).
+Appearance: /theme (live preview), /welcome (the header), /setup (the first-run setup again);
+syn setup opens a conversation with the setup first.
 
 ${EXIT_CODES}
 `,
@@ -191,5 +193,5 @@ Usage:
 };
 
 export function commandHelp(command: string): string {
-  return COMMAND_HELP[command] ?? `No help is available for ${command}.\n`;
+  return COMMAND_HELP[command === "setup" ? "agent" : command] ?? `No help is available for ${command}.\n`;
 }

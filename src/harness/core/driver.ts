@@ -492,6 +492,7 @@ class FixedAgentDriver implements PausableAgentDriver {
       envelope_digest: built.envelopeDigest,
       envelope_blob: envelope,
       tool_set_digest: digestOf(request.data.tools),
+      ...(request.data.reasoning_effort === undefined ? {} : { reasoning_effort: request.data.reasoning_effort }),
       context: built.blocks.map((block) => ({
         block_id: block.blockId,
         source: block.source,

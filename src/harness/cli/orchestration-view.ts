@@ -20,6 +20,10 @@ interface TaskEntry {
   readonly dependsOn: readonly string[];
   state: TaskState;
   model: string | undefined;
+  /** K6: the worker's reasoning effort as sent (last model request); undefined = provider default. */
+  effort: string | undefined;
+  /** K3: the independent reviewer's provider/model (cross-provider review). */
+  reviewerModel: string | undefined;
   activity: string | undefined;
   reason: string | undefined;
   startedAtMs: number | undefined;
@@ -112,7 +116,8 @@ export class OrchestrationTracker {
       ...list.map((task) => {
         const detail = TERMINAL_TASK_STATES.includes(task.state) ? (this.summary(task) ?? task.reason) : task.activity;
         const owns = task.ownedPaths.length === 0 ? "" : ` · owns ${task.ownedPaths.slice(0, 6).join(", ")}${task.ownedPaths.length > 6 ? ", …" : ""}`;
-        return `- ${task.key} (${task.role}${task.model === undefined ? "" : `, ${task.model}`}): ${task.state.replaceAll("_", " ")}${task.paused ? " (paused)" : ""}${detail === undefined ? "" : ` · ${detail}`}${owns}`;
+        const reviewedBy = task.reviewerModel === undefined ? "" : ` · reviewer ${task.reviewerModel}`;
+        return `- ${task.key} (${task.role}${this.modelLabel(task) === undefined ? "" : `, ${this.modelLabel(task)}`}): ${task.state.replaceAll("_", " ")}${task.paused ? " (paused)" : ""}${detail === undefined ? "" : ` · ${detail}`}${reviewedBy}${owns}`;
       }),
     ];
   }
@@ -149,6 +154,8 @@ export class OrchestrationTracker {
           dependsOn: event.data.depends_on.map((id) => keys.get(id) ?? id),
           state: "draft",
           model: undefined,
+          effort: undefined,
+          reviewerModel: undefined,
           activity: undefined,
           reason: undefined,
           startedAtMs: undefined,
@@ -188,9 +195,11 @@ export class OrchestrationTracker {
         if (!task.reviewer) {
           task.attempts += 1;
           task.model = event.data.route.model_id;
+        } else {
+          task.reviewerModel = `${event.data.route.provider_id}/${event.data.route.model_id}`;
         }
         task.startedAtMs ??= this.now();
-        task.activity = task.reviewer ? `independent review · ${event.data.route.model_id}` : task.attempts > 1 ? "revising" : "starting";
+        task.activity = task.reviewer ? `independent review · ${task.reviewerModel ?? event.data.route.model_id}` : task.attempts > 1 ? "revising" : "starting";
         return true;
       }
       case "attempt/user_control": {
@@ -248,17 +257,32 @@ export class OrchestrationTracker {
       task.activity = `${task.attempts > 1 ? "revising · " : ""}${verb}`;
       return true;
     }
-    if (event.type === "model/request_prepared" && (task.activity === undefined || task.activity === "starting")) {
-      task.activity = "thinking";
-      return true;
+    if (event.type === "model/request_prepared") {
+      let changed = false;
+      if (!task.reviewer && event.data.reasoning_effort !== task.effort) {
+        task.effort = event.data.reasoning_effort;
+        changed = true;
+      }
+      if (task.activity === undefined || task.activity === "starting") {
+        task.activity = "thinking";
+        changed = true;
+      }
+      return changed;
     }
     return false;
   }
 
+  /** Model and effort of the worker (`gpt-6-sol · high`); the effort is left out when the provider default applies. */
+  private modelLabel(task: TaskEntry): string | undefined {
+    if (task.model === undefined) return undefined;
+    return task.effort === undefined ? task.model : `${task.model} · ${task.effort}`;
+  }
+
   private summary(task: TaskEntry): string | undefined {
     if (task.state !== "completed") return undefined;
-    if (task.integratedPaths.length > 0) return `${task.integratedPaths.length} file${task.integratedPaths.length === 1 ? "" : "s"} integrated`;
-    return task.role === "explorer" ? "explored" : undefined;
+    const reviewed = task.review === undefined || task.reviewerModel === undefined ? "" : ` · reviewed by ${task.reviewerModel}`;
+    if (task.integratedPaths.length > 0) return `${task.integratedPaths.length} file${task.integratedPaths.length === 1 ? "" : "s"} integrated${reviewed}`;
+    return task.role === "explorer" ? "explored" : reviewed === "" ? undefined : reviewed.slice(3);
   }
 
   /** The note line under the board title: planning, the reason, or the armed stop. */
@@ -273,7 +297,7 @@ export class OrchestrationTracker {
     const tasks: OrchestrationTaskView[] = [...this.tasks.values()].map((task) => ({
       key: task.key,
       role: task.role,
-      model: task.model,
+      model: this.modelLabel(task),
       state: task.state,
       activity: TERMINAL_TASK_STATES.includes(task.state) ? undefined : task.activity,
       summary: this.summary(task),
@@ -337,7 +361,9 @@ export class OrchestrationTracker {
    */
   public resultBlock(outcome: { readonly status: string; readonly summary: string; readonly runId: string; readonly sessionId: string }): string {
     const paths = this.integratedPaths();
-    const reviews = [...this.tasks.values()].filter((task) => task.review !== undefined).map((task) => `${task.key}: ${task.review?.verdict.replaceAll("_", " ")}`);
+    const reviews = [...this.tasks.values()]
+      .filter((task) => task.review !== undefined)
+      .map((task) => `${task.key}: ${task.review?.verdict.replaceAll("_", " ")}${task.reviewerModel === undefined ? "" : ` (reviewer ${task.reviewerModel})`}`);
     const seconds = Math.round(((this.endedAt ?? this.now()) - this.startedAt) / 1000);
     const lines = [
       `Orchestration ${outcome.status} in ${seconds}s.`,

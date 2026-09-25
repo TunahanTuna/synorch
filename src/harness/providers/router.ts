@@ -22,6 +22,7 @@ import {
   type RouteRule,
 } from "../contracts/index.ts";
 import { providerError } from "./errors.ts";
+import type { ReviewCrossProviderMode } from "./reviewer-route.ts";
 
 /** Construction options on top of the contract configuration; tests inject the clock. */
 export interface ModelRouterOptions extends ModelRouterConfig {
@@ -33,6 +34,20 @@ export interface ModelRouterOptions extends ModelRouterConfig {
    * reason always says which independence was achieved, never silently.
    */
   readonly preferDifferentProvider?: boolean;
+  /**
+   * K3 cross-provider review (`review.cross_provider`): `prefer` (default) takes a reviewer on
+   * another provider when one is configured or logged in, `off` keeps the implementer's provider
+   * (a different model when configured), `require` fails the review dispatch when no other provider
+   * is available. An explicit reviewer route (`routes.<tier>.reviewer`) always wins. When set, it
+   * replaces `preferDifferentProvider`.
+   */
+  readonly reviewCrossProvider?: ReviewCrossProviderMode;
+  /**
+   * Asked when no configured route is on a provider other than the implementer's: the best
+   * logged-in catalog model on another provider for the tier (the runtime registers its adapter
+   * first), or undefined when none is connected.
+   */
+  readonly crossProviderReviewer?: (request: { readonly tier: ModelTier; readonly excludeProvider: string }, signal: AbortSignal) => Promise<RouteBinding | undefined>;
 }
 
 /** The router the composition root holds: the contract plus the session route layer `/model` edits. */
@@ -76,7 +91,8 @@ export function createModelRouter(config: ModelRouterOptions, providers: readonl
     adapters.set(adapter.adapterId, adapter);
   }
   let candidates = config.rules.map((rule): Candidate => ({ rule, route: routeOf(rule) }));
-  const preferDifferentProvider = config.preferDifferentProvider ?? true;
+  const crossMode: ReviewCrossProviderMode = config.reviewCrossProvider ?? (config.preferDifferentProvider === false ? "off" : "prefer");
+  const preferDifferentProvider = crossMode !== "off";
   const blocked = new Map<string, number>();
   const pending = new Map<string, Override & { readonly digest: string; readonly tier: ModelTier; readonly role: AgentRole | undefined }>();
   const overrides = new Map<string, Override>();
@@ -147,10 +163,25 @@ export function createModelRouter(config: ModelRouterOptions, providers: readonl
       let reason = `${primary.rule.source} maps ${request.tier} to ${primary.route.model_id}`;
       if (request.role === "reviewer") {
         const implementer = request.implementer ?? ordered(request.tier, "implementer")[0]?.route;
-        if (implementer !== undefined) {
+        // routes.<tier>.reviewer is the user's own choice: it always wins over the cross-provider preference
+        // (among several explicit reviewer routes, one on another provider is still preferred).
+        const explicitRoutes = options.filter((option) => option.rule.role === "reviewer");
+        const explicit =
+          (preferDifferentProvider && implementer !== undefined ? explicitRoutes.find((option) => option.route.provider_id !== implementer.provider_id) : undefined) ?? explicitRoutes[0];
+        if (explicit !== undefined) {
+          chosen = explicit;
+          reason = `${explicit.rule.source} routes the ${request.tier} reviewer explicitly to ${explicit.route.provider_id}/${explicit.route.model_id}`;
+          if (implementer !== undefined) {
+            reason =
+              explicit.route.provider_id === implementer.provider_id
+                ? `${reason}; same provider as the implementer (${implementer.provider_id}), the explicit route wins`
+                : `${reason}; independent of the implementer provider ${implementer.provider_id}`;
+          }
+        } else if (implementer !== undefined) {
           const otherProvider = (candidate: Candidate): boolean => candidate.route.provider_id !== implementer.provider_id;
           let crossProvider = options.find(otherProvider);
           let crossTier = false;
+          let fromCatalog = false;
           if (preferDifferentProvider && crossProvider === undefined) {
             // No same-tier route on another provider: any configured route on another provider, reviewer rules first.
             crossProvider = [...candidates]
@@ -159,16 +190,37 @@ export function createModelRouter(config: ModelRouterOptions, providers: readonl
               .find((candidate) => candidate.rule.role === undefined || candidate.rule.role === "reviewer");
             crossTier = crossProvider !== undefined;
           }
+          if (preferDifferentProvider && crossProvider === undefined && config.crossProviderReviewer !== undefined && implementer.provider_id !== "scripted") {
+            // Nothing configured on another provider: that provider's best logged-in model (catalog).
+            const binding = await config.crossProviderReviewer({ tier: request.tier, excludeProvider: implementer.provider_id }, signal).catch(() => undefined);
+            if (binding !== undefined && binding.provider_id !== implementer.provider_id && adapters.has(binding.adapter_id)) {
+              const rule: RouteRule = { source: "provider-default", tier: request.tier, role: "reviewer", route: binding };
+              crossProvider = { rule, route: routeOf(rule) };
+              fromCatalog = true;
+            }
+          }
           const otherModel = options.find((option) => !sameModel(option.route, implementer));
           if (preferDifferentProvider && crossProvider !== undefined) {
             chosen = crossTier ? { rule: crossProvider.rule, route: modelRouteSchema.parse({ ...crossProvider.route, tier: request.tier }) } : crossProvider;
-            reason = `${crossProvider.rule.source} maps ${crossTier ? `${crossProvider.rule.tier} (no ${request.tier} route on another provider)` : request.tier} to ${crossProvider.route.provider_id}/${crossProvider.route.model_id}; independent of the implementer provider ${implementer.provider_id}`;
+            reason = fromCatalog
+              ? `cross-provider review: ${crossProvider.route.provider_id}/${crossProvider.route.model_id} (${crossProvider.route.auth_method}) is the best logged-in ${crossProvider.route.provider_id} model for ${request.tier}; independent of the implementer provider ${implementer.provider_id}`
+              : `${crossProvider.rule.source} maps ${crossTier ? `${crossProvider.rule.tier} (no ${request.tier} route on another provider)` : request.tier} to ${crossProvider.route.provider_id}/${crossProvider.route.model_id}; independent of the implementer provider ${implementer.provider_id}`;
+          } else if (crossMode === "require") {
+            throw new HarnessError({
+              code: "config_invalid",
+              message:
+                `review.cross_provider is require, but no provider other than ${implementer.provider_id} is configured or logged in for the ${request.tier} reviewer; ` +
+                `log in to another provider (syn login anthropic --method cli-bridge, syn login openai), set routes.${request.tier}.reviewer, or set review.cross_provider prefer`,
+              workspace_effect: "none",
+              retry_safe: false,
+            });
           } else if (otherModel !== undefined) {
             chosen = otherModel;
             reason = `${otherModel.rule.source} maps ${request.tier} to ${otherModel.route.model_id}; independent of the implementer model ${implementer.model_id}`;
             if (preferDifferentProvider) reason = `${reason}; no route on a provider other than ${implementer.provider_id} is configured, so the reviewer uses the same provider`;
           } else {
             reason = `${reason}; no independent reviewer model is configured, the reviewer shares the implementer model`;
+            if (preferDifferentProvider) reason = `${reason} (no provider other than ${implementer.provider_id} is configured or logged in)`;
           }
         }
       }

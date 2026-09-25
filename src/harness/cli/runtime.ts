@@ -100,6 +100,8 @@ import {
   createWebSearchRunner,
   fetchCodexModels,
   findOnPath,
+  pickCrossProviderReviewer,
+  requestedEffort,
   resolveEffort,
   SEARCH_KEY_ENV,
   SYNORCH_ORIGINATOR,
@@ -273,7 +275,7 @@ export interface Runtime {
    * this session first, then `effort.<role>` and `effort.<tier>` of the user configuration, clamped
    * to the levels the route's model takes (the resolution says so in `notice`).
    */
-  effortFor(tier: ModelTier, role: AgentRole | undefined, route: Pick<RouteBinding, "provider_id" | "model_id" | "adapter_id">): EffortResolution;
+  effortFor(tier: ModelTier, role: AgentRole | undefined, route: Pick<RouteBinding, "provider_id" | "model_id" | "adapter_id">, hint?: ReasoningEffort): EffortResolution;
   /** K6 `/effort`: sets (or with undefined clears) a tier's level for this session; the next model request uses it. */
   setSessionEffort(tier: ModelTier, level: ReasoningEffort | undefined): void;
   /** K6 `/config set|unset effort.<slot>` in a session: the configured level (user layer) changes at once, not only after a restart. */
@@ -507,8 +509,32 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     onWebContentRead: () => webHooksState.contentRead(),
   };
   const adapters = await buildAdapters(config, overrides, env, home, claude, webHooks);
+  // K3 cross-provider review: the best logged-in model on another provider (catalog, no paid call), cached for a few minutes.
+  const crossReviewerCache = new Map<string, { readonly at: number; readonly binding: RouteBinding | undefined }>();
+  const crossProviderReviewer = async (request: { readonly tier: ModelTier; readonly excludeProvider: string }, signal: AbortSignal): Promise<RouteBinding | undefined> => {
+    const key = `${request.excludeProvider}|${request.tier}`;
+    const cached = crossReviewerCache.get(key);
+    if (cached !== undefined && Date.now() - cached.at < 5 * 60_000) return cached.binding;
+    const pick = pickCrossProviderReviewer(await runtime.modelCatalog(signal), request.excludeProvider, request.tier);
+    let binding: RouteBinding | undefined;
+    if (pick !== undefined) {
+      const adapter = await implicitAdapter(pick.adapterId).catch(() => undefined);
+      if (adapter !== undefined) {
+        if (!baseRouter.hasAdapter(adapter.adapterId)) baseRouter.addAdapter(adapter);
+        if (!adapters.includes(adapter)) adapters.push(adapter);
+        binding = { provider_id: pick.provider, model_id: pick.model, adapter_id: adapter.adapterId };
+      }
+    }
+    crossReviewerCache.set(key, { at: Date.now(), binding });
+    return binding;
+  };
   const baseRouter = createModelRouter(
-    { rules: config.router.rules, ...(config.preferDifferentProvider === undefined ? {} : { preferDifferentProvider: config.preferDifferentProvider }) },
+    {
+      rules: config.router.rules,
+      ...(config.preferDifferentProvider === undefined ? {} : { preferDifferentProvider: config.preferDifferentProvider }),
+      ...(config.reviewCrossProvider === undefined ? {} : { reviewCrossProvider: config.reviewCrossProvider }),
+      crossProviderReviewer,
+    },
     adapters,
   );
   /** An adapter for a built-in kind the configuration did not need yet (a provider first picked in `/model`). */
@@ -947,19 +973,25 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const flagEffort = options.efforts?.find((entry) => entry.tier === undefined)?.level;
   const effortNotices = new Set<string>();
   const configuredEffort: Partial<Record<EffortSlot, ReasoningEffort | undefined>> = { ...config.effort };
-  const effortFor = (tier: ModelTier, role: AgentRole | undefined, route: Pick<RouteBinding, "provider_id" | "model_id" | "adapter_id">): EffortResolution => {
+  const effortFor = (tier: ModelTier, role: AgentRole | undefined, route: Pick<RouteBinding, "provider_id" | "model_id" | "adapter_id">, hint?: ReasoningEffort): EffortResolution => {
     // The conversation (role session) may run on the orchestrator route: its own `session` level comes first.
     const conversation = role === "session";
-    const roleLevel = role === undefined || role === "orchestrator" ? undefined : configuredEffort[role];
-    const sessionLevel = (conversation ? sessionEfforts.get("session") : undefined) ?? sessionEfforts.get(tier);
-    const requested = sessionLevel ?? flagEffort ?? roleLevel ?? configuredEffort[tier];
+    const requested = requestedEffort({
+      session: (conversation ? sessionEfforts.get("session") : undefined) ?? sessionEfforts.get(tier),
+      flag: flagEffort,
+      role: role === undefined || role === "orchestrator" ? undefined : configuredEffort[role],
+      tier: configuredEffort[tier],
+      hint,
+    });
     return resolveEffort(requested, { provider: route.provider_id, model: route.model_id, adapterId: route.adapter_id });
   };
-  const stepEffort = (input: { readonly role: AgentRole; readonly route: ModelRoute }): ReasoningEffort | undefined => {
+  const stepEffort = (input: { readonly role: AgentRole; readonly route: ModelRoute; readonly packet?: { readonly effort?: ReasoningEffort | undefined } | undefined }): ReasoningEffort | undefined => {
     const tier: ModelTier = input.route.tier ?? (input.role === "session" ? "session" : input.role === "orchestrator" ? "orchestrator" : "complex_worker");
-    const resolution = effortFor(tier, input.role, input.route);
-    // A clamp is said once per level and model, never silently.
-    if (resolution.notice !== undefined && !effortNotices.has(resolution.notice)) {
+    // K6: the orchestrator's per-task hint fills in only where the user set nothing.
+    const hint = input.packet?.effort;
+    const resolution = effortFor(tier, input.role, input.route, hint);
+    // A clamp is said once per level and model, never silently (a clamped task hint is not the user's setting: no notice).
+    if (resolution.notice !== undefined && resolution.requested !== hint && !effortNotices.has(resolution.notice)) {
       effortNotices.add(resolution.notice);
       emit({ kind: "notice", level: "info", message: resolution.notice });
     }

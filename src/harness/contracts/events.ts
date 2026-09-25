@@ -26,7 +26,7 @@ import {
   turnIdSchema,
 } from "./ids.ts";
 import { memoryIdSchema, MEMORY_KINDS } from "./memory.ts";
-import { CONTEXT_BLOCK_SOURCES, modelMessageSchema, modelRouteSchema, providerErrorSchema, quotaSnapshotSchema, routeDecisionSchema, STOP_REASONS, TRUST_LEVELS, usageSchema } from "./model.ts";
+import { CONTEXT_BLOCK_SOURCES, modelMessageSchema, modelRouteSchema, providerErrorSchema, quotaSnapshotSchema, reasoningEffortSchema, routeDecisionSchema, STOP_REASONS, TRUST_LEVELS, usageSchema } from "./model.ts";
 import { planSchema } from "./packets.ts";
 import { pathPatternSchema } from "./paths.ts";
 import {
@@ -325,6 +325,8 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
       envelope_digest: digestSchema,
       envelope_blob: blobRefSchema,
       tool_set_digest: digestSchema,
+      /** v2 (K6): the step's reasoning effort as sent (already clamped); absent = provider default. */
+      reasoning_effort: reasoningEffortSchema.optional(),
       context: z.array(
         z.strictObject({
           block_id: z.string().min(1),
@@ -518,6 +520,7 @@ export type SessionEventOf<T extends SessionEventType> = Extract<SessionEvent, {
 export const EVENT_FIELD_VERSIONS = {
   "session/opened": { config_ignored: 2 },
   "session/resumed": { torn_tail: 2 },
+  "model/request_prepared": { reasoning_effort: 2 },
   "attempt/started": {
     session_id: 2,
     "isolation.reused": 3,

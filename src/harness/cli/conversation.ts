@@ -77,7 +77,7 @@ import { failureInfo } from "./outcome.ts";
 import { createSessionRenderer, type SessionRenderer } from "./renderers.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
 import type { SessionIO } from "./session.ts";
-import { changePathspecs, commitAll, commitSelected, commitsSince, uncommittedChanges, uncommittedDiff, type ChangeSummary } from "./session-git.ts";
+import { changePathspecs, commitAll, commitSelected, commitsSince, lastCommitDiff, uncommittedChanges, uncommittedDiff, type ChangeSummary } from "./session-git.ts";
 import {
   contextReport,
   conversationPaletteEntries,
@@ -2263,40 +2263,54 @@ class Conversation implements ConversationCommandHost {
   public async review(focus: string): Promise<void> {
     const g = this.glyphs;
     const runtime = this.runtime;
-    const diff = await uncommittedDiff(runtime.workspaceRoot, REVIEW_DIFF_LIMIT, this.outer.signal);
+    let diff: { readonly text: string } | undefined = await uncommittedDiff(runtime.workspaceRoot, REVIEW_DIFF_LIMIT, this.outer.signal);
     if (diff === undefined) {
       this.print(["/review needs a git repository: the uncommitted diff is what gets reviewed."]);
       return;
     }
+    let subject = "uncommitted changes";
     if (diff.text.trim() === "") {
-      this.print(["No uncommitted changes to review."]);
-      return;
+      // Nothing uncommitted (e.g. the last run was committed): review the last commit instead.
+      const last = await lastCommitDiff(runtime.workspaceRoot, REVIEW_DIFF_LIMIT, this.outer.signal);
+      if (last === undefined) {
+        this.print(["No uncommitted changes and no commit to review."]);
+        return;
+      }
+      diff = last;
+      subject = `last commit ${last.subject}`;
     }
+    // ADR-09 reviewer routing, as for workers: routes.<tier>.reviewer wins, otherwise review.cross_provider
+    // prefers a provider other than the one that wrote the changes (the conversation's route).
     const rules = runtime.routeRules();
-    const rule = rules.find((candidate) => candidate.role === "reviewer") ?? rules.find((candidate) => candidate.tier === "complex_worker") ?? sessionRouteRule(runtime, this.sessionTier);
-    if (rule === undefined) return;
+    const explicit = rules.find((candidate) => candidate.role === "reviewer");
+    const tier: ModelTier = explicit?.tier ?? (rules.some((candidate) => candidate.tier === "complex_worker") ? "complex_worker" : (sessionRouteRule(runtime, this.sessionTier)?.tier ?? "complex_worker"));
+    const implementer = await this.routePromise?.then((decision) => decision.route).catch(() => undefined);
     let route: RouteDecision;
     try {
-      route = await runtime.router.resolve({ tier: rule.tier, role: rule.role }, this.outer.signal);
+      route = await runtime.router.resolve({ tier, role: "reviewer", ...(implementer === undefined ? {} : { implementer }) }, this.outer.signal);
     } catch (error) {
       this.showFailure(failureInfo(error));
       return;
     }
+    const reviewer = `${route.route.provider_id}/${route.route.model_id}`;
+    const crossProvider = implementer !== undefined && implementer.provider_id !== route.route.provider_id;
     const files = (diff.text.match(/^diff --git /gm) ?? []).length;
-    this.note("info", `${g.bullet} Reviewing ${files} changed file${files === 1 ? "" : "s"} with ${route.route.model_id} ${g.sep} independent: fresh context, no conversation history ${g.sep} Esc stops`);
+    this.note("info", `${g.bullet} Reviewing ${files} changed file${files === 1 ? "" : "s"} (${subject}) with ${reviewer}${crossProvider ? " (another provider)" : ""} ${g.sep} independent: fresh context, no conversation history ${g.sep} Esc stops`);
     const reviewLog = await runtime.sessions.create({
       session_id: createId("session"),
       project_id: runtime.projectId,
       workspace_root: runtime.workspaceRoot,
       created_at: new Date().toISOString(),
-      title: `review: ${focus === "" ? "uncommitted changes" : focus.slice(0, 100)}`,
+      title: `review: ${focus === "" ? subject.slice(0, 100) : focus.slice(0, 100)}`,
     });
+    // The reviewer route and why (independence, cross-provider or the reason it is not) stay in the review's own log.
+    await reviewLog.append({ type: "route/decided", event_version: EVENT_VERSIONS["route/decided"], actor: { kind: "system" }, data: { decision: route } }).catch(() => undefined);
     const driver = runtime.createSessionDriver(runtime.brokerFor(undefined), reviewLog, (gateway) => gateway);
     const active = linked(this.outer.signal);
     this.active = active;
     const prompt = [
       "You are an independent code reviewer. You did not write these changes and you have no conversation history.",
-      "Review the uncommitted diff below for correctness bugs, security problems, missing tests and risky behaviour changes. You may read files to check context; you cannot edit or run commands.",
+      `Review the diff below (${subject}) for correctness bugs, security problems, missing tests and risky behaviour changes. You may read files to check context; you cannot edit or run commands.`,
       "Reply with: a one-line verdict (accept / changes requested / block), then findings as a short list with file:line, severity and why. Say plainly when you found nothing important.",
       ...(focus === "" ? [] : [`Focus: ${focus}`]),
       "",
@@ -2331,9 +2345,9 @@ class Conversation implements ConversationCommandHost {
         this.note("warning", `${g.warn} The reviewer gave no answer${active.signal.aborted ? " (stopped)" : ""}.`);
         return;
       }
-      this.note("info", `${g.bullet} Review ${g.sep} independent (fresh context, ${route.route.model_id}) ${g.sep} advisory, not a harness-verified review`);
+      this.note("info", `${g.bullet} Review ${g.sep} independent (fresh context, ${reviewer}${crossProvider ? ", another provider" : ""}) ${g.sep} advisory, not a harness-verified review`);
       for (const line of answer.trim().split(/\r?\n/)) this.note("info", `  ${line}`);
-      this.pendingNotes.push(`the user ran /review; an independent reviewer (${route.route.model_id}, fresh context) said: ${snippet(answer, 1500)}`);
+      this.pendingNotes.push(`the user ran /review (${subject}); an independent reviewer (${reviewer}, fresh context) said: ${snippet(answer, 1500)}`);
     } catch (error) {
       if (!active.signal.aborted) this.showFailure(failureInfo(error));
     } finally {

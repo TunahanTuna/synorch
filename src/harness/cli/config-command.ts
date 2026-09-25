@@ -27,7 +27,7 @@ import {
 } from "./config.ts";
 import { failureInfo } from "./outcome.ts";
 import { createCredentialStore } from "../auth/index.ts";
-import { KEYED_SEARCH_BACKENDS, WEB_SEARCH_PROVIDERS, type KeyedSearchBackend } from "../providers/index.ts";
+import { KEYED_SEARCH_BACKENDS, REVIEW_CROSS_PROVIDER_MODES, WEB_SEARCH_PROVIDERS, type KeyedSearchBackend } from "../providers/index.ts";
 import { CLAUDE_CODE_MODES } from "../providers/claude-code/native.ts";
 
 /**
@@ -63,6 +63,7 @@ const PLAIN_SETTINGS: readonly SettingDefinition[] = [
   { key: "ui.mouse", kind: "boolean", scope: "user", description: "start with mouse capture on (wheel scroll, click to expand)", fallback: "false", yamlPath: ["ui", "mouse"] },
   { key: "ui.glyphs", kind: "enum", choices: GLYPH_SET_CHOICES, scope: "user", description: "glyph set of the interactive view (SYN_GLYPHS wins)", fallback: "auto", yamlPath: ["ui", "glyphs"] },
   { key: "routing.prefer_different_provider", kind: "boolean", scope: "user", description: "reviewers prefer a provider other than the implementer's", fallback: "true", yamlPath: ["routing", "prefer_different_provider"] },
+  { key: "review.cross_provider", kind: "enum", choices: REVIEW_CROSS_PROVIDER_MODES, scope: "user", description: "reviewer on another provider than the implementer's: prefer (when logged in), off, require (fail without one); routes.<tier>.reviewer wins", fallback: "prefer", yamlPath: ["review", "cross_provider"] },
   { key: "claude_code.mode", kind: "enum", choices: CLAUDE_CODE_MODES, scope: "user", description: "Claude Code bridge: native (Claude's own tools, Synorch approvals) or restricted (Synorch tools only)", fallback: "native", yamlPath: ["claude_code", "mode"] },
   { key: "policy.mode", kind: "enum", choices: POLICY_MODES, scope: "narrow", description: "approval mode for plans (ask narrows auto/full to ask)", fallback: "autonomous", yamlPath: ["policy", "mode"] },
   { key: "policy.require_full_sandbox", kind: "boolean", scope: "narrow", description: "refuse edits and commands without a full OS sandbox", fallback: "false", yamlPath: ["policy", "require_full_sandbox"] },

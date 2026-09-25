@@ -11,6 +11,7 @@ import {
 } from "./common.ts";
 import { digestOf, digestSchema, SOURCE_DIGEST_SCHEMES, type Digest } from "./digest.ts";
 import { evidenceResolutionSchema, harnessEvidenceSchema, repairCountsSchema } from "./evidence.ts";
+import { reasoningEffortSchema } from "./model.ts";
 import {
   acceptanceCriterionIdSchema,
   attemptIdSchema,
@@ -93,6 +94,8 @@ export const planTaskSchema = z.strictObject({
   read_paths: z.array(pathPatternSchema),
   risk: riskClassSchema,
   model_tier: taskModelTierSchema,
+  /** K6: optional reasoning-effort hint; the user's effort settings always win, the hint fills only unset levels. */
+  effort: reasoningEffortSchema.optional().describe("optional reasoning effort: low for trivial/mechanical work, high or above for hard debugging/design; omit for the default"),
   acceptance_criteria: z.array(acceptanceCriterionSchema).min(1),
   verification: z.array(z.string().min(1)),
 });
@@ -271,6 +274,8 @@ export const taskContextPacketSchema = z
     plan_digest: digestSchema,
     role: workerRoleSchema,
     model_tier: taskModelTierSchema,
+    /** K6: the orchestrator's effort hint for this task (below the user's settings). */
+    effort: reasoningEffortSchema.optional(),
     risk: riskClassSchema,
     write_mode: z.enum(["read-only", "owned-paths", "rca-only"]),
     isolation: z.enum(["worktree", "scoped-dir", "shared-read-only"]),

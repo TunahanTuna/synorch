@@ -204,6 +204,7 @@ export const PLAN_FORMAT = [
   "nobody owns the whole workspace, .git or .synorch. An explorer runs no commands: its verification is empty and its criteria are about what to find by reading;",
   "put commands on the implementer that owns the change. A reviewer task depends on the standard/high-risk task(s) it reviews; with several dependencies it is the integration review of their combined result.",
   "A task's criteria must be checkable from its own files; criteria about other tasks' files or the combined result go on the integration reviewer task. You never implement anything yourself.",
+  "Optional per-task effort: low for trivial or mechanical tasks (renames, boilerplate, small edits), high for hard debugging or design; omit it otherwise. The user's own effort settings override it.",
 ].join("\n");
 
 export function renderPlanningPrompt(input: PlannerInput, projectHint?: string): string {

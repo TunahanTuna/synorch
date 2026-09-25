@@ -112,6 +112,11 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - Claude'un skill/komut/açık plugin'leri yerinde okunur, tüm sağlayıcılarda kullanılır (`skills.include_claude` / `plugins.include_claude`, varsayılan açık); `~/.claude` altında yalnız skills/commands/plugins + `enabledPlugins` okunur.
 - Bekleyen: gerçek makinede `syn plugin list` doğrulaması; Claude rotasında `--strict-mcp-config` altında Claude plugin MCP'lerinin yüklenip yüklenmediği; plugin `agents/` ve `hooks/` desteği.
 - ✅ UI (`983683a`): mesajlar tam ve sarılı, araç satırı 3 satır + Ctrl+O, "Starting workers" gibi tören satırları kaldırıldı. ✅ Çapraz sağlayıcılı review + `/review` + görev başına efor (`6749755`). ✅ Sadeleştirme: `--legacy` kaldırıldı, `syn run` ince headless sarmalayıcı (`83961a6`).
+### K8 — Karşılama ekranı ve temalar (ürün sahibi isteği, 2026-09-25) ⭐ UX — sürüyor
+Ürün sahibi: Claude Code'un açılış ekranı gibi şık bir karşılama; birebir kopya değil, kendi tarzımız; ilk kurulumda özelleştirilebilsin, tema değiştirilebilsin; terminalin kısıtlı alanı iyi kullanılsın.
+- Özgün Synorch logosu + sürüm, model · efor · sağlayıcı, worker ekibi, klasör/dal, izin modu, bağlama göre ipucu satırı; ekran boyutuna göre tam/kompakt/minimal.
+- Semantik renk token'larıyla tema sistemi (6–8 hazır tema + `~/.synorch/themes`), `/theme` canlı önizleme, `/welcome` özelleştirme, ilk açılışta kısa kurulum sihirbazı (`/setup`).
+- Not: "Büyük ve sonraya kalanlar" (Windows sandbox, güveni commit/lockfile'a bağlama, npm/main kararları) unutulmadı — Altyapı bölümünde.
 ### Sadeleştirme (K1.5–K3 boyunca)
 - ✅ Eski toplu yol: `syn agent --legacy` kaldırıldı (agent e2e'leri konuşma yoluna taşındı; crash-recovery özeti konuşmanın resume kartında). `syn run` headless giriş noktası olarak kaldı: aynı coordinator çekirdeğini süren ince sarmalayıcı, JSONL sözleşmesi aynı; `--orchestrate` açık yazım olarak kabul edilir.
 - ✅ Explorer yalnız orkestrasyonda: session yolunda explorer alt-run'ı yok (yalnız planner planlar); session ajanı keşfi kendisi yapar.

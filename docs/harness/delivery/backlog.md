@@ -117,6 +117,14 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - Özgün Synorch logosu + sürüm, model · efor · sağlayıcı, worker ekibi, klasör/dal, izin modu, bağlama göre ipucu satırı; ekran boyutuna göre tam/kompakt/minimal.
 - Semantik renk token'larıyla tema sistemi (6–8 hazır tema + `~/.synorch/themes`), `/theme` canlı önizleme, `/welcome` özelleştirme, ilk açılışta kısa kurulum sihirbazı (`/setup`).
 - Not: "Büyük ve sonraya kalanlar" (Windows sandbox, güveni commit/lockfile'a bağlama, npm/main kararları) unutulmadı — Altyapı bölümünde.
+### ✅ Tur 2026-09-25 gece — tamamlananlar
+- Claude köprüsü canlı doğrulama (`2921531`): plugin MCP'leri `--strict-mcp-config` altında artık Claude'a iletiliyor; yeni Claude oturumunda geçmiş bir kez aktarılıyor. Rapor: [claude-code-bridge-verification.md](../research/provider-auth/claude-code-bridge-verification.md).
+- Sağlayıcı başına kota + worker kullanımı (`846b57c`), `syn run` devam kartı, grapheme-uyumlu pano genişlikleri.
+- Plugin hook'ları (onaylı, Claude araç adı eşlemesi) ve plugin ajanları worker kişiliği olarak (`632a2ce`); `/agents`.
+- Katmanlı paneller (`03f8320`): `/skills /plugins /mcp /status /usage /context /runs /memory /config /resume /help`.
+- `/review` = ADR-09 bağımsız review (`2cc3875`): hedefler, sabitlenmiş artifact, karar kartı, "düzelteyim mi?" akışı.
+- Açılış uyarıları sadeleşti + MCP OAuth girişi (`6a35ee8`); logo (`e4678a9`).
+- Kalan küçükler: `/agents` paneli, headless `syn review --json`, Windows CI son test (log erişimi için sahip kararı), gerçek terminal denemesi.
 ### Sadeleştirme (K1.5–K3 boyunca)
 - ✅ Eski toplu yol: `syn agent --legacy` kaldırıldı (agent e2e'leri konuşma yoluna taşındı; crash-recovery özeti konuşmanın resume kartında). `syn run` headless giriş noktası olarak kaldı: aynı coordinator çekirdeğini süren ince sarmalayıcı, JSONL sözleşmesi aynı; `--orchestrate` açık yazım olarak kabul edilir.
 - ✅ Explorer yalnız orkestrasyonda: session yolunda explorer alt-run'ı yok (yalnız planner planlar); session ajanı keşfi kendisi yapar.

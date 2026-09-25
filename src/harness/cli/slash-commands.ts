@@ -57,6 +57,8 @@ export interface ConversationCommandHost {
   undo(): Promise<void>;
   allow(argument: string): Promise<void>;
   trust(): Promise<void>;
+  /** `/status`: mode, sandbox, MCP servers and the notices of this session's start. */
+  status(): Promise<void>;
   model(argument: string): Promise<void>;
   /** K6 `/effort [level] [--tier <tier>]`: set, or with no level pick, a tier's reasoning effort for this session. */
   effort(argument: string): Promise<void>;
@@ -124,6 +126,7 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/undo", description: "revert the last edit Synorch made (files only)", run: (host) => host.undo() },
   { name: "/allow", argsHint: "[prefix | -r prefix]", description: "let Synorch run commands starting with <prefix> here", whileBusy: true, run: (host, argument) => host.allow(argument) },
   { name: "/trust", description: "trust this folder so build/test commands may run", run: (host) => host.trust() },
+  { name: "/status", description: "session status: model, mode, sandbox, MCP servers and startup notices", whileBusy: true, run: (host) => host.status() },
   { name: "/usage", description: "requests, tokens, quota and estimated cost (session and today)", whileBusy: true, run: (host) => host.usage() },
   { name: "/cost", description: "this session's estimated cost and tokens", whileBusy: true, run: (host) => host.cost() },
   { name: "/evidence", argsHint: "[turn | n]", description: "proof for the last turn or worker run: criteria, checks Synorch ran, review verdict and findings", whileBusy: true, run: (host, argument) => host.evidence(argument) },
@@ -138,7 +141,7 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/memory", argsHint: "[init | review | edit <id> | retire <id> | open [id] | graph]", description: "memory ledger and decision desk: what Synorch remembers, proposals to accept / edit / reject / defer", whileBusy: true, run: (host, argument) => host.report("memory", argument) },
   { name: "/mouse", argsHint: "[on|off]", description: "toggle mouse capture (scroll / select)", whileBusy: true, rendererLocal: true, run: (host, argument) => host.mouse(argument) },
   { name: "/diff", description: "files changed by Synorch in this conversation", whileBusy: true, run: (host, argument) => host.report("diff", argument) },
-  { name: "/mcp", argsHint: "[tools | reconnect | enable | disable | approve <name>]", description: "MCP servers (external tools such as Playwright): state, tools, reconnect, enable / disable, approve a project server", whileBusy: true, run: (host, argument) => host.mcp(argument) },
+  { name: "/mcp", argsHint: "[<name> | tools | reconnect | login | logout | enable | disable | approve <name>]", description: "MCP servers (external tools such as Playwright): state, details, tools, sign in, reconnect, enable / disable, approve a project server", whileBusy: true, run: (host, argument) => host.mcp(argument) },
   { name: "/skills", argsHint: "[show | enable | disable <name>]", description: "skills and slash commands (yours, the repo's, plugins', Claude Code's): source, state; /<name> runs one", whileBusy: true, run: (host, argument) => host.skills(argument) },
   { name: "/plugins", argsHint: "[install <spec> | remove | enable | disable <name>]", description: "plugins (Claude Code format): what each adds; install, remove, enable / disable", whileBusy: true, run: (host, argument) => host.plugins(argument) },
   { name: "/ps", argsHint: "[kill <handle|all>]", description: "background processes (dev servers, watchers); stop one or all", whileBusy: true, run: (host, argument) => host.ps(argument) },

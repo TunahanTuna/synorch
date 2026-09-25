@@ -1131,6 +1131,7 @@ export function headerLines(options: {
   readonly model: string | undefined;
   readonly mode: string;
   readonly sandboxEnforcement: "full" | "partial" | "unavailable";
+  readonly sandboxNoticeSeen?: boolean;
   readonly warnings: readonly string[];
   readonly glyphs: GlyphSet;
 }): { readonly title: string; readonly warning: string | undefined } {
@@ -1139,7 +1140,7 @@ export function headerLines(options: {
     .filter((part): part is string => part !== undefined && part !== "")
     .join(` ${g.sep} `);
   const warnings: string[] = [];
-  if (options.sandboxEnforcement !== "full") warnings.push("Sandbox is partial: commands you allow can write outside this folder");
+  if (options.sandboxEnforcement !== "full" && options.sandboxNoticeSeen !== true) warnings.push(`Sandbox is partial: allowed commands can write outside this folder ${g.sep} /permissions`);
   warnings.push(...options.warnings);
   if (warnings.length === 0) return { title, warning: undefined };
   const [first, ...rest] = warnings;

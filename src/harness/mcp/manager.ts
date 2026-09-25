@@ -6,6 +6,8 @@ import type { ToolRegistry } from "../contracts/index.ts";
 import { createMcpApprovalStore, type McpApprovalStore } from "./approvals.ts";
 import { McpConnection, mcpLogFile, type McpToolInfo } from "./client.ts";
 import { mergeServers, modelToolName, readMcpJson, type McpConfig, type McpConfigProblem, type McpServerDefinition } from "./config.ts";
+import { McpStartError } from "./errors.ts";
+import { loginMcpServer, sessionAuthProvider, type McpLoginDependencies, type McpOAuthStore } from "./oauth.ts";
 import { createMcpTool } from "./tools.ts";
 
 /**
@@ -15,7 +17,7 @@ import { createMcpTool } from "./tools.ts";
  * server is disabled or reconnected. Every server process ends with the session.
  */
 
-export type McpServerState = "disabled" | "needs-approval" | "idle" | "starting" | "connected" | "failed";
+export type McpServerState = "disabled" | "needs-approval" | "needs-auth" | "idle" | "starting" | "connected" | "failed";
 
 export interface McpServerStatus {
   readonly name: string;
@@ -28,7 +30,10 @@ export interface McpServerStatus {
   readonly state: McpServerState;
   /** Model-visible tool names (registered now). */
   readonly tools: readonly string[];
+  /** Short, human reason ("needs sign-in", "command not found (npx)"). */
   readonly error: string | undefined;
+  /** The raw failure (protocol text, stderr tail) for the /mcp detail view. */
+  readonly detail: string | undefined;
   readonly logFile: string;
   readonly missingVariables: readonly string[];
 }
@@ -51,6 +56,10 @@ export interface McpManagerOptions {
   readonly approvals?: McpApprovalStore;
   /** K7: servers of enabled plugins (installed by the user or enabled in Claude Code): trusted like user servers. */
   readonly plugins?: () => readonly McpServerDefinition[];
+  /** MCP OAuth sign-ins (Synorch's credential store); without it remote servers never use OAuth. */
+  readonly oauth?: McpOAuthStore;
+  /** False when the folder is not a project (the home folder, no git, no markers): project servers are not read. */
+  readonly projectScope?: boolean;
 }
 
 interface ServerSlot {
@@ -60,6 +69,8 @@ interface ServerSlot {
   connecting: Promise<McpConnection> | undefined;
   registered: string[];
   error: string | undefined;
+  detail: string | undefined;
+  needsAuth: boolean;
 }
 
 const cacheSchema = z.strictObject({
@@ -88,13 +99,14 @@ export class McpManager {
 
   /** Reads `.mcp.json` and resolves every server definition (no process is started). */
   public async load(): Promise<void> {
-    const mcpJson = await readMcpJson(this.options.workspaceRoot, this.options.environment);
-    const merged = mergeServers(this.options.user.config, this.options.user.file, this.options.project.config, this.options.project.file, mcpJson, this.options.environment, this.options.workspaceRoot, this.options.plugins?.() ?? []);
+    const projectScope = this.options.projectScope !== false;
+    const mcpJson = projectScope ? await readMcpJson(this.options.workspaceRoot, this.options.environment) : { servers: [], problems: [] };
+    const merged = mergeServers(this.options.user.config, this.options.user.file, projectScope ? this.options.project.config : undefined, this.options.project.file, mcpJson, this.options.environment, this.options.workspaceRoot, this.options.plugins?.() ?? []);
     this.loadProblems = [...merged.problems];
     const next = new Map<string, ServerSlot>();
     for (const definition of merged.servers) {
       const previous = this.slots.get(definition.name);
-      next.set(definition.name, previous !== undefined && previous.definition.digest === definition.digest ? { ...previous, definition } : { definition, sessionDisabled: false, connection: undefined, connecting: undefined, registered: [], error: undefined });
+      next.set(definition.name, previous !== undefined && previous.definition.digest === definition.digest ? { ...previous, definition } : { definition, sessionDisabled: false, connection: undefined, connecting: undefined, registered: [], error: undefined, detail: undefined, needsAuth: false });
       for (const value of [...Object.entries(definition.env), ...Object.entries(definition.headers)]) {
         if (SECRET_NAME.test(value[0]) && value[1].length >= 8) this.options.addRedaction?.(value[1]);
       }
@@ -155,6 +167,7 @@ export class McpManager {
         state: this.stateOf(slot),
         tools: [...slot.registered],
         error: slot.error,
+        detail: slot.detail,
         logFile: mcpLogFile(this.logDirectory, definition.name),
         missingVariables: definition.missingVariables,
       };
@@ -172,6 +185,7 @@ export class McpManager {
     if (slot === undefined) throw new Error(`no MCP server named ${name}`);
     if (!slot.definition.enabled || slot.sessionDisabled) throw new Error(`${name} is disabled (/mcp enable ${name})`);
     if (this.needsApproval(slot.definition)) throw new Error(`${name} is a project server that has not been approved (/mcp approve ${name})`);
+    if (slot.needsAuth && slot.connecting === undefined) throw new Error(`${name} needs sign-in (/mcp login ${name})`);
     if (slot.connection !== undefined && !slot.connection.isClosed) return slot.connection;
     const pending = this.connect(slot);
     if (signal === undefined) return pending;
@@ -189,8 +203,33 @@ export class McpManager {
     if (slot === undefined) return undefined;
     await this.stop(slot);
     slot.error = undefined;
+    slot.detail = undefined;
+    slot.needsAuth = false;
     if (this.usable(slot)) await this.connect(slot).catch(() => undefined);
     return this.status().find((entry) => entry.name === name);
+  }
+
+  /** `/mcp login <name>`: MCP OAuth in the browser, then a fresh start with the stored sign-in. */
+  public async login(name: string, deps: Omit<McpLoginDependencies, "store">): Promise<McpServerStatus | undefined> {
+    const slot = this.slots.get(name);
+    if (slot === undefined) return undefined;
+    const store = this.options.oauth;
+    if (store === undefined) throw new Error("sign-in is not available here (no credential store)");
+    await loginMcpServer(slot.definition, { ...deps, store });
+    return this.reconnect(name);
+  }
+
+  /** `/mcp logout <name>`: forgets the stored sign-in and stops the server. */
+  public async logout(name: string): Promise<boolean> {
+    const slot = this.slots.get(name);
+    const removed = (await this.options.oauth?.remove(name).catch(() => false)) ?? false;
+    if (slot !== undefined) {
+      await this.stop(slot);
+      slot.error = undefined;
+      slot.detail = undefined;
+      slot.needsAuth = false;
+    }
+    return removed;
   }
 
   /** Session-scoped enable/disable (the CLI also persists it for user servers). */
@@ -266,6 +305,7 @@ export class McpManager {
     if (this.needsApproval(slot.definition)) return "needs-approval";
     if (slot.connecting !== undefined) return "starting";
     if (slot.connection !== undefined && !slot.connection.isClosed) return "connected";
+    if (slot.needsAuth) return "needs-auth";
     if (slot.error !== undefined) return "failed";
     return "idle";
   }
@@ -274,13 +314,16 @@ export class McpManager {
     if (this.closed) return Promise.reject(new Error("the session is closing"));
     if (slot.connecting !== undefined) return slot.connecting;
     const definition = slot.definition;
-    const attempt = McpConnection.connect(definition, {
-      workspaceRoot: this.options.workspaceRoot,
-      logDirectory: this.logDirectory,
-      clientVersion: this.options.clientVersion,
-      environment: this.options.environment,
-      ...(this.options.platform === undefined ? {} : { platform: this.options.platform }),
-    }).then(
+    const attempt = sessionAuthProvider(definition, this.options.oauth).then((authProvider) =>
+      McpConnection.connect(definition, {
+        workspaceRoot: this.options.workspaceRoot,
+        logDirectory: this.logDirectory,
+        clientVersion: this.options.clientVersion,
+        environment: this.options.environment,
+        ...(this.options.platform === undefined ? {} : { platform: this.options.platform }),
+        ...(authProvider === undefined ? {} : { authProvider }),
+      }),
+    ).then(
       async (connection) => {
         slot.connecting = undefined;
         if (this.closed || slot.definition !== definition || slot.sessionDisabled) {
@@ -289,6 +332,8 @@ export class McpManager {
         }
         slot.connection = connection;
         slot.error = undefined;
+        slot.detail = undefined;
+        slot.needsAuth = false;
         connection.onClose((reason) => {
           if (slot.connection === connection) slot.error = `stopped: ${reason}${connection.lastStderr.trim() === "" ? "" : ` (${connection.lastStderr.trim().split(/\r?\n/).at(-1)?.slice(0, 300) ?? ""})`}`;
         });
@@ -298,7 +343,15 @@ export class McpManager {
       },
       (error: unknown) => {
         slot.connecting = undefined;
-        slot.error = error instanceof Error ? error.message : String(error);
+        if (error instanceof McpStartError) {
+          slot.error = error.friendly;
+          slot.detail = error.detail;
+          slot.needsAuth = error.kind === "needs-auth";
+        } else {
+          slot.error = error instanceof Error ? error.message : String(error);
+          slot.detail = slot.error;
+          slot.needsAuth = false;
+        }
         throw error;
       },
     );

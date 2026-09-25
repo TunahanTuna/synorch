@@ -191,7 +191,7 @@ function claudeHomeOf(io: ExtensionCommandIO): string | undefined {
   return io.claudeHome === null ? undefined : (io.claudeHome ?? resolveClaudeHome(io.env));
 }
 
-async function standaloneExtensions(io: ExtensionCommandIO, root: string): Promise<Extensions> {
+export async function standaloneExtensions(io: ExtensionCommandIO, root: string): Promise<Extensions> {
   const config = await loadRuntimeConfig(io.home, root, [], { platform: io.platform, ...(io.discovery ?? {}) });
   const canonical = await loadCanonicalStructure(root);
   const trusted = createWorkspaceTrustStore(io.home, { platform: io.platform }).status(root).trusted;

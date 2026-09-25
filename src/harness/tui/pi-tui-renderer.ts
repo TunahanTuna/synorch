@@ -1134,6 +1134,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       model: header.model,
       mode: "",
       sandboxEnforcement: header.sandboxEnforcement,
+      ...(header.sandboxNoticeSeen === undefined ? {} : { sandboxNoticeSeen: header.sandboxNoticeSeen }),
       warnings: header.notices,
       glyphs: presenter.glyphs,
     });

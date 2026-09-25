@@ -55,7 +55,7 @@ export {
   type CatalogModel,
   type ListedModel,
 } from "./catalog.ts";
-export { clampEffort, isReasoningEffort, requestedEffort, resolveEffort, supportedEfforts, type EffortResolution, type EffortSources, type EffortTarget } from "./effort.ts";
+export { clampEffort, defaultEffort, isReasoningEffort, requestedEffort, resolveEffort, supportedEfforts, type EffortResolution, type EffortSources, type EffortTarget } from "./effort.ts";
 export {
   createWebSearchRunner,
   KEYED_SEARCH_BACKENDS,

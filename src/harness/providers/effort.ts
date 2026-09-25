@@ -91,6 +91,29 @@ export function clampEffort(requested: ReasoningEffort, supported: readonly Reas
   return best;
 }
 
+/** The levels that may ask for a step's effort, by source. */
+export interface EffortSources {
+  /** `/effort` or `--effort <tier>=<level>` for this session. */
+  readonly session?: ReasoningEffort | undefined;
+  /** `--effort <level>`. */
+  readonly flag?: ReasoningEffort | undefined;
+  /** `effort.<role>` of the user configuration. */
+  readonly role?: ReasoningEffort | undefined;
+  /** `effort.<tier>` of the user configuration. */
+  readonly tier?: ReasoningEffort | undefined;
+  /** The orchestrator's per-task hint (task packet `effort`). */
+  readonly hint?: ReasoningEffort | undefined;
+}
+
+/**
+ * K6 precedence: session override > `--effort` flag > configured role > configured tier > the
+ * orchestrator's task hint > model default (undefined). The user's settings always win; a hint only
+ * fills the gap where the user set nothing.
+ */
+export function requestedEffort(sources: EffortSources): ReasoningEffort | undefined {
+  return sources.session ?? sources.flag ?? sources.role ?? sources.tier ?? sources.hint;
+}
+
 export function resolveEffort(requested: ReasoningEffort | undefined, target: EffortTarget): EffortResolution {
   const supported = supportedEfforts(target);
   if (target.adapterId === "scripted" || target.provider === "scripted") return { requested, effective: undefined, supported, notice: undefined };

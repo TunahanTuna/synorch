@@ -41,6 +41,7 @@ export {
 } from "./responses.ts";
 export { RouteBlockedFailure, type ModelRouterConfig, type ProviderChangeProposal, type RouteBinding, type RouteRule } from "../contracts/index.ts";
 export { createModelRouter, type ModelRouterOptions, type SessionModelRouter } from "./router.ts";
+export { pickCrossProviderReviewer, REVIEW_CROSS_PROVIDER_MODES, type ReviewCrossProviderMode } from "./reviewer-route.ts";
 export {
   anthropicWireModelId,
   badgeOf,
@@ -54,7 +55,7 @@ export {
   type CatalogModel,
   type ListedModel,
 } from "./catalog.ts";
-export { clampEffort, isReasoningEffort, resolveEffort, supportedEfforts, type EffortResolution, type EffortTarget } from "./effort.ts";
+export { clampEffort, isReasoningEffort, requestedEffort, resolveEffort, supportedEfforts, type EffortResolution, type EffortSources, type EffortTarget } from "./effort.ts";
 export {
   createWebSearchRunner,
   KEYED_SEARCH_BACKENDS,

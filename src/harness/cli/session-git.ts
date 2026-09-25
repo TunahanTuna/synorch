@@ -59,6 +59,15 @@ export async function uncommittedDiff(cwd: string, limitBytes: number, signal?: 
   return { text: truncated ? `${Buffer.from(text, "utf8").subarray(0, limitBytes).toString("utf8")}\n… (diff truncated)` : text, truncated };
 }
 
+/** `/review` with nothing uncommitted: the last commit's diff (subject line first), bounded; undefined without one. */
+export async function lastCommitDiff(cwd: string, limitBytes: number, signal?: AbortSignal): Promise<{ readonly text: string; readonly subject: string } | undefined> {
+  const shown = await git(cwd, ["show", "HEAD", "--no-color", "--no-ext-diff", "--format=%h %s"], signal);
+  if (!shown.ok || shown.stdout.trim() === "") return undefined;
+  const subject = shown.stdout.split(/\r?\n/, 1)[0] ?? "HEAD";
+  const truncated = Buffer.byteLength(shown.stdout, "utf8") > limitBytes;
+  return { text: truncated ? `${Buffer.from(shown.stdout, "utf8").subarray(0, limitBytes).toString("utf8")}\n… (diff truncated)` : shown.stdout, subject };
+}
+
 /** Commits every uncommitted change with `message` (the human confirmed both). */
 export async function commitAll(cwd: string, message: string, signal?: AbortSignal): Promise<GitResult> {
   const add = await git(cwd, ["add", "-A"], signal);

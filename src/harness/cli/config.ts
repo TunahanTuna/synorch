@@ -25,7 +25,7 @@ import {
 } from "../contracts/index.ts";
 import { mcpConfigSchema, type McpConfig } from "../mcp/index.ts";
 import { policyConfigSchema, type PolicyConfig } from "../policy/index.ts";
-import { WEB_SEARCH_PROVIDERS, type WebSearchProvider } from "../providers/index.ts";
+import { REVIEW_CROSS_PROVIDER_MODES, WEB_SEARCH_PROVIDERS, type ReviewCrossProviderMode, type WebSearchProvider } from "../providers/index.ts";
 import { CLAUDE_CODE_MODES, type ClaudeCodeMode } from "../providers/claude-code/native.ts";
 import type { RouteOverride } from "./args.ts";
 
@@ -160,6 +160,13 @@ const configFileSchema = z.strictObject({
       prefer_different_provider: z.boolean().optional(),
     })
     .optional(),
+  /** Independent review (user layer only). */
+  review: z
+    .strictObject({
+      /** `prefer` (default): reviewer on a provider other than the implementer's when logged in; `off`; `require`: fail without one. `routes.<tier>.reviewer` always wins. */
+      cross_provider: z.enum(REVIEW_CROSS_PROVIDER_MODES).optional(),
+    })
+    .optional(),
   /** Claude Code bridge (user layer only): `native` (default) runs Claude's built-in tools, `restricted` only Synorch's. */
   claude_code: z
     .strictObject({
@@ -239,6 +246,8 @@ export interface RuntimeConfig {
   readonly permissionMode: PermissionMode | undefined;
   /** `routing.prefer_different_provider` (user layer only); undefined means the router default (true). */
   readonly preferDifferentProvider: boolean | undefined;
+  /** `review.cross_provider` (user layer only); undefined means `prefer` (or `off` when `routing.prefer_different_provider` is false). */
+  readonly reviewCrossProvider: ReviewCrossProviderMode | undefined;
   /** `ui.mouse` (user layer only). */
   readonly mouse: boolean | undefined;
   /** `ui.glyphs` (user layer only); `auto` or undefined detects the set. */
@@ -533,6 +542,7 @@ export async function loadRuntimeConfig(
     color: user?.ui?.color,
     permissionMode: user?.ui?.permission_mode,
     preferDifferentProvider: user?.routing?.prefer_different_provider,
+    reviewCrossProvider: user?.review?.cross_provider,
     mouse: user?.ui?.mouse,
     glyphs: user?.ui?.glyphs,
     claudeCodeMode: user?.claude_code?.mode,

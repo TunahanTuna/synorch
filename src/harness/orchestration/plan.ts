@@ -459,6 +459,7 @@ export function compileTaskPacket(input: CompilePacketInput): TaskContextPacket 
     plan_digest: input.planDigest,
     role: task.role,
     model_tier: task.model_tier,
+    ...(task.effort === undefined ? {} : { effort: task.effort }),
     risk: task.risk,
     write_mode: writeModeFor(task),
     isolation: isolationFor(task, input.preferWorktree),

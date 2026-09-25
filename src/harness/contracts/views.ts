@@ -84,13 +84,18 @@ export interface UsageRowView {
 }
 
 export interface QuotaWindowView {
-  /** Account/provider label (`claude-code`, `codex`). */
+  /** Account/provider label (`claude`, `chatgpt`). */
   readonly provider: string;
-  /** Window label (`5h`, `weekly`). */
+  /** Window label (`5h`, `weekly`); empty when the provider reported no window yet. */
   readonly window: string;
-  readonly usedPercent: number;
+  /** Undefined: the subscription was used but reported no quota (shown as "not reported"). */
+  readonly usedPercent: number | undefined;
   /** Display text, e.g. `14:20` or `in 3h`. */
   readonly resetsAt?: string | undefined;
+  /** Plan label (`ChatGPT Plus`, `Claude Code`), on the provider's first row. */
+  readonly plan?: string | undefined;
+  /** This session's requests on the provider, and how many of them were workers'. */
+  readonly requests?: { readonly total: number; readonly workers: number } | undefined;
 }
 
 export interface UsageView {

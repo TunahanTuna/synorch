@@ -41,8 +41,10 @@ export const USAGE: UsageView = {
     { provider: "openai", model: "gpt-6-sol", tier: "fast", billing: "subscription", requests: 12, inputTokens: 90_000, outputTokens: 5_000 },
   ],
   quotas: [
-    { provider: "claude-code", window: "5h", usedPercent: 58, resetsAt: "14:20" },
-    { provider: "codex", window: "weekly", usedPercent: 93 },
+    { provider: "claude", window: "5h", usedPercent: 58, resetsAt: "in 1h 20m", plan: "Claude Code", requests: { total: 9, workers: 7 } },
+    { provider: "chatgpt", window: "weekly", usedPercent: 93, plan: "ChatGPT Plus", requests: { total: 4, workers: 0 } },
+    { provider: "chatgpt", window: "5h", usedPercent: 12 },
+    { provider: "gemini", window: "", usedPercent: undefined },
   ],
 };
 

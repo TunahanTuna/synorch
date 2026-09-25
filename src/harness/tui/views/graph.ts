@@ -1,6 +1,6 @@
 import type { OrchestrationTaskView, OrchestrationView } from "../../contracts/views.ts";
 import { boardHint, isActive, paint, presentTask, type Tone } from "./board.ts";
-import { charWidth, clean, displayWidth, finish, padEnd, spread, truncate, type BoxGlyphs, type ViewContext } from "./kit.ts";
+import { charWidth, clean, graphemes, displayWidth, finish, padEnd, spread, truncate, type BoxGlyphs, type ViewContext } from "./kit.ts";
 
 /**
  * The orchestration graph (`/graph`, `g` from the live board): the plan as a terminal DAG. Tasks
@@ -143,7 +143,7 @@ class Grid {
   public put(x: number, y: number, text: string, tone: CellTone | undefined): void {
     if (y < 0 || y >= this.height) return;
     let column = x;
-    for (const char of text) {
+    for (const char of graphemes(text)) {
       if (column >= this.width) break;
       (this.chars[y] as (string | undefined)[])[column] = char;
       (this.tones[y] as (CellTone | undefined)[])[column] = tone;

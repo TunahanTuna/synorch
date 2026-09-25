@@ -750,7 +750,7 @@ export function statusLineParts(
   if (extra.mode !== undefined) parts.push({ text: extra.mode, drop: 0 });
   if (extra.approvalWaiting) parts.push({ text: style.yellow("approval waiting"), drop: 0 });
   if (footer.contextPercent !== undefined) parts.push({ text: usageTone(footer.contextPercent, style)(`ctx ${footer.contextPercent}%`), drop: 0 });
-  if (footer.quotaPercent !== undefined) parts.push({ text: usageTone(footer.quotaPercent, style)(`quota ${footer.quotaPercent}%`), drop: 4 });
+  if (footer.quotaPercent !== undefined) parts.push({ text: usageTone(footer.quotaPercent, style)(`quota ${footer.quotaPercent}%${footer.quotaProvider === undefined ? "" : ` ${footer.quotaProvider}`}`), drop: 4 });
   else if (footer.costUsd !== undefined) parts.push({ text: style.dim(`$${footer.costUsd.toFixed(2)}`), drop: 3.5 });
   return parts;
 }

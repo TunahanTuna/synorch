@@ -21,6 +21,7 @@ import {
   type PermissionMode,
   type ProviderCapabilities,
   type ProviderError,
+  type QuotaSnapshot,
   type ReasoningEffort,
   type ToolBridge,
   type ToolDescriptor,
@@ -610,6 +611,13 @@ class ClaudeCodeSession implements BackendSession {
           continue;
         }
 
+        // Subscription usage the CLI already reports in its stream (no extra request): one quota window.
+        if (type === "rate_limit_event") {
+          const quota = claudeRateLimitQuota(record(message.rate_limit_info));
+          if (quota !== undefined) yield { type: "quota", quota };
+          continue;
+        }
+
         if (type === "result") {
           if (aborted || signal.aborted) {
             yield fail(providerError("cancelled", "turn interrupted by user"));
@@ -900,6 +908,33 @@ function trailingUserContent(input: BackendTurnInput): UserBlock[] | undefined {
     blocks.unshift(...own);
   }
   return blocks.some((block) => block.type === "text") ? blocks : undefined;
+}
+
+const CLAUDE_WINDOWS: Readonly<Record<string, string>> = {
+  five_hour: "5h",
+  seven_day: "weekly",
+  seven_day_opus: "weekly opus",
+  seven_day_sonnet: "weekly sonnet",
+  overage: "extra usage",
+};
+
+/**
+ * Claude Code's `rate_limit_event` (`rate_limit_info: { status, rateLimitType, utilization?, resetsAt? }`)
+ * → a quota snapshot. `utilization` is a 0–1 fraction (or a percent); without it only a `rejected`
+ * status tells the level (100%). Anything else yields nothing rather than a guessed number.
+ */
+export function claudeRateLimitQuota(info: Record<string, unknown> | undefined): QuotaSnapshot | undefined {
+  if (info === undefined) return undefined;
+  const utilization = numberField(info, "utilization");
+  const status = stringField(info, "status");
+  const percent = utilization !== undefined && Number.isFinite(utilization) ? (utilization <= 1 ? utilization * 100 : utilization) : status === "rejected" ? 100 : undefined;
+  if (percent === undefined) return undefined;
+  const kind = stringField(info, "rateLimitType") ?? "";
+  const name = (CLAUDE_WINDOWS[kind] ?? kind.replace(/[^\w .-]/g, "").slice(0, 64)) || "window";
+  const resets = numberField(info, "resetsAt");
+  const resetsAt = resets === undefined || !Number.isFinite(resets) ? undefined : new Date(resets > 1e12 ? resets : resets * 1000);
+  const window = { name, used_percent: Math.min(100, Math.max(0, percent)) };
+  return { source: "api", windows: [resetsAt === undefined || Number.isNaN(resetsAt.getTime()) ? window : { ...window, resets_at: resetsAt.toISOString() }] };
 }
 
 /** Recognizes `Login expired · Please run /login` and rate/billing failures in backend output. */

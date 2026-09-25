@@ -76,7 +76,7 @@ test("AC-1 openai-chatgpt fixture yields a grammar-valid stream with reasoning, 
   assert.ok(start?.type === "start" && start.provider_request_id === "req-provider-1");
   const quota = events[1];
   assert.ok(quota?.type === "quota");
-  assert.deepEqual(quota.quota.windows.map((window) => [window.name, window.used_percent]), [["primary", 41.5], ["secondary", 3]]);
+  assert.deepEqual(quota.quota.windows.map((window) => [window.name, window.used_percent]), [["5h", 41.5], ["secondary", 3]]);
   const done = terminal(events);
   assert.ok(done.type === "done");
   assert.equal(done.stop_reason, "tool_use");

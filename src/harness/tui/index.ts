@@ -23,6 +23,8 @@ export {
   ConversationPresenter,
   GLYPH_SETS,
   patchPaths,
+  quotaProviderLabel,
+  runPrompts,
   selectGlyphs,
   type ConversationItem,
   type GlyphSet,

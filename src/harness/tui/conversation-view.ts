@@ -100,6 +100,8 @@ export interface FooterState {
   readonly effort: string | undefined;
   readonly contextPercent: number | undefined;
   readonly quotaPercent: number | undefined;
+  /** Whose quota `quotaPercent` is (`claude`, `chatgpt`): the most-used subscription of this process. */
+  readonly quotaProvider?: string | undefined;
   readonly costUsd: number | undefined;
 }
 
@@ -161,7 +163,9 @@ export class ConversationPresenter {
   private activityVerb: { verb: string; detail: string | undefined } | undefined;
   private waiting = false;
   private contextTokens: number | undefined;
-  private quota: number | undefined;
+  /** Highest window % per provider (this conversation's requests and its workers'). */
+  private readonly quotas = new Map<string, number>();
+  private readonly requestProviders = new Map<string, string>();
   private cost: number | undefined;
   private model: string | undefined;
   private effort: string | undefined;
@@ -241,9 +245,21 @@ export class ConversationPresenter {
       model: this.model,
       effort: this.effort,
       contextPercent: this.contextTokens === undefined || window === undefined || window <= 0 ? undefined : Math.min(100, Math.round((this.contextTokens / window) * 100)),
-      quotaPercent: this.quota,
+      ...this.topQuota(),
       costUsd: this.cost,
     };
+  }
+
+  private topQuota(): { quotaPercent: number | undefined; quotaProvider?: string } {
+    let top: [string, number] | undefined;
+    for (const entry of this.quotas) if (top === undefined || entry[1] > top[1]) top = entry;
+    if (top === undefined) return { quotaPercent: undefined };
+    return top[0] === "" ? { quotaPercent: top[1] } : { quotaPercent: top[1], quotaProvider: quotaProviderLabel(top[0]) };
+  }
+
+  private noteQuota(provider: string | undefined, windows: readonly { readonly used_percent: number }[]): void {
+    const percent = maxQuota(windows);
+    if (percent !== undefined) this.quotas.set(provider ?? "", percent);
   }
 
   public apply(event: RenderEvent): ViewOp[] {
@@ -302,7 +318,7 @@ export class ConversationPresenter {
       if (this.activityVerb?.verb === "Responding") this.activityVerb = undefined;
       return ops;
     }
-    if (event.type === "quota") this.quota = maxQuota(event.quota.windows);
+    if (event.type === "quota") this.noteQuota(this.requestProviders.get(requestId), event.quota.windows);
     return [];
   }
 
@@ -338,11 +354,13 @@ export class ConversationPresenter {
       case "model/request_prepared":
         this.contextTokens = event.data.context.reduce((sum, block) => sum + block.tokens_estimate, 0);
         this.model ??= event.data.route.model_id;
+        this.requestProviders.set(event.data.request_id, event.data.route.provider_id);
         return [];
       case "provider/usage":
         this.turnTokens += usageTokens(event.data.usage);
         if (event.data.usage.cost_usd_estimate !== undefined) this.cost = (this.cost ?? 0) + event.data.usage.cost_usd_estimate;
-        if (event.data.quota !== undefined) this.quota = maxQuota(event.data.quota.windows);
+        if (event.data.quota !== undefined) this.noteQuota(event.data.provider_id ?? this.requestProviders.get(event.data.request_id), event.data.quota.windows);
+        this.requestProviders.delete(event.data.request_id);
         return [];
       case "model/response_failed":
         if (event.data.error.code === "cancelled") return [];
@@ -724,6 +742,37 @@ export class ConversationPresenter {
 function usageTokens(usage: Usage): number {
   return (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
 }
+
+/** Short footer name of a provider's subscription: `anthropic` -> `claude`, `openai` -> `chatgpt`. */
+export function quotaProviderLabel(provider: string): string {
+  if (provider === "anthropic") return "claude";
+  if (provider === "openai") return "chatgpt";
+  return sanitizeInline(provider, 16);
+}
+
+/**
+ * A `syn run` (or orchestrated) session: its goal and the orchestrator's own prompts. Inside a run
+ * (from `run/created` until the run reaches a terminal state) user-role messages are the planner's
+ * prompts, never something the person typed; the resume card shows `run: <goal>` instead.
+ */
+export function runPrompts(events: readonly SessionEvent[]): { readonly goal: string | undefined; readonly hidden: ReadonlySet<SessionEvent> } {
+  const hidden = new Set<SessionEvent>();
+  let goal: string | undefined;
+  let active: string | undefined;
+  for (const event of events) {
+    if (event.type === "run/created") {
+      goal ??= event.data.goal;
+      active = event.run_id ?? "";
+    } else if (event.type === "run/state_changed" && active !== undefined && (event.run_id ?? "") === active && RUN_ENDS.has(event.data.to)) {
+      active = undefined;
+    } else if (active !== undefined && event.type === "message/recorded" && event.data.role === "user") {
+      hidden.add(event);
+    }
+  }
+  return { goal, hidden };
+}
+
+const RUN_ENDS: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
 
 function maxQuota(windows: readonly { readonly used_percent: number }[]): number | undefined {
   if (windows.length === 0) return undefined;
@@ -1156,7 +1205,7 @@ export function footerText(footer: FooterState, extra: { readonly folder: string
     footer.model === undefined ? undefined : footer.effort === undefined ? footer.model : `${footer.model} ${g.sep} ${footer.effort}`,
     extra.mode,
     footer.contextPercent === undefined ? undefined : `ctx ${footer.contextPercent}%`,
-    footer.quotaPercent === undefined ? undefined : `quota ${footer.quotaPercent}%`,
+    footer.quotaPercent === undefined ? undefined : `quota ${footer.quotaPercent}%${footer.quotaProvider === undefined ? "" : ` ${footer.quotaProvider}`}`,
     footer.costUsd === undefined || footer.quotaPercent !== undefined ? undefined : `$${footer.costUsd.toFixed(2)}`,
   ]
     .filter((part): part is string => part !== undefined && part !== "")

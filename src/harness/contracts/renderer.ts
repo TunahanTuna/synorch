@@ -62,7 +62,7 @@ export interface SessionWelcomeView {
 /** K8 welcome header preferences (`ui.welcome.*`). */
 export interface WelcomePreferences {
   readonly style: "full" | "compact" | "minimal" | "off";
-  readonly logo: "on" | "off" | "custom";
+  readonly logo: "on" | "art" | "glyph" | "off" | "custom";
   readonly fields: readonly ("version" | "model" | "plan" | "workers" | "folder" | "mode")[];
   readonly tips: boolean;
 }

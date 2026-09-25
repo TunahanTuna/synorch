@@ -1809,26 +1809,27 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     if (style === undefined) return undefined;
     let draft: WelcomeSettings = { ...this.welcomeSettings, style };
     if (style === "full" || style === "compact") {
-      const logos = ["on", "off", "custom"] as const;
+      const logos = ["art", "glyph", "off", "custom"] as const;
       const hasCustom = draft.customLogo !== undefined && draft.customLogo.length > 0;
       const logo = await this.chooseQuestion(
         {
           question: "Logo",
           header: "2/4",
           options: [
-            { label: "on", description: "the Synorch mark: a conductor, three workers, one outcome" },
+            { label: "art", description: "the Synorch mark in colour: a conductor, parallel workers, one outcome" },
+            { label: "glyph", description: "the mark drawn with text symbols" },
             { label: "off", description: "text only" },
             { label: "custom", description: "your text art from ~/.synorch/logo.txt (up to 6 rows × 32 columns)", ...(hasCustom ? {} : { disabled: "create ~/.synorch/logo.txt first" }) },
           ],
           allowOther: false,
           tone: "neutral",
-          initialIndex: Math.max(0, logos.indexOf(draft.logo === "custom" && !hasCustom ? "on" : draft.logo)),
+          initialIndex: Math.max(0, logos.indexOf(draft.logo === "on" || (draft.logo === "custom" && !hasCustom) ? "art" : draft.logo)),
         },
         signal,
-        { livePreview: (selected, _checked, width) => this.welcomePreview({ ...draft, logo: logos[selected] ?? "on" }, width), maxVisible: 3 },
+        { livePreview: (selected, _checked, width) => this.welcomePreview({ ...draft, logo: logos[selected] ?? "art" }, width), maxVisible: 4 },
       );
       if (logo?.kind !== "selected") return undefined;
-      draft = { ...draft, logo: logos[logo.indices[0] ?? 0] ?? "on" };
+      draft = { ...draft, logo: logos[logo.indices[0] ?? 0] ?? "art" };
       const labels: Readonly<Record<WelcomeField, string>> = {
         version: "version and build",
         model: "model, effort and context window",

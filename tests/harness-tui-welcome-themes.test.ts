@@ -58,9 +58,9 @@ test("welcome at 120x40: the mark beside version, model line, team, folder and m
     head,
     [
       "   ◆      Synorch v0.3.0 (ef46ef1)",
-      "╭──┼──╮   gpt-6-sol · high · 400k context · ChatGPT Plus",
-      "●  ●  ●   workers opus-5.5 · gpt-6-luna",
-      "╰──┼──╯   ~/dev/demo (main) · auto mode",
+      " ╭   ╮    gpt-6-sol · high · 400k context · ChatGPT Plus",
+      "│  ●  │   workers opus-5.5 · gpt-6-luna",
+      " ╰   ╯    ~/dev/demo (main) · auto mode",
       "   ◇      › Type / for commands · @ attaches files · Shift+Tab switches modes",
     ].join("\n"),
   );
@@ -81,7 +81,7 @@ test("ascii glyphs draw a 7-bit mark; minimal is the one-line title of before", 
   const frame = { width: 120, rows: 40, glyphs: GLYPH_SETS.ascii, style: createStyler(false) };
   const info = { version: "0.3.0", folder: "demo", branch: "main", model: "gpt-6-sol", mode: "auto", hint: "Ctrl+O expands tool output" };
   const full = renderWelcome(info, DEFAULT_WELCOME, frame);
-  assert.deepEqual(full.slice(0, 5), ["   @      Synorch v0.3.0", ".--+--.   gpt-6-sol", "o  o  o   demo (main) - auto mode", "'--+--'", "   *      > Ctrl+O expands tool output"]);
+  assert.deepEqual(full.slice(0, 5), ["   @      Synorch v0.3.0", " /   \\    gpt-6-sol", "|  o  |   demo (main) - auto mode", " \\   /    > Ctrl+O expands tool output", "   *"]);
   assert.ok(full.every((line) => /^[\x20-\x7e]*$/.test(line)), "ascii stays 7-bit");
   assert.deepEqual(renderWelcome(info, { ...DEFAULT_WELCOME, style: "minimal" }, frame), ["Synorch 0.3.0 - demo (main)"]);
   assert.deepEqual(renderWelcome(info, { ...DEFAULT_WELCOME, style: "off" }, frame), []);

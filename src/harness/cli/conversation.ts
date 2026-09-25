@@ -3413,7 +3413,7 @@ const RESUME_HINT_MS = 12 * 60 * 60 * 1000;
 function welcomeWith(current: WelcomePreferences, key: string, value: string | undefined): WelcomePreferences {
   const field = key.slice("ui.welcome.".length);
   if (field === "style") return { ...current, style: (["full", "compact", "minimal", "off"] as const).find((style) => style === value) ?? "full" };
-  if (field === "logo") return { ...current, logo: (["on", "off", "custom"] as const).find((logo) => logo === value) ?? "on" };
+  if (field === "logo") return { ...current, logo: (["on", "art", "glyph", "off", "custom"] as const).find((logo) => logo === value) ?? "on" };
   if (field === "tips") return { ...current, tips: value === undefined ? true : value === "true" };
   if (field === "fields") {
     const all = ["version", "model", "plan", "workers", "folder", "mode"] as const;

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 248 64" width="248" height="64">
+  <title>Synorch</title>
+  <style>
+    .word { fill: #1b2130; font-family: "Space Grotesk", "Manrope", "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-weight: 600; font-size: 34px; letter-spacing: -0.6px; }
+    @media (prefers-color-scheme: dark) { .word { fill: #e9ecf2; } }
+  </style>
+  <defs>
+    <linearGradient id="synorch-wordmark-gradient" x1="3" y1="0" x2="11" y2="14" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4fd1c5"/>
+      <stop offset="0.5" stop-color="#63b3ed"/>
+      <stop offset="1" stop-color="#b794f4"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(4 4) scale(4)" fill="url(#synorch-wordmark-gradient)">
+    <path d="M7 0L8.9 1.7L7 3.4L5.1 1.7Z"/>
+    <path d="M7 3.9C8.5 5 9.1 6 9.1 7C9.1 8 8.5 9 7 10.1C5.5 9 4.9 8 4.9 7C4.9 6 5.5 5 7 3.9Z"/>
+    <path d="M7 10.6L8.9 12.3L7 14L5.1 12.3Z"/>
+    <path d="M4.4 2.2C2.2 3.4 1 5 1 7C1 9 2.2 10.6 4.4 11.8L5 11.1C3.8 10.1 2.9 8.8 2.9 7C2.9 5.2 3.8 3.9 5 2.9Z"/>
+    <path d="M9.6 2.2C11.8 3.4 13 5 13 7C13 9 11.8 10.6 9.6 11.8L9 11.1C10.2 10.1 11.1 8.8 11.1 7C11.1 5.2 10.2 3.9 9 2.9Z"/>
+  </g>
+  <text class="word" x="74" y="44">Synorch</text>
+</svg>

@@ -1,4 +1,5 @@
 import { styleText } from "node:util";
+import { artLines, themeLogoPalette } from "./logo.ts";
 import { ANSI_TOKENS, painter, parseStyleSpec, themePaints, type ColorDepth, type Paint, type ThemeDefinition, type ThemePaints, type ThemeToken } from "./theme.ts";
 
 /**
@@ -41,6 +42,8 @@ export interface Styler {
   /** Logo gradient stop 0-2. */
   logo(stop: number, text: string): string;
   token(name: ThemeToken, text: string): string;
+  /** The half-block logo art in the theme's logo colours; undefined without colour, at 16 colours or without hex logo tokens. */
+  logoArt?(): readonly string[] | undefined;
 }
 
 export interface ThemedStyler extends Styler {
@@ -66,11 +69,13 @@ export function createStyler(enabled: boolean, options: StylerOptions = {}): The
   const legacy = (format: Format) => (text: string) => (enabled && text.length > 0 ? styleText(format, text, { validateStream: false }) : text);
   let paints: ThemePaints = ansiPaints();
   let themeName = "ansi";
+  let current: ThemeDefinition | undefined;
   let depth: ColorDepth = options.depth ?? 16;
   const apply = (theme: ThemeDefinition | undefined, nextDepth?: ColorDepth): void => {
     if (nextDepth !== undefined) depth = nextDepth;
     paints = theme === undefined ? ansiPaints() : themePaints(theme, depth);
     themeName = theme?.name ?? "ansi";
+    current = theme;
   };
   apply(options.theme, options.depth);
   const token =
@@ -110,5 +115,9 @@ export function createStyler(enabled: boolean, options: StylerOptions = {}): The
     border: token("border"),
     logo: (stop, text) => token(stop <= 0 ? "logo1" : stop === 1 ? "logo2" : "logo3")(text),
     token: (name, text) => token(name)(text),
+    logoArt: () => {
+      const palette = enabled ? themeLogoPalette(current, depth) : undefined;
+      return palette === undefined ? undefined : artLines(palette);
+    },
   };
 }

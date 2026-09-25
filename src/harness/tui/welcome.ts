@@ -1,4 +1,5 @@
 import type { GlyphSet } from "./conversation-view.ts";
+import { ART_COLUMNS } from "./logo.ts";
 import { sanitizeInline } from "./sanitize.ts";
 import type { Styler } from "./style.ts";
 import { displayWidth, fitLine, truncate } from "./views/kit.ts";
@@ -16,7 +17,8 @@ import { displayWidth, fitLine, truncate } from "./views/kit.ts";
 
 export const WELCOME_STYLES = ["full", "compact", "minimal", "off"] as const;
 export type WelcomeStyle = (typeof WELCOME_STYLES)[number];
-export const WELCOME_LOGOS = ["on", "off", "custom"] as const;
+/** `on` and `art`: the half-block art where colour allows (the glyph mark otherwise); `glyph`: always the glyph mark. */
+export const WELCOME_LOGOS = ["on", "art", "glyph", "off", "custom"] as const;
 export type WelcomeLogo = (typeof WELCOME_LOGOS)[number];
 export const WELCOME_FIELDS = ["version", "model", "plan", "workers", "folder", "mode"] as const;
 export type WelcomeField = (typeof WELCOME_FIELDS)[number];
@@ -83,37 +85,42 @@ interface LogoCell {
 }
 
 /**
- * The orchestration mark, 5 rows × 7 columns: the conductor (◆) fans out over a bus to three
- * workers (●), whose results join again into one outcome (◇).
+ * The glyph mark, 5 rows × 7 columns, echoing the art: the conductor (◆) on top, the core (●)
+ * between the two worker arcs, and the result (◇) below.
  */
 function logoCells(glyphs: GlyphSet): LogoCell[][] {
   const set =
     glyphs.name === "ascii"
-      ? { top: "@", worker: "o", end: "*", tl: ".", tr: ".", bl: "'", br: "'", h: "-", cross: "+" }
+      ? { top: "@", core: "o", end: "*", tl: "/", tr: "\\", bl: "\\", br: "/", v: "|" }
       : glyphs.name === "safe"
-        ? { top: "■", worker: "●", end: "○", tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", cross: "┼" }
-        : { top: "◆", worker: "●", end: "◇", tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", cross: "┼" };
-  const bus = (left: string, right: string): LogoCell[] => [{ text: `${left}${set.h}${set.h}${set.cross}${set.h}${set.h}${right}`, tone: "line" }];
+        ? { top: "■", core: "●", end: "○", tl: "┌", tr: "┐", bl: "└", br: "┘", v: "│" }
+        : { top: "◆", core: "●", end: "◇", tl: "╭", tr: "╮", bl: "╰", br: "╯", v: "│" };
   return [
     [{ text: "   ", tone: 0 }, { text: set.top, tone: 0 }],
-    bus(set.tl, set.tr),
+    [{ text: " ", tone: 0 }, { text: set.tl, tone: 0 }, { text: "   ", tone: 0 }, { text: set.tr, tone: 0 }],
     [
-      { text: set.worker, tone: 0 },
-      { text: "  ", tone: 0 },
-      { text: set.worker, tone: 1 },
+      { text: set.v, tone: 1 },
       { text: "  ", tone: 1 },
-      { text: set.worker, tone: 2 },
+      { text: set.core, tone: 1 },
+      { text: "  ", tone: 1 },
+      { text: set.v, tone: 1 },
     ],
-    bus(set.bl, set.br),
+    [{ text: " ", tone: 2 }, { text: set.bl, tone: 2 }, { text: "   ", tone: 2 }, { text: set.br, tone: 2 }],
     [{ text: "   ", tone: 2 }, { text: set.end, tone: 2 }],
   ];
 }
 
 export const LOGO_WIDTH = 7;
 
-/** The painted mark (or a custom text-art logo painted with the gradient row by row). */
-export function logoLines(frame: Pick<WelcomeFrame, "glyphs" | "style">, custom?: readonly string[]): { readonly lines: string[]; readonly width: number } {
+/**
+ * The painted mark (or a custom text-art logo painted with the gradient row by row). `art` uses the
+ * half-block art when the styler has colour for it (truecolor or 256 colours with the rich glyph
+ * set); otherwise, and for `glyph`, the glyph mark.
+ */
+export function logoLines(frame: Pick<WelcomeFrame, "glyphs" | "style">, custom?: readonly string[], kind: "art" | "glyph" = "glyph"): { readonly lines: string[]; readonly width: number } {
   const { style } = frame;
+  const art = kind === "art" && frame.glyphs.name === "rich" ? style.logoArt?.() : undefined;
+  if (art !== undefined && custom === undefined) return { lines: [...art], width: ART_COLUMNS };
   if (custom !== undefined && custom.length > 0) {
     const rows = custom.slice(0, 6).map((line) => truncate(sanitizeInline(line, 200).replace(/\s+$/, ""), 32, ""));
     const width = Math.max(...rows.map((row) => displayWidth(row)));
@@ -236,15 +243,16 @@ function fullLines(info: WelcomeInfo, settings: WelcomeSettings, frame: WelcomeF
   if (placeParts.length > 0) infoLines.push(placeParts.join(sep));
   const hint = settings.tips && info.hint !== undefined && info.hint !== "" ? paintHint(style, `${g.name === "ascii" ? ">" : "›"} ${info.hint}`) : undefined;
 
-  const logo = settings.logo === "off" ? undefined : logoLines(frame, settings.logo === "custom" ? settings.customLogo : undefined);
+  const logo = settings.logo === "off" ? undefined : logoLines(frame, settings.logo === "custom" ? settings.customLogo : undefined, settings.logo === "glyph" ? "glyph" : "art");
   if (logo === undefined) return [...infoLines, ...(hint === undefined ? [] : [hint])];
   const gap = 3;
   const column = logo.width + gap;
   const room = Math.max(10, width - column);
-  // The hint sits on the mark's last row (next to the outcome node); info rows fill from the top.
-  const rowCount = Math.max(logo.lines.length, infoLines.length + (hint === undefined ? 0 : 1));
-  const right: string[] = Array.from({ length: rowCount }, (_, index) => infoLines[index] ?? "");
-  if (hint !== undefined) right[rowCount - 1] = hint;
+  // The info rows and the hint, vertically centred beside the mark.
+  const block = [...infoLines, ...(hint === undefined ? [] : [hint])];
+  const rowCount = Math.max(logo.lines.length, block.length);
+  const offset = Math.floor((rowCount - block.length) / 2);
+  const right: string[] = Array.from({ length: rowCount }, (_, index) => block[index - offset] ?? "");
   return right.map((text, index) => {
     const left = logo.lines[index] ?? "";
     const pad = " ".repeat(Math.max(0, logo.width - displayWidth(left)) + gap);

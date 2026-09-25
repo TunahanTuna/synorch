@@ -49,13 +49,15 @@ import {
   type ToolGateway,
   type ToolResult,
   type TurnId,
+  type WelcomePreferences,
 } from "../contracts/index.ts";
 import type { DiffFileView, DiffView, OrchestrationTaskView, WorkerControl, WorkerSeam } from "../contracts/views.ts";
 import { SYNORCH_VERSION } from "../../domain/product.ts";
 import { createCompactor, DEFAULT_CONTEXT_WINDOW, extractiveSummarizer, messageTokens, reconstructHistory } from "../context/index.ts";
 import { WorkerStreamHub, type OrchestrationCoordinator, type WorkerControlResult, type WorkerDirectory } from "../orchestration/index.ts";
 import { classifyCommand, createHeadlessApprovalBroker, evaluateExecAllowlist } from "../policy/index.ts";
-import { bindBackgroundStatus, describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
+import { BUILTIN_THEMES, bindBackgroundStatus, defaultThemeName, describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, pickHint, selectGlyphs, shortenPath, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
+import { buildCommit, loadAppearance, planLabel, subscriptionPlan, userHome, workerModels } from "./appearance.ts";
 import { DEFAULT_WEB_DOMAINS, describeProcess } from "../tools/index.ts";
 import type { ParsedCommand } from "./args.ts";
 import { ATTACHMENTS_OPEN, mayContainImage, resolveAttachments } from "./attachments.ts";
@@ -421,6 +423,8 @@ class Conversation implements ConversationCommandHost {
         : selectGlyphs(io.env, io.platform, settings.kind === "plain");
     const debugEnv = io.env.SYN_DEBUG;
     this.debug = this.parsed.debug || (debugEnv !== undefined && debugEnv !== "" && debugEnv !== "0");
+    // K8: theme, colour depth and welcome header of the interactive view (plain and JSONL keep their own).
+    const appearance = runtime !== undefined && settings.kind === "tui" ? await loadAppearance(runtime.home, runtime.config, io.env, io.platform).catch(() => undefined) : undefined;
     this.renderer = await createSessionRenderer(io, {
       kind: settings.kind === "jsonl" ? "plain" : settings.kind,
       color: settings.color,
@@ -438,6 +442,7 @@ class Conversation implements ConversationCommandHost {
       glyphs: this.glyphs,
       debug: this.debug,
       ...(runtime?.config.mouse === undefined ? {} : { mouse: runtime.config.mouse }),
+      ...(appearance === undefined ? {} : { appearance: { theme: appearance.theme, themes: appearance.themes, colorDepth: appearance.colorDepth, welcome: appearance.welcome } }),
     });
     if (runtime === undefined || failure !== undefined) return this.fail(failure ?? failureInfo(new Error("runtime unavailable")));
     this.runtime = runtime;
@@ -480,7 +485,7 @@ class Conversation implements ConversationCommandHost {
       this.grants = createCommandGrantStore(runtime.home, runtime.trust.state().root);
       this.grantList = await this.grants.list();
       const resumed = await this.openResumed();
-      await this.renderer.start(this.header(rule));
+      await this.renderer.start(this.header(rule, await this.welcomeHint(resumed !== undefined)));
       const controls = this.renderer.controls;
       this.refreshPalette();
       this.refreshStatus();
@@ -494,6 +499,15 @@ class Conversation implements ConversationCommandHost {
       // Zero-config onboarding: the quiet "Synorch ready · …" line, the memory vault and the first-session memory bootstrap (user scope only).
       void startOnboarding(runtime, (line) => this.note("info", line), this.glyphs.sep);
       if (this.debug) this.note("info", `harness: runtime ready in ${runtimeMs} ms`);
+      for (const problem of appearance?.problems ?? []) this.note("warning", `${this.glyphs.warn} ${problem}`);
+      // K8: the subscription's plan label (ChatGPT Plus) resolves from the stored login after the first frame.
+      void subscriptionPlan(runtime, rule.route, this.outer.signal)
+        .then((plan) => {
+          if (plan !== undefined) this.renderer.controls?.appearance?.updateWelcome({ plan });
+        })
+        .catch(() => undefined);
+      // K8 first-run setup (interactive terminal only, once; Esc skips) or syn setup.
+      if (this.parsed.setup === true || (resumed === undefined && this.shouldOnboard())) await this.setup(true);
       // Credential pre-resolution (keychain, token refresh) happens in the background, never before the editor.
       void this.routePromise.then((decision) => runtime.credentials(decision.route, this.outer.signal)).catch(() => undefined);
       const input = this.renderer.input;
@@ -532,10 +546,22 @@ class Conversation implements ConversationCommandHost {
     return exitCodeFor(error.code);
   }
 
-  private header(rule: RouteRule): SessionHeaderView {
+  private header(rule: RouteRule, hint?: string): SessionHeaderView {
     const permissionMode = this.runtime.permissionMode();
     const runtime = this.runtime;
+    const effort = effortLabel(runtime.effortFor(rule.tier, "session", rule.route), rule.route.adapter_id);
+    const commit = buildCommit();
+    const plan = planLabel(runtime, rule.route);
+    const workers = workerModels(runtime, rule.tier, rule.route.model_id);
     return {
+      welcome: {
+        ...(commit === undefined ? {} : { commit }),
+        ...(effort === "default" || effort === "n/a" ? {} : { effort }),
+        ...(plan === undefined ? {} : { plan }),
+        ...(workers.length === 0 ? {} : { workers }),
+        path: shortenPath(runtime.workspaceRoot, userHome(this.io.env)),
+        ...(hint === undefined ? {} : { hint }),
+      },
       workspaceRoot: runtime.workspaceRoot,
       gitBranch: runtime.gitBranch,
       policyMode: runtime.policyMode,
@@ -3137,8 +3163,9 @@ class Conversation implements ConversationCommandHost {
       }
       choices = [...badges.keys()];
     }
+    if (row.key === "ui.theme") choices = (controls.appearance?.themes ?? BUILTIN_THEMES).map((theme) => theme.name);
     const typeIt = "Type a value…";
-    if (row.kind === "route" || row.kind === "int" || row.kind === "number" || row.kind === "string") choices.push(typeIt);
+    if (row.kind === "route" || row.kind === "int" || row.kind === "number" || row.kind === "string" || row.kind === "list") choices.push(typeIt);
     choices.push(unset);
     const entries: ModelPickerEntry[] = choices.map((choice, index) => ({ id: String(index), tier: "", provider: "", model: "", label: choice, auth: badges.get(choice) ?? "", current: choice === row.value }));
     const picked = choices.length === 2 && choices[0] === typeIt ? { id: "0" } : await controls.openModelPicker(entries, this.outer.signal, { title: row.key, hint: `${row.description} — Enter selects, Esc cancels` }).catch(() => undefined);
@@ -3146,7 +3173,7 @@ class Conversation implements ConversationCommandHost {
     if (choice === undefined) return undefined;
     if (choice === unset) return UNSET_SETTING;
     if (choice !== typeIt) return choice;
-    const hint = row.kind === "route" ? "provider/model[@adapter], e.g. openai/gpt-6-sol" : row.kind === "string" ? "text" : "a positive number";
+    const hint = row.kind === "route" ? "provider/model[@adapter], e.g. openai/gpt-6-sol" : row.kind === "string" ? "text" : row.kind === "list" ? `comma-separated: ${(row.choices ?? []).join(",")}` : "a positive number";
     const answer = await this.askUser(`New value for ${row.key} (${hint}; empty cancels)`, undefined, this.outer.signal).catch(() => "");
     return answer.trim() === "" ? undefined : answer.trim();
   }
@@ -3163,7 +3190,16 @@ class Conversation implements ConversationCommandHost {
       } else if (change.key === "ui.mouse" && this.renderer.controls !== undefined) {
         this.renderer.controls.setMouseMode(change.value === "true");
         effect = "applied now";
-      } else if (change.key.startsWith("routes.")) effect = "new conversations use it; /model switches this one";
+      } else if (change.key === "ui.theme") {
+        // K8: a theme applies at once in the interactive view (a file created after start: next conversation).
+        effect = this.renderer.controls?.appearance?.setTheme(change.value ?? defaultThemeName(this.io.env)) === true ? "applied now" : "new conversations use it";
+      } else if (change.key.startsWith("ui.welcome.")) {
+        const appearance = this.renderer.controls?.appearance;
+        if (appearance !== undefined) {
+          appearance.setWelcome(welcomeWith(appearance.welcome, change.key, change.value));
+          effect = "applied now";
+        }
+      } else if (change.key === "ui.glyphs") effect = "applies from the next session"; else if (change.key.startsWith("routes.")) effect = "new conversations use it; /model switches this one";
       else if (change.key.startsWith("effort.")) {
         // K6: set or unset, a tier or role level applies to this session at once: the live configured level
         // changes, and a session override of that tier (an earlier /effort) gives way to it.
@@ -3182,6 +3218,120 @@ class Conversation implements ConversationCommandHost {
     }
   }
 
+  // ---- K8 appearance -------------------------------------------------------------------------
+
+  /** The welcome's hint: first run, a conversation from the last hours to resume, else a rotating tip. */
+  private async welcomeHint(resumed: boolean): Promise<string | undefined> {
+    try {
+      const list = resumed ? [] : await this.conversations();
+      const recent = list[0];
+      const recentAt = recent === undefined ? Number.NaN : Date.parse(recent.at);
+      let skills: number | undefined;
+      try {
+        skills = this.runtime.extensions.invocable(reservedCommandNames()).length;
+      } catch {
+        skills = undefined;
+      }
+      return pickHint({
+        firstRun: !resumed && list.length === 0,
+        resumable: Number.isFinite(recentAt) && Date.now() - recentAt < RESUME_HINT_MS ? relativeTime(recentAt) : undefined,
+        skills,
+        seed: Math.floor(Date.now() / 1000),
+        sep: this.glyphs.sep,
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The first-run setup shows once, in an interactive terminal, unless CI or SYN_NO_SETUP says otherwise. */
+  private shouldOnboard(): boolean {
+    const on = (name: string): boolean => {
+      const value = this.io.env[name];
+      return value !== undefined && value !== "" && value !== "0" && value.toLowerCase() !== "false";
+    };
+    return this.renderer.controls?.appearance !== undefined && this.io.stdinIsTTY && this.runtime.config.onboarded !== true && !on("CI") && !on("SYN_NO_SETUP");
+  }
+
+  private async saveQuietly(key: string, value: string): Promise<void> {
+    try {
+      await setUserSetting(this.runtime.home, key, value);
+    } catch (error) {
+      this.note("warning", `${this.glyphs.warn} ${key} not saved: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** `/setup` (and the first run): theme, welcome style and symbols, each with a live preview; Esc skips the rest. */
+  public async setup(first = false): Promise<void> {
+    const g = this.glyphs;
+    const appearance = this.renderer.controls?.appearance;
+    if (appearance === undefined) {
+      this.print([`Setup runs in the interactive terminal view ${g.sep} here: /config ui.theme <name>, ui.welcome.style, ui.glyphs (or syn config set)`]);
+      return;
+    }
+    if (first) this.note("info", `${g.bullet} Welcome to Synorch ${g.sep} three quick choices ${g.sep} Esc skips (/setup runs it again)`);
+    const signal = this.outer.signal;
+    const done: string[] = [];
+    const finish = async (skipped: boolean): Promise<void> => {
+      if (first || !skipped) await this.saveQuietly("ui.onboarded", "true");
+      if (done.length === 0) this.print([first ? `Setup skipped ${g.sep} /setup runs it any time` : "Setup cancelled"]);
+      else this.print([`${g.ok} ${done.join(` ${g.sep} `)}${skipped ? ` ${g.sep} the rest skipped` : ""} ${g.sep} /theme /welcome /config change it later`]);
+    };
+    const theme = await appearance.pickTheme(signal, "1/3");
+    if (theme === undefined) return finish(true);
+    await this.saveQuietly("ui.theme", theme);
+    done.push(`theme ${theme}`);
+    const style = await appearance.pickWelcomeStyle(signal, "2/3");
+    if (style === undefined) return finish(true);
+    await this.saveQuietly("ui.welcome.style", style);
+    done.push(`welcome ${style}`);
+    const glyphs = await appearance.pickGlyphs(signal, "3/3");
+    if (glyphs === undefined) return finish(true);
+    await this.saveQuietly("ui.glyphs", glyphs);
+    done.push(`symbols ${glyphs}${glyphs === this.glyphs.name ? "" : " (from the next session)"}`);
+    return finish(false);
+  }
+
+  /** `/theme [name]`: the picker with a live preview, or switch directly; saved to ui.theme. */
+  public async theme(argument: string): Promise<void> {
+    const name = argument.trim().toLowerCase();
+    if (name !== "") {
+      await this.applySetting("ui.theme", name);
+      return;
+    }
+    const appearance = this.renderer.controls?.appearance;
+    if (appearance === undefined) {
+      this.print([`Themes: ${BUILTIN_THEMES.map((theme) => theme.name).join(", ")} ${this.glyphs.sep} /theme <name> saves one (the interactive view previews them)`]);
+      return;
+    }
+    const picked = await appearance.pickTheme(this.outer.signal);
+    if (picked !== undefined) await this.applySetting("ui.theme", picked);
+  }
+
+  /** `/welcome [full|compact|minimal|off]`: the header's style directly, or the whole customization with a live preview. */
+  public async welcome(argument: string): Promise<void> {
+    const g = this.glyphs;
+    const word = argument.trim().toLowerCase();
+    if (word !== "") {
+      if ((["full", "compact", "minimal", "off"] as const).some((style) => style === word)) await this.applySetting("ui.welcome.style", word);
+      else this.print([`/welcome [full | compact | minimal | off] ${g.sep} alone: customize it with a live preview`]);
+      return;
+    }
+    const appearance = this.renderer.controls?.appearance;
+    if (appearance === undefined) {
+      this.print([`The welcome header belongs to the interactive view ${g.sep} /config ui.welcome.style | ui.welcome.logo | ui.welcome.fields | ui.welcome.tips`]);
+      return;
+    }
+    const before = appearance.welcome;
+    const chosen = await appearance.pickWelcome(this.outer.signal);
+    if (chosen === undefined) return;
+    if (chosen.style !== before.style) await this.saveQuietly("ui.welcome.style", chosen.style);
+    if (chosen.logo !== before.logo) await this.saveQuietly("ui.welcome.logo", chosen.logo);
+    if (chosen.fields.join(",") !== before.fields.join(",")) await this.saveQuietly("ui.welcome.fields", chosen.fields.length === 0 ? "none" : chosen.fields.join(","));
+    if (chosen.tips !== before.tips) await this.saveQuietly("ui.welcome.tips", String(chosen.tips));
+    this.print([`${g.ok} Welcome: ${chosen.style} ${g.sep} logo ${chosen.logo} ${g.sep} ${chosen.fields.length} fact${chosen.fields.length === 1 ? "" : "s"} ${g.sep} tips ${chosen.tips ? "on" : "off"} ${g.sep} saved`]);
+  }
+
   /** `/graph`: the plan graph of the running or last worker run of this conversation. */
   public async graph(): Promise<void> {
     const tracker = this.orchestration?.tracker ?? this.lastTracker;
@@ -3196,6 +3346,23 @@ class Conversation implements ConversationCommandHost {
 }
 
 const PERMISSION_MODE_WORDS = ["ask", "auto", "full", "plan"] as const;
+
+/** K8: the welcome hint offers /resume for a conversation newer than this. */
+const RESUME_HINT_MS = 12 * 60 * 60 * 1000;
+
+/** `ui.welcome.<key>` set (or unset: the default) applied to the live welcome preferences. */
+function welcomeWith(current: WelcomePreferences, key: string, value: string | undefined): WelcomePreferences {
+  const field = key.slice("ui.welcome.".length);
+  if (field === "style") return { ...current, style: (["full", "compact", "minimal", "off"] as const).find((style) => style === value) ?? "full" };
+  if (field === "logo") return { ...current, logo: (["on", "off", "custom"] as const).find((logo) => logo === value) ?? "on" };
+  if (field === "tips") return { ...current, tips: value === undefined ? true : value === "true" };
+  if (field === "fields") {
+    const all = ["version", "model", "plan", "workers", "folder", "mode"] as const;
+    const wanted = value?.split(",").map((part) => part.trim());
+    return { ...current, fields: wanted === undefined ? [...all] : all.filter((name) => wanted.includes(name)) };
+  }
+  return current;
+}
 
 /** `/config` picker choice that removes the key from the user configuration. */
 const UNSET_SETTING = "(unset)";

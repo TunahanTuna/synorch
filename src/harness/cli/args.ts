@@ -87,6 +87,8 @@ export type ParsedCommand =
       readonly continue: boolean;
       /** `--debug` (or `SYN_DEBUG=1`): raw event lines under the conversation (L2). */
       readonly debug: boolean;
+      /** K8 `syn setup`: the conversation opens with the setup (theme, welcome, symbols) first. */
+      readonly setup?: boolean;
     }
   | { readonly kind: "run"; readonly common: CommonFlags; readonly session: SessionFlags; readonly goal: string; readonly goalFromStdin: boolean; readonly jsonl: boolean; readonly streamDeltas: boolean; readonly trustWorkspace: boolean }
   | { readonly kind: "trust"; readonly common: CommonFlags; readonly revoke: boolean }
@@ -169,7 +171,7 @@ function unknownOption(command: string, flag: string): string {
   return `Unknown option ${flag} for syn ${command}${match === undefined ? "" : `. Did you mean ${match}?`}`;
 }
 
-export const HARNESS_COMMANDS = [...Object.keys(HARNESS_COMMAND_OPTIONS), "memory", "mcp", "skills", "plugin"] as const;
+export const HARNESS_COMMANDS = [...Object.keys(HARNESS_COMMAND_OPTIONS), "setup", "memory", "mcp", "skills", "plugin"] as const;
 
 function unknownCommand(command: string): string {
   const match = closestMatch(command, HARNESS_COMMANDS);
@@ -268,6 +270,10 @@ function credentialProfile(command: string, value: string | undefined): string |
 export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
   const [command, ...args] = argv;
   switch (command) {
+    case "setup": {
+      const parsed = parseHarnessArgs(["agent", ...args]);
+      return parsed.kind === "agent" ? { ...parsed, setup: true } : parsed.kind === "help" ? { kind: "help", command: "setup" } : parsed;
+    }
     case "agent": {
       const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.agent);
       if (values.help) return { kind: "help", command };

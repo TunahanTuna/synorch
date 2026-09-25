@@ -19,6 +19,8 @@ export interface ViewTheme {
   success(s: string): string;
   warning(s: string): string;
   error(s: string): string;
+  diffAdd(s: string): string;
+  diffRemove(s: string): string;
 }
 
 export function createViewTheme(color: boolean | Styler): ViewTheme {
@@ -26,13 +28,15 @@ export function createViewTheme(color: boolean | Styler): ViewTheme {
   return {
     enabled: style.enabled,
     text: (s) => s,
-    muted: style.dim,
-    accent: style.cyan,
+    muted: style.muted,
+    accent: style.accent,
     bold: style.bold,
-    running: style.cyan,
-    success: style.green,
-    warning: style.yellow,
-    error: style.red,
+    running: style.accent,
+    success: style.success,
+    warning: style.warning,
+    error: style.danger,
+    diffAdd: style.diffAdd,
+    diffRemove: style.diffRemove,
   };
 }
 

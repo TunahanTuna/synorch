@@ -33,7 +33,7 @@ import {
   testRoute,
   testRouter,
 } from "../src/harness/core/testing.ts";
-import { bridgeEnvironment, buildClaudeArgs, checkStreamGrammar, claudePermissionMode, claudeToolEffect, createClaudeCodeAdapter } from "../src/harness/providers/index.ts";
+import { bridgeEnvironment, buildClaudeArgs, checkStreamGrammar, claudePermissionMode, claudeToolEffect, createClaudeCodeAdapter, priorTranscript } from "../src/harness/providers/index.ts";
 import { createClaudeNativeApprovals, grantedPrefix } from "../src/harness/cli/claude-native-approvals.ts";
 import { validateUserConfigText } from "../src/harness/cli/config.ts";
 import { ConversationPresenter, GLYPH_SETS } from "../src/harness/tui/conversation-view.ts";
@@ -442,4 +442,17 @@ test("driver: a native backend's built-ins are no protocol mismatch, prompts go 
 test("claude_code.mode is a user configuration key: native | restricted", () => {
   assert.equal(validateUserConfigText("claude_code:\n  mode: restricted\n", "config.yaml").claude_code?.mode, "restricted");
   assert.throws(() => validateUserConfigText("claude_code:\n  mode: wild\n", "config.yaml"));
+});
+
+test("fresh Claude session: earlier Synorch turns are replayed once as a transcript block", () => {
+  assert.equal(priorTranscript([]), undefined);
+  const text = priorTranscript([
+    { role: "user", content: [{ type: "text", text: "Remember PAPAYA-42." }] },
+    { role: "assistant", content: [{ type: "text", text: "Noted." }, { type: "tool_call", provider_call_id: "c1", name: "read_file", arguments: { path: "a.ts" } }] },
+  ]);
+  assert.ok(text !== undefined);
+  assert.match(text, /<conversation_so_far>/);
+  assert.match(text, /User: Remember PAPAYA-42\./);
+  assert.match(text, /Assistant: Noted\./);
+  assert.match(text, /Assistant called read_file \{"path":"a.ts"\}/);
 });

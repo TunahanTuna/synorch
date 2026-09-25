@@ -271,9 +271,9 @@ export class McpManager {
     for (const slot of this.slots.values()) {
       if (!this.usable(slot)) continue;
       const definition = slot.definition;
-      // K7: Claude Code loads the plugins enabled in its own settings itself; passing them again would duplicate them.
-      if (definition.source === "claude-plugin") continue;
-      servers[definition.name] =
+      // K7 (verified on 2.1.282): under `--strict-mcp-config` Claude does NOT load its enabled plugins' MCP servers,
+      // so they are passed here under Claude's own name (`plugin:<plugin>:<server>`): same tool names and permission rules, no duplicate.
+      servers[definition.claudeName ?? definition.name] =
         definition.transport === "stdio"
           ? { type: "stdio", command: definition.command, args: [...definition.args], env: { ...definition.env } }
           : { type: definition.transport, url: definition.url, headers: { ...definition.headers } };

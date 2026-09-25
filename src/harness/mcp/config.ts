@@ -90,6 +90,8 @@ export interface McpServerDefinition {
   readonly digest: Digest;
   /** Variables `${VAR}` referenced but not set (reported, expanded to ""). */
   readonly missingVariables: readonly string[];
+  /** A `claude-plugin` server's name inside Claude Code (`plugin:<plugin>:<server>`, tools `mcp__plugin_<plugin>_<server>__*`). */
+  readonly claudeName?: string;
 }
 
 /** Roles that see a server's tools by default: read-only servers reach every role but the orchestrator. */

@@ -715,6 +715,7 @@ class FooterView implements Component {
 
 const MAIN_PLACEHOLDER = "Ask anything or describe a change {sep} / commands {sep} @ files";
 const BUSY_PLACEHOLDER = "Type to steer Synorch {sep} it reads your message at its next step";
+const BACKGROUND_PLACEHOLDER = "Workers run in the background {sep} ask anything {sep} Down selects a worker {sep} Ctrl+G graph";
 
 /** The editor's place in the tree; hidden while an inline dialog takes the input (the draft is kept). */
 class EditorSlot implements Component {
@@ -840,6 +841,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private readonly dialogSlot = new Container();
   private editorSlot!: EditorSlot;
   private board: LiveBoardComponent | undefined;
+  /** K3: wall-clock ms of the last key typed into the editor (0 = never). */
+  private lastKeyAtMs = 0;
   /** K1.7 worker drill-in: the seam, the board selection, the open worker view and its input chrome. */
   private workerSeam: WorkerSeam | undefined;
   private lastBoard: OrchestrationView | undefined;
@@ -944,6 +947,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         this.presenter?.configure({ model: status.model, effort: status.effort ?? null, contextWindowTokens: status.contextWindowTokens });
         this.tui.requestRender();
       },
+      inputActivity: () => ({ lastKeyAtMs: this.lastKeyAtMs, draft: this.editor.getText().trim().length > 0 }),
     };
     this.queue = new RenderQueue((event) => this.consume(event), {
       ...(options.queueCapacity === undefined ? {} : { capacity: options.queueCapacity }),
@@ -1522,7 +1526,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private updateSpinner(): void {
     if (this.presenter !== undefined && this.workerPane === undefined) {
       // While Synorch works, a typed message steers it at its next step; the placeholder says so.
-      this.editor.placeholder = this.presenter.activity() !== undefined || this.board !== undefined ? BUSY_PLACEHOLDER : MAIN_PLACEHOLDER;
+      // K3: workers run in the background; with the agent idle the editor starts a normal message.
+      this.editor.placeholder = this.presenter.activity() !== undefined ? BUSY_PLACEHOLDER : this.board !== undefined ? BACKGROUND_PLACEHOLDER : MAIN_PLACEHOLDER;
     }
     const active = this.presenter?.activity() !== undefined || this.board !== undefined || this.workerPane !== undefined;
     if (active && this.spinner === undefined && this.started && !this.stopped) {
@@ -1578,6 +1583,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   }
 
   private onKey(data: string): { consume?: boolean; data?: string } | undefined {
+    // K3: typing into the editor (not a prompt) delays a background worker's prompt until a pause.
+    if (this.dialog === undefined && !isMouseSequence(data)) this.lastKeyAtMs = Date.now();
     const worker = isMouseSequence(data) ? undefined : this.onWorkerKey(data);
     if (worker !== undefined) return worker;
     const input = this.onInputKey(data);
@@ -1618,7 +1625,9 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       this.tui.requestRender(true);
       return { consume: true };
     }
-    if (this.board !== undefined && this.dialog === undefined && (matchesKey(data, "ctrl+g") || (data === "g" && this.editor.getText().length === 0 && !this.editor.isShowingAutocomplete()))) {
+    // K3: the editor is free while workers run in the background, so a bare `g` toggles the graph only
+    // while a worker is selected (a message may begin with "g"); Ctrl+G always does.
+    if (this.board !== undefined && this.dialog === undefined && (matchesKey(data, "ctrl+g") || (data === "g" && this.selecting && this.editor.getText().length === 0 && !this.editor.isShowingAutocomplete()))) {
       this.board.toggleMode();
       this.tui.requestRender(true);
       return { consume: true };
@@ -1949,7 +1958,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     this.editor.setText("");
     this.viewport.toBottom();
     if (trimmed === "/exit" || trimmed === "/quit") {
-      this.deliver({ kind: "exit" });
+      this.deliver({ kind: "exit", command: true });
       return;
     }
     if (this.runLocalCommand(trimmed)) return;

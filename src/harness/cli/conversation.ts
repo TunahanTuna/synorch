@@ -1,6 +1,7 @@
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   askUserSummaryLine,
   choiceQuestionLines,
@@ -64,7 +65,7 @@ import { profileHintsFor } from "./canonical.ts";
 import { createCommandGrantStore, normalizeGrant, type CommandGrantStore } from "./command-grants.ts";
 import { formatListing, listSettings, setUserSetting, settingFor, unsetUserSetting, type ConfigListing, type SettingRow } from "./config-command.ts";
 import { DEFAULT_ADAPTER_FOR_PROVIDER } from "./config.ts";
-import type { OrchestrateInput } from "./orchestrate-tool.ts";
+import type { OrchestrateInput, RunCancelInput, RunStatusInput, RunSteerInput } from "./orchestrate-tool.ts";
 import { OrchestrationTracker } from "./orchestration-view.ts";
 import { applyRestore, planRestore, restoreConflicts, rewindPoints, type RestoreIO } from "./rewind.ts";
 import { runModelCommand } from "./model-picker.ts";
@@ -100,9 +101,12 @@ import { UsageLedger } from "./usage-stats.ts";
  * first command that runs repository code, and `/allow` extends the exec allowlist.
  *
  * K1 session features: a message typed while the agent works steers the current turn at its next
- * step boundary (and the coordinator while workers run); Esc interrupts (twice stops workers);
- * plan mode (`/plan`, Shift+Tab) narrows the policy to reading; the `orchestrate` tool runs the
- * existing coordinator inside the turn and projects a live worker board; one command registry
+ * step boundary; Esc interrupts; plan mode (`/plan`, Shift+Tab) narrows the policy to reading; the
+ * `orchestrate` tool runs the existing coordinator and projects a live worker board. K3 (UX-GATE-02):
+ * interactive runs go to the background (chat stays open, completion note + follow-up turn,
+ * `run_status` / `run_steer` / `run_cancel`, `/runs`, owned paths locked for the agent's edits,
+ * worker prompts wait for a typing pause); headless and `wait: true` runs hold the turn as before
+ * (typed messages steer the coordinator, Esc twice stops it). One command registry
  * (`slash-commands.ts`) feeds `/help` and the renderer's palette; usage is aggregated for `/usage`,
  * `/cost` and the footer; `@path` and renderer attachments are inlined; resume shows where the
  * conversation was and what changed since.
@@ -120,6 +124,14 @@ const ESC_ARM_MS = 3_000;
 const GO_WORDS = /^(go|go ahead|do it|proceed|yes|ok|okay|ship it|start|evet|başla|basla|yap|devam|tamam)[.! ]*$/iu;
 const SESSION_MODEL_FILE = "session-model.json";
 const ORCHESTRATION_SESSION = /session (ses_[0-9A-HJKMNP-TV-Z]{26})/g;
+/** K3: a worker prompt waits until the user has not typed for this long. */
+const TYPING_PAUSE_MS = 1_200;
+/** K3: how long a cancelled run gets to stop its workers and clean up at exit. */
+const SETTLE_MS = 15_000;
+
+function toolError(code: "execution_failed" | "cancelled" | "policy_denied", message: string, text = ""): ToolResult {
+  return { status: "error", text: text.slice(0, 16 * 1024), truncated: false, redactions: 0, error: { code, message: message.slice(0, 2000) } };
+}
 
 function linked(outer: AbortSignal): AbortController {
   const controller = new AbortController();
@@ -202,6 +214,18 @@ export function planModePolicy(base: EffectivePolicy): EffectivePolicy {
   });
 }
 
+/**
+ * K3: the session policy with workspace writes denied, for one edit that touches a path a live task
+ * of a background run owns. The gateway records the denial like any other; the conversation words it.
+ */
+export function runLockPolicy(base: EffectivePolicy): EffectivePolicy {
+  return effectivePolicySchema.parse({
+    ...base,
+    effects: { ...base.effects, "workspace-write": "deny" },
+    layers: [...base.layers, { layer: "task", source: "background-run-owned-path", digest: digestOf({ background_run_lock: true }) }],
+  });
+}
+
 /** `ask_user` while the TUI reads input concurrently: the next typed message answers the question. */
 class QuestionDesk {
   private pending: ((answer: string) => void) | undefined;
@@ -243,11 +267,27 @@ interface CapturedFile {
   readonly before: Buffer | undefined;
 }
 
+/**
+ * One worker run of this conversation (K3). `foreground` runs keep the agent's turn open until they
+ * end (headless, or `orchestrate {wait: true}`): typed messages steer the coordinator and Esc twice
+ * stops them. Background runs return the tool at once; the conversation stays free and the result
+ * reaches the agent as a completion note (a follow-up turn when the session is idle).
+ */
 interface ActiveOrchestration {
+  /** Short handle shown to the user and the agent (`run-1`); the coordinator's run id also resolves. */
+  readonly id: string;
+  readonly goal: string;
   readonly tracker: OrchestrationTracker;
   readonly coordinator: OrchestrationCoordinator;
   readonly controller: AbortController;
   disarm: NodeJS.Timeout | undefined;
+  foreground: boolean;
+  status: "running" | "succeeded" | "failed" | "cancelled" | "rejected";
+  /** Settles with the tool result (the result block) when the run ends; never rejects. */
+  done: Promise<ToolResult>;
+  result: ToolResult | undefined;
+  /** The completion note queued for the agent (removed again when the agent read the result itself). */
+  notice: string | undefined;
 }
 
 interface QueuedMessage {
@@ -293,6 +333,14 @@ class Conversation implements ConversationCommandHost {
   private turnRunning = false;
   private orchestration: ActiveOrchestration | undefined;
   private readonly orchestratedSessions: SessionId[] = [];
+  /** K3: every worker run of this process, oldest first (`/runs`, `run_status`). */
+  private readonly workerRuns: ActiveOrchestration[] = [];
+  /** K3: background completions the agent has not been told about yet (a follow-up turn reports them when idle). */
+  private unreportedRuns = 0;
+  /** K3: aborted to wake the idle loop (a background run finished). */
+  private wakeIdle = new AbortController();
+  /** K3: prompts (approvals, questions) are shown one at a time while a background run is active. */
+  private promptQueue: Promise<void> = Promise.resolve();
   /** The mode to return to when plan mode ends (Shift+Tab, /go, a go-word). */
   private modeBeforePlan: PermissionMode | undefined;
   /** Set while the current exec call follows a declined trust question: its prompt is answered "no" for the user. */
@@ -366,10 +414,9 @@ class Conversation implements ConversationCommandHost {
       fallbackSessionId: undefined,
       onInterrupt: () => this.interrupt(),
       onExit: () => {
-        this.exiting = true;
-        this.active?.abort();
-        this.orchestration?.controller.abort();
-        this.outer.abort();
+        // K3: with workers in the background the exit request reaches the input loop, which asks first.
+        if (this.backgroundRun() !== undefined) return;
+        this.hardExit();
       },
       view: "conversation",
       glyphs: this.glyphs,
@@ -401,10 +448,15 @@ class Conversation implements ConversationCommandHost {
       this.forward(event);
     });
     const unbind = io.stdinIsTTY && this.renderer.input !== undefined ? runtime.bindUserPrompt(
-            (question, options, signal) => this.askUser(question, options, signal),
-            (question, signal) => this.chooseForAgent(question, signal),
+            (question, options, signal) => this.gated(signal, () => this.askUser(question, options, signal)),
+            (question, signal) => this.gated(signal, () => this.chooseForAgent(question, signal)),
           ) : () => undefined;
     runtime.orchestrate.set((input, context) => this.runOrchestration(input, context));
+    runtime.orchestrate.setControl({
+      status: (input, context) => this.runStatus(input, context.signal),
+      steer: async (input) => this.runSteer(input),
+      cancel: async (input) => this.runCancel(input),
+    });
     let unbindControls: () => void = () => undefined;
     const unwatchProcesses = this.watchProcesses();
     this.startedAt = Date.now();
@@ -441,10 +493,13 @@ class Conversation implements ConversationCommandHost {
     } finally {
       // Background processes never outlive the session (K4.2): the whole tree of each is killed.
       this.exiting = true;
+      // K3: a worker run never outlives the session either: it is cancelled and given time to clean up its worktrees.
+      await this.settleRuns();
       await runtime.processes.killAll().catch(() => undefined);
       unwatchProcesses();
       unbindControls();
       runtime.orchestrate.set(undefined);
+      runtime.orchestrate.setControl(undefined);
       unbind();
       unsubscribe();
       await ledger.flush().catch(() => undefined);
@@ -714,7 +769,7 @@ class Conversation implements ConversationCommandHost {
             reason: "the user chose not to trust this folder (Not now), so this command was not run",
           };
         }
-        const decision = await interactive.request(request, signal);
+        const decision = await this.gated(signal, () => interactive.request(request, signal));
         await this.afterDecision(request, decision);
         return decision;
       },
@@ -750,12 +805,18 @@ class Conversation implements ConversationCommandHost {
       invoke: async (request, scope, signal) => {
         const declined = request.tool_name === "exec" && !this.planOn ? await this.trustGate(request, signal) : false;
         const captured = WRITE_TOOLS.has(request.tool_name) && !this.planOn ? await this.capture(request).catch(() => undefined) : undefined;
+        // K3: a file a live task of a background run owns is refused (the gateway records the denial).
+        const owned = captured === undefined ? undefined : this.ownedByRun(captured);
         this.trustDeclinedNow = declined;
         let outcome;
         try {
-          outcome = await inner.invoke(request, { ...scope, policy: this.policy() }, signal);
+          outcome = await inner.invoke(request, { ...scope, policy: owned === undefined ? this.policy() : runLockPolicy(this.policy()) }, signal);
         } finally {
           this.trustDeclinedNow = false;
+        }
+        if (owned !== undefined && outcome.state === "denied" && outcome.result.error !== undefined) {
+          const message = `${owned.path} is owned by task ${owned.task} of the background worker run ${owned.run}, which is still running: editing it now would conflict when the run integrates. Wait for the run (run_status with wait: true), relay the change to the worker (run_steer with task: ${owned.task}), or ask the user to cancel it; files no task owns can be edited now.`;
+          return { ...outcome, result: { ...outcome.result, error: { ...outcome.result.error, message: message.slice(0, 2000) } } };
         }
         if (captured !== undefined && captured.length > 0 && outcome.state === "succeeded") {
           await this.checkpoint(request, captured, outcome.result.changed_paths ?? []).catch(() => undefined);
@@ -821,6 +882,17 @@ class Conversation implements ConversationCommandHost {
     return files;
   }
 
+  /** K3: the first file a live task of the background run owns, if any. */
+  private ownedByRun(files: readonly CapturedFile[]): { readonly path: string; readonly task: string; readonly run: string } | undefined {
+    const run = this.backgroundRun();
+    if (run === undefined) return undefined;
+    for (const file of files) {
+      const task = run.tracker.ownerOf(file.relative, this.runtime.platform);
+      if (task !== undefined) return { path: file.relative, task, run: run.id };
+    }
+    return undefined;
+  }
+
   private async checkpoint(request: ToolCallRequest, captured: readonly CapturedFile[], changed: readonly string[]): Promise<void> {
     const fold = (value: string): string => (this.runtime.platform === "win32" || this.runtime.platform === "darwin" ? value.toLowerCase() : value);
     const touched = new Set(changed.map(fold));
@@ -849,14 +921,27 @@ class Conversation implements ConversationCommandHost {
     for (;;) {
       if (this.exiting || this.outer.signal.aborted) return;
       let message = this.queued.shift();
+      if (message === undefined && this.unreportedRuns > 0) {
+        // K3: a background run ended while the session was idle: a short follow-up turn reports it.
+        const work = this.turn("", [], true);
+        const left = concurrent ? await this.alongside(work, input) : await work;
+        if (left === true) return;
+        continue;
+      }
       if (message === undefined) {
+        const wake = new AbortController();
+        this.wakeIdle = wake;
         let next;
         try {
-          next = await input.next(this.outer.signal);
+          next = await input.next(AbortSignal.any([this.outer.signal, wake.signal]));
         } catch {
+          if (wake.signal.aborted && !this.outer.signal.aborted) continue;
           return;
         }
-        if (next.kind === "exit") return;
+        if (next.kind === "exit") {
+          if (await this.confirmExit(next.command === true)) return;
+          continue;
+        }
         if (!("text" in next)) continue;
         const text = next.text.trim();
         const attachments = next.attachments ?? [];
@@ -866,7 +951,7 @@ class Conversation implements ConversationCommandHost {
       }
       const work = message.text.startsWith("/") ? this.command(message.text) : this.turn(message.text, message.attachments);
       const left = concurrent ? await this.alongside(work, input) : await work;
-      if (left === true) return;
+      if (left === true && (await this.confirmExit(true))) return;
     }
   }
 
@@ -886,11 +971,11 @@ class Conversation implements ConversationCommandHost {
           return;
         }
         if (next.kind === "exit") {
-          this.exiting = true;
-          this.active?.abort();
-          this.orchestration?.controller.abort();
-          this.outer.abort();
-          return;
+          if (await this.confirmExit(next.command === true)) {
+            this.hardExit();
+            return;
+          }
+          continue;
         }
         if (!("text" in next)) continue;
         const text = next.text.trim();
@@ -900,10 +985,8 @@ class Conversation implements ConversationCommandHost {
           const command = findConversationCommand(text.split(/\s+/)[0] ?? "");
           if (command?.whileBusy === true) {
             if (await this.command(text)) {
-              this.exiting = true;
-              this.active?.abort();
-              this.orchestration?.controller.abort();
-              this.outer.abort();
+              if (!(await this.confirmExit(true))) continue;
+              this.hardExit();
               return;
             }
           } else {
@@ -924,11 +1007,15 @@ class Conversation implements ConversationCommandHost {
     }
   }
 
-  /** Mid-turn steering (ADR-21 D8): to the coordinator while workers run, else to the running turn, else the next turn. */
+  /**
+   * Mid-turn steering (ADR-21 D8): to the coordinator while a foreground run holds the turn, else to
+   * the running turn, else the next turn. K3: with the run in the background a message goes to the
+   * agent, which relays corrections to the workers with run_steer.
+   */
   private steer(text: string, attachments: readonly Attachment[]): void {
     const arrow = this.glyphs.name === "rich" ? "↳" : "->";
     const orchestration = this.orchestration;
-    if (orchestration !== undefined) {
+    if (orchestration !== undefined && orchestration.foreground) {
       orchestration.coordinator.steer(text);
       this.note("info", `${arrow} steering the workers: ${snippet(text, 80)} (applied at the next safe point)`);
       return;
@@ -942,10 +1029,10 @@ class Conversation implements ConversationCommandHost {
     this.note("info", `queued ${this.glyphs.name === "rich" ? "›" : ">"} ${text}`);
   }
 
-  /** Esc: interrupts the turn; while workers run, the first Esc arms and the second stops them. */
+  /** Esc: interrupts the turn; while a foreground run holds the turn, the first Esc arms and the second stops it. Background runs keep going. */
   private interrupt(): void {
     const orchestration = this.orchestration;
-    if (orchestration === undefined) {
+    if (orchestration === undefined || !orchestration.foreground) {
       this.active?.abort();
       // K4.2: background processes survive an interrupted turn; a second Esc within the window stops them.
       const running = this.runtime.processes.running().length;
@@ -958,6 +1045,7 @@ class Conversation implements ConversationCommandHost {
           this.note("info", `${running} background process${running === 1 ? " is" : "es are"} still running ${this.glyphs.sep} Esc again stops ${running === 1 ? "it" : "them"} ${this.glyphs.sep} /ps lists them`);
         }
       }
+      if (orchestration !== undefined) this.note("info", `Workers keep running in the background (${orchestration.id}) ${this.glyphs.sep} /runs cancel stops them`);
       return;
     }
     if (!orchestration.tracker.stopArmed) {
@@ -1049,10 +1137,12 @@ class Conversation implements ConversationCommandHost {
     }
   }
 
-  private async turn(typed: string, attachments: readonly Attachment[]): Promise<boolean> {
-    this.submittedAt = performance.now();
-    let text = typed;
-    if (this.planOn && GO_WORDS.test(text.trim())) {
+  /** One turn; `followUp` (K3) is the harness's own turn that reports a finished background run (no user text). */
+  private async turn(typed: string, attachments: readonly Attachment[], followUp = false): Promise<boolean> {
+    this.submittedAt = followUp ? undefined : performance.now();
+    let text = followUp ? "" : typed;
+    if (followUp && this.unreportedRuns === 0) return false;
+    if (!followUp && this.planOn && GO_WORDS.test(text.trim())) {
       this.setPlanMode(false);
       text = `${text}\n(The plan is approved: carry it out now.)`;
     }
@@ -1085,6 +1175,10 @@ class Conversation implements ConversationCommandHost {
       images = resolved.images;
     }
     const notes = this.pendingNotes.splice(0);
+    // K3: completion notes ride on this turn; a follow-up turn is only needed for later ones.
+    this.unreportedRuns = 0;
+    for (const run of this.workerRuns) run.notice = undefined;
+    if (followUp) notes.push("there is no new message from the user: tell the user in a few lines what the finished worker run did (from the result above) and the next step.");
     const message = notes.length === 0 ? body : `[Synorch note: ${notes.join(" ").replaceAll("]", ")")}]\n${body}`;
     const active = linked(this.outer.signal);
     this.active = active;
@@ -1103,7 +1197,7 @@ class Conversation implements ConversationCommandHost {
           packet: undefined,
           userMessage: message,
           ...(images.length === 0 ? {} : { userImages: images }),
-          trigger: "user",
+          trigger: followUp ? "follow-up" : "user",
           maxSteps: MAX_STEPS,
         },
         active.signal,
@@ -1222,37 +1316,93 @@ class Conversation implements ConversationCommandHost {
   }
 
   private async runOrchestration(input: OrchestrateInput, context: ToolExecutionContext): Promise<ToolResult> {
-    const g = this.glyphs;
-    const error = (code: "execution_failed" | "cancelled" | "policy_denied", message: string, text = ""): ToolResult => ({
-      status: "error",
-      text: text.slice(0, 16 * 1024),
-      truncated: false,
-      redactions: 0,
-      error: { code, message: message.slice(0, 2000) },
-    });
-    if (this.planOn) return error("policy_denied", "plan mode is on: present the plan; the user starts workers with /go workers");
-    if (this.orchestration !== undefined) return error("execution_failed", "workers are already running in this conversation; wait for them to finish");
+    if (this.planOn) return toolError("policy_denied", "plan mode is on: present the plan; the user starts workers with /go workers");
+    const current = this.orchestration;
+    if (current !== undefined) {
+      return toolError("execution_failed", `workers are already running in this conversation (${current.id}): check them with run_status, relay changes with run_steer, or wait for the end with run_status {wait: true}`);
+    }
     const runtime = this.runtime;
     if (!this.trustAsked && !runtime.trust.state().trusted && runtime.sandbox.enforcement !== "full" && this.renderer.approvals.availability === "interactive") {
       this.trustAsked = true;
       if (await promptTrustForCommand(runtime, this.renderer, "the workers' checks", context.signal)) this.policyCache = undefined;
     }
-    this.coordinator ??= runtime.createCoordinator(runtime.brokerFor(this.renderer.approvals));
-    this.connectWorkers(this.coordinator);
+    // K3: an interactive session runs workers in the background unless the agent asks to wait; headless always waits.
+    const background = input.wait !== true && this.canRunInBackground();
+    const run = this.startRun(input, !background, context.signal);
+    if (!background) return run.done;
+    const g = this.glyphs;
+    this.note("info", `${g.bullet} Workers run in the background (${run.id}) ${g.sep} keep chatting ${g.sep} /runs shows them`);
+    const text = [
+      `Started worker run ${run.id} in the background. The user sees the plan and a live board; the conversation is not blocked.`,
+      `Goal: ${snippet(input.goal, 400)}`,
+      "End your turn now with one short line to the user (or keep helping them with something else). Do not wait or poll.",
+      "When the run ends you receive a Synorch note with its result block; report from it then.",
+      "run_status shows progress (wait: true only if you cannot continue without the result), run_steer relays a correction to the orchestrator or one task, run_cancel stops it.",
+      "Until it ends, files its tasks own are refused to your edits (run_status lists them); other small edits are fine.",
+    ].join("\n");
+    return { status: "ok", text, truncated: false, redactions: 0 };
+  }
+
+  /** K3: a human is attached and input is read between turns, so a run can go to the background. */
+  private canRunInBackground(): boolean {
+    return this.io.stdinIsTTY && this.renderer.input !== undefined && this.renderer.approvals.availability === "interactive";
+  }
+
+  /** The active run when it runs in the background (undefined for none or a foreground run). */
+  private backgroundRun(): ActiveOrchestration | undefined {
+    const run = this.orchestration;
+    return run !== undefined && !run.foreground ? run : undefined;
+  }
+
+  private startRun(input: OrchestrateInput, foreground: boolean, turnSignal: AbortSignal): ActiveOrchestration {
+    const g = this.glyphs;
+    const runtime = this.runtime;
+    this.coordinator ??= runtime.createCoordinator(runtime.brokerFor(this.gatedApprovals()));
+    const coordinator = this.coordinator;
+    this.connectWorkers(coordinator);
     const goal = input.brief === undefined ? input.goal : `${input.goal}\n\nContext from the conversation:\n${input.brief}`;
     const tracker = new OrchestrationTracker(goal, input.reason);
     this.lastTracker = tracker;
-    const controller = linked(context.signal);
-    const orchestration: ActiveOrchestration = { tracker, coordinator: this.coordinator, controller, disarm: undefined };
-    this.orchestration = orchestration;
+    // A background run belongs to the session (it ends with it); a foreground run also to the turn (interrupting the turn stops it).
+    const controller = linked(this.outer.signal);
+    if (foreground) {
+      if (turnSignal.aborted) controller.abort(turnSignal.reason);
+      else turnSignal.addEventListener("abort", () => controller.abort(turnSignal.reason), { once: true });
+    }
+    const run: ActiveOrchestration = {
+      id: `run-${this.workerRuns.length + 1}`,
+      goal: input.goal,
+      tracker,
+      coordinator,
+      controller,
+      disarm: undefined,
+      foreground,
+      status: "running",
+      done: Promise.resolve({ status: "ok", text: "", truncated: false, redactions: 0 }),
+      result: undefined,
+      notice: undefined,
+    };
+    this.orchestration = run;
+    this.workerRuns.push(run);
     const views = this.renderer.views;
     this.note("info", `${g.bullet} Starting workers ${g.sep} ${input.reason}`);
     if (this.renderer.kind === "tui") views?.setBoard(tracker.view());
+    run.done = this.driveRun(run, goal);
+    return run;
+  }
+
+  /** Runs the coordinator to the end; the result block (or error) is the run's tool result. Never rejects. */
+  private async driveRun(run: ActiveOrchestration, goal: string): Promise<ToolResult> {
+    const g = this.glyphs;
+    const runtime = this.runtime;
+    const { tracker, controller } = run;
+    const views = this.renderer.views;
     const ticker = views === undefined || this.renderer.kind !== "tui" ? undefined : setInterval(() => views.setBoard(tracker.view()), 1000);
     ticker?.unref?.();
-    const stopReading = this.readWhileWorkersRun();
+    const stopReading = run.foreground ? this.readWhileWorkersRun() : async (): Promise<void> => undefined;
+    let result: ToolResult;
     try {
-      const outcome = await this.coordinator.run(
+      const outcome = await run.coordinator.run(
         {
           goal,
           workspaceRoot: runtime.workspaceRoot,
@@ -1265,6 +1415,7 @@ class Conversation implements ConversationCommandHost {
       );
       if (!this.orchestratedSessions.includes(outcome.sessionId)) this.orchestratedSessions.push(outcome.sessionId);
       tracker.finish(outcome.status);
+      run.status = outcome.status;
       const block = tracker.resultBlock({ status: outcome.status, summary: outcome.summary, runId: outcome.runId, sessionId: outcome.sessionId });
       if (ticker !== undefined) clearInterval(ticker);
       const view = tracker.view();
@@ -1280,19 +1431,241 @@ class Conversation implements ConversationCommandHost {
         }
       }
       for (const line of tracker.resultLines()) this.note("info", `  ${line}`);
-      if (outcome.status === "succeeded") return { status: "ok", text: block, truncated: false, redactions: 0 };
-      return error(outcome.status === "cancelled" ? "cancelled" : "execution_failed", `the orchestration ${outcome.status}: ${snippet(outcome.summary, 400)}`, block);
+      result =
+        outcome.status === "succeeded"
+          ? { status: "ok", text: block, truncated: false, redactions: 0 }
+          : toolError(outcome.status === "cancelled" ? "cancelled" : "execution_failed", `the orchestration ${outcome.status}: ${snippet(outcome.summary, 400)}`, block);
     } catch (caught) {
-      tracker.finish(controller.signal.aborted ? "cancelled" : "failed");
+      const cancelled = controller.signal.aborted;
+      tracker.finish(cancelled ? "cancelled" : "failed");
+      run.status = cancelled ? "cancelled" : "failed";
       views?.setBoard(tracker.view());
-      const info = failureInfo(caught);
-      return error(controller.signal.aborted ? "cancelled" : "execution_failed", info.message);
+      result = toolError(cancelled ? "cancelled" : "execution_failed", failureInfo(caught).message);
     } finally {
       if (ticker !== undefined) clearInterval(ticker);
-      if (orchestration.disarm !== undefined) clearTimeout(orchestration.disarm);
-      this.orchestration = undefined;
+      if (run.disarm !== undefined) clearTimeout(run.disarm);
+      if (this.orchestration === run) this.orchestration = undefined;
       await stopReading();
     }
+    run.result = result;
+    if (!run.foreground) this.completedInBackground(run, result);
+    return result;
+  }
+
+  /**
+   * K3 completion notice: a line for the user, and a note for the agent that rides on the next turn;
+   * when the session is idle the loop wakes and a short follow-up turn reports the result.
+   */
+  private completedInBackground(run: ActiveOrchestration, result: ToolResult): void {
+    const g = this.glyphs;
+    const ok = run.status === "succeeded";
+    this.note(ok ? "info" : "warning", `${ok ? g.ok : g.warn} Background workers ${run.id} ${ok ? "finished" : run.status}${this.exiting ? "" : ` ${g.sep} Synorch reports the result`}`);
+    if (this.exiting) return;
+    const block = result.text !== "" ? result.text : "(no result block)";
+    run.notice = `background worker run ${run.id} ended: ${run.status}.${result.error === undefined ? "" : ` ${result.error.message}`} Result block: ${block}`;
+    this.pendingNotes.push(run.notice);
+    this.unreportedRuns += 1;
+    this.wakeIdle.abort();
+  }
+
+  /** The agent read a finished run's result itself (run_status): its completion note is dropped. */
+  private consumeNotice(run: ActiveOrchestration): void {
+    const notice = run.notice;
+    if (notice === undefined) return;
+    run.notice = undefined;
+    const index = this.pendingNotes.indexOf(notice);
+    if (index !== -1) this.pendingNotes.splice(index, 1);
+    this.unreportedRuns = Math.max(0, this.unreportedRuns - 1);
+  }
+
+  private findRun(ref: string | undefined): ActiveOrchestration | undefined {
+    if (ref === undefined || ref.trim() === "") return this.orchestration ?? this.workerRuns.at(-1);
+    const wanted = ref.trim();
+    return this.workerRuns.find((run) => run.id === wanted || run.tracker.run === wanted);
+  }
+
+  private unknownRun(ref: string | undefined): string {
+    if (this.workerRuns.length === 0) return "no worker run in this conversation yet";
+    return `no worker run ${ref ?? ""}; known: ${this.workerRuns.map((run) => run.id).join(", ")}`;
+  }
+
+  private runStatusText(run: ActiveOrchestration): string {
+    const lines = [
+      `Run ${run.id}${run.tracker.run === undefined ? "" : ` (${run.tracker.run})`}: ${run.status === "running" ? (run.foreground ? "running" : "running in the background") : run.status}`,
+      `Goal: ${snippet(run.goal, 300)}`,
+      ...run.tracker.statusLines(),
+    ];
+    if (run.result !== undefined) lines.push("Result:", run.result.text !== "" ? run.result.text : (run.result.error?.message ?? ""));
+    return lines.join("\n").slice(0, 16 * 1024);
+  }
+
+  /** K3 `run_status`: progress, or with `wait` the end of the run (bounded by timeout_seconds). */
+  private async runStatus(input: RunStatusInput, signal: AbortSignal): Promise<ToolResult> {
+    const run = this.findRun(input.run);
+    if (run === undefined) return toolError("execution_failed", this.unknownRun(input.run));
+    if (input.wait === true && run.status === "running") {
+      const stop = new AbortController();
+      const timeout = (input.timeout_seconds ?? 600) * 1000;
+      await Promise.race([run.done, delay(timeout, undefined, { signal: AbortSignal.any([stop.signal, signal]) }).catch(() => undefined)]);
+      stop.abort();
+    }
+    if (run.status !== "running") this.consumeNotice(run);
+    return { status: "ok", text: this.runStatusText(run), truncated: false, redactions: 0 };
+  }
+
+  /** K3 `run_steer`: to the orchestrator (next safe point) or, with `task`, to that worker (next step). */
+  private async runSteer(input: RunSteerInput): Promise<ToolResult> {
+    const run = this.findRun(input.run);
+    if (run === undefined) return toolError("execution_failed", this.unknownRun(input.run));
+    if (run.status !== "running") return toolError("execution_failed", `${run.id} already ended (${run.status}); nothing was sent`);
+    const arrow = this.glyphs.name === "rich" ? "↳" : "->";
+    if (input.task !== undefined) {
+      const result = await run.coordinator.workers.message(input.task, input.message);
+      if (!result.ok) return toolError("execution_failed", result.message);
+      this.note("info", `${arrow} Synorch told ${input.task}: ${snippet(input.message, 80)}`);
+      return { status: "ok", text: result.message, truncated: false, redactions: 0 };
+    }
+    run.coordinator.steer(input.message);
+    this.note("info", `${arrow} Synorch steered the workers: ${snippet(input.message, 80)} (applied at the next safe point)`);
+    return { status: "ok", text: `Queued for the orchestrator of ${run.id}; it applies the message at the next safe point (it may re-plan).`, truncated: false, redactions: 0 };
+  }
+
+  /** K3 `run_cancel`: one task, or the whole run (its completion note follows). */
+  private async runCancel(input: RunCancelInput): Promise<ToolResult> {
+    const run = this.findRun(input.run);
+    if (run === undefined) return toolError("execution_failed", this.unknownRun(input.run));
+    if (run.status !== "running") return toolError("execution_failed", `${run.id} already ended (${run.status})`);
+    if (input.task !== undefined) {
+      const result = await run.coordinator.workers.cancel(input.task);
+      return result.ok ? { status: "ok", text: result.message, truncated: false, redactions: 0 } : toolError("execution_failed", result.message);
+    }
+    this.note("warning", `Stopping the workers (${run.id})…`);
+    run.controller.abort();
+    return { status: "ok", text: `Cancelling ${run.id}; work already integrated stays. A note follows when it has stopped.`, truncated: false, redactions: 0 };
+  }
+
+  /** Worker prompts go through the typing-pause gate (K3). */
+  private gatedApprovals(): ApprovalBroker {
+    const inner = this.renderer.approvals;
+    return { availability: inner.availability, request: (request, signal) => this.gated(signal, () => inner.request(request, signal)) };
+  }
+
+  /**
+   * K3: while workers run in the background, prompts (worker approvals, questions) open one at a time
+   * and only once the user pauses typing, so a modal never swallows keystrokes meant for the editor.
+   */
+  private async gated<T>(signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> {
+    if (this.backgroundRun() === undefined || this.renderer.kind !== "tui") return work();
+    const previous = this.promptQueue;
+    let release: () => void = () => undefined;
+    this.promptQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await previous;
+      await this.typingPause(signal);
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
+  private async typingPause(signal: AbortSignal | undefined): Promise<void> {
+    const controls = this.renderer.controls;
+    const typing = (): boolean => {
+      const activity = controls?.inputActivity?.();
+      return activity !== undefined && Date.now() - activity.lastKeyAtMs < TYPING_PAUSE_MS;
+    };
+    if (!typing()) return;
+    this.note("warning", `${this.glyphs.warn} Synorch needs your answer ${this.glyphs.sep} the prompt opens when you pause typing (your draft is kept)`);
+    while (typing()) {
+      if (signal?.aborted === true) throw new DOMException("aborted", "AbortError");
+      await delay(150);
+    }
+  }
+
+  private hardExit(): void {
+    this.exiting = true;
+    this.active?.abort();
+    this.orchestration?.controller.abort();
+    this.outer.abort();
+  }
+
+  /**
+   * K3 exit with workers in the background: /exit and /quit stop them cleanly; Ctrl+C / Ctrl+D ask
+   * (stop and exit, or keep working). Without a terminal the run is awaited, never orphaned.
+   * Resolves true when the session should end.
+   */
+  private async confirmExit(explicit: boolean): Promise<boolean> {
+    const run = this.backgroundRun();
+    if (run === undefined) return true;
+    const g = this.glyphs;
+    if (!this.io.stdinIsTTY) {
+      this.note("info", `Waiting for the background workers (${run.id}) to finish before exiting…`);
+      await run.done;
+      return false;
+    }
+    if (!explicit) {
+      const stop = "Stop the workers and exit";
+      let answer: string | undefined;
+      try {
+        answer = await this.askUser(`Workers are still running in the background (${run.id}). Stop them and exit?`, ["Keep working", stop], this.outer.signal);
+      } catch {
+        answer = undefined;
+      }
+      if (answer !== stop) {
+        this.note("info", `Still here ${g.sep} the workers keep running ${g.sep} /runs cancel stops them`);
+        return false;
+      }
+    }
+    this.note("warning", `Stopping the workers (${run.id})…`);
+    run.controller.abort();
+    await Promise.race([run.done, delay(SETTLE_MS, undefined, { ref: false })]);
+    return true;
+  }
+
+  /** At session end: an active run is cancelled and given a moment to clean up its worktrees. */
+  private async settleRuns(): Promise<void> {
+    const run = this.orchestration;
+    if (run === undefined) return;
+    run.controller.abort();
+    await Promise.race([run.done, delay(SETTLE_MS, undefined, { ref: false })]);
+  }
+
+  /** K3 `/runs [id | cancel [id]]`. */
+  public async runs(argument: string): Promise<void> {
+    const g = this.glyphs;
+    const [verb = "", target] = argument.trim().split(/\s+/).filter((part) => part !== "");
+    if (verb === "cancel" || verb === "stop") {
+      const run = this.findRun(target);
+      if (run === undefined || run.status !== "running") {
+        this.print([run === undefined ? this.unknownRun(target) : `${run.id} already ended (${run.status})`]);
+        return;
+      }
+      this.note("warning", `Stopping the workers (${run.id})…`);
+      run.controller.abort();
+      return;
+    }
+    if (this.workerRuns.length === 0) {
+      this.print([`No worker runs in this conversation yet ${g.sep} /workers <goal> starts one`]);
+      return;
+    }
+    if (verb !== "") {
+      const run = this.findRun(verb);
+      this.print(run === undefined ? [this.unknownRun(verb)] : this.runStatusText(run).split("\n"));
+      return;
+    }
+    this.print([
+      `${g.bullet} Worker runs ${g.sep} ${this.workerRuns.filter((run) => run.status === "running").length} running`,
+      ...this.workerRuns.map((run) => {
+        const view = run.tracker.view();
+        const done = view.tasks.filter((task) => task.state === "completed").length;
+        const seconds = Math.round(((view.endedAtMs ?? Date.now()) - (view.startedAtMs ?? Date.now())) / 1000);
+        const status = run.status === "running" ? (run.foreground ? "running" : "background") : run.status;
+        return `  ${run.id.padEnd(8)}${status.padEnd(12)}${`${done}/${view.tasks.length} tasks`.padEnd(12)}${`${seconds}s`.padEnd(8)}${snippet(run.goal, 60)}`;
+      }),
+      `  /runs <id> shows one ${g.sep} /runs cancel [id] stops one ${g.sep} Ctrl+G board/graph ${g.sep} /worker <key> enters a worker`,
+    ]);
   }
 
   // ---- K1.7: entering workers ---------------------------------------------------------------
@@ -1485,9 +1858,13 @@ class Conversation implements ConversationCommandHost {
     }
   }
 
+  /** `/cancel`: the running turn first; a background run only when no turn runs (K3). */
   public cancel(): void {
-    if (this.orchestration !== undefined) this.orchestration.controller.abort();
-    else if (this.active === undefined) this.print(["Nothing is running."]);
+    const run = this.orchestration;
+    if (run !== undefined && (run.foreground || this.active === undefined)) {
+      if (!run.foreground) this.note("warning", `Stopping the workers (${run.id})…`);
+      run.controller.abort();
+    } else if (this.active === undefined) this.print(["Nothing is running."]);
     else this.active.abort();
   }
 
@@ -1568,7 +1945,7 @@ class Conversation implements ConversationCommandHost {
     }
     this.setPlanMode(false);
     this.enqueue(`Use workers for this (call the orchestrate tool): ${goal}`);
-    if (this.turnRunning || this.orchestration !== undefined) this.note("info", `queued > /workers ${snippet(goal, 80)} (runs when Synorch is done)`);
+    if (this.turnRunning || this.orchestration?.foreground === true) this.note("info", `queued > /workers ${snippet(goal, 80)} (runs when Synorch is done)`);
   }
 
   public async undo(): Promise<void> {
@@ -2348,6 +2725,7 @@ class Conversation implements ConversationCommandHost {
     this.routeRecorded = false;
     this.orchestratedSessions.length = 0;
     this.pendingNotes.length = 0;
+    this.unreportedRuns = 0;
     this.requests.clear();
     this.lastTracker = undefined;
     this.print([`${this.glyphs.ok} New conversation${previous === undefined ? "" : ` ${this.glyphs.sep} the previous one is saved (/resume)`}`]);

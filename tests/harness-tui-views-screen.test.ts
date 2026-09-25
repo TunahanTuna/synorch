@@ -75,6 +75,8 @@ class VirtualTerminal implements Terminal {
   }
 }
 
+const CTRL_G = "\x07";
+
 const HEADER: SessionHeaderView = {
   workspaceRoot: "/work/demo",
   gitBranch: "main",
@@ -111,12 +113,12 @@ async function mounted(columns: number): Promise<{ tui: PiTuiRenderer; terminal:
   };
 }
 
-test("the live board updates in place, toggles to the graph with g and pins its summary once", async () => {
+test("the live board updates in place, toggles to the graph with Ctrl+G and pins its summary once", async () => {
   const { tui, terminal, settle } = await mounted(80);
   try {
     tui.setBoard(BOARD);
     let screen = await settle();
-    assert.match(screen, /● Workers · 4 tasks · 2 running\s+g graph · ↓ select · esc to stop/);
+    assert.match(screen, /● Workers · 4 tasks · 2 running\s+ctrl\+g graph · ↓ select · \/runs/);
     assert.match(screen, /✓ map-usage\s+explorer\s+luna\s+38 files mapped, 4 use mocks\s+14s/);
     assert.match(screen, /convert-mocks\s+implementer astra editing tests\/http\.test\.ts\s+41s/);
 
@@ -125,12 +127,12 @@ test("the live board updates in place, toggles to the graph with g and pins its 
     assert.match(screen, /editing src\/auth\/refresh\.ts/);
     assert.doesNotMatch(screen, /editing tests\/http\.test\.ts/, "the row was updated in place, not appended");
 
-    terminal.type("g");
+    terminal.type(CTRL_G);
     screen = await settle();
     assert.equal(tui.boardMode, "graph");
-    assert.match(screen, /Plan graph · 4 tasks · 3 levels · 2 running\s+g board/);
+    assert.match(screen, /Plan graph · 4 tasks · 3 levels · 2 running\s+ctrl\+g board/);
     assert.match(screen, /╔═+╗/);
-    terminal.type("g");
+    terminal.type(CTRL_G);
     await settle();
     assert.equal(tui.boardMode, "board");
 

@@ -189,6 +189,8 @@ export interface ConversationCommandHost {
   planMode(goal: string): Promise<void>;
   go(mode: string): Promise<void>;
   workers(goal: string): Promise<void>;
+  /** K3 `/runs [id | cancel [id]]`: background worker runs. */
+  runs(argument: string): Promise<void>;
   /** K1.7 `/worker [key] [message | --pause | --resume | --cancel]`. */
   worker(argument: string): Promise<void>;
   undo(): Promise<void>;
@@ -242,6 +244,7 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/plan", argsHint: "[goal]", description: "plan mode: read-only, discuss and plan before changing anything (Shift+Tab cycles modes)", whileBusy: true, run: (host, argument) => host.planMode(argument) },
   { name: "/go", argsHint: "[workers]", description: "leave plan mode and carry out the plan here, or with workers", run: (host, argument) => host.go(argument) },
   { name: "/workers", argsHint: "<goal>", description: "run a large goal with parallel workers and an independent reviewer; alone: list the workers", whileBusy: true, run: (host, argument) => host.workers(argument) },
+  { name: "/runs", argsHint: "[id | cancel [id]]", description: "background worker runs: status and progress; one run's tasks; cancel one", whileBusy: true, run: (host, argument) => host.runs(argument) },
   { name: "/worker", argsHint: "[key] [message | --pause | --resume | --cancel]", description: "one worker: its assignment and recent activity, or message / pause / resume / cancel it", whileBusy: true, run: (host, argument) => host.worker(argument) },
   { name: "/model", argsHint: "[tier] [provider/model] [--save]", description: "every logged-in provider's models; set a tier's model for this session (--save keeps it)", run: (host, argument) => host.model(argument) },
   { name: "/effort", argsHint: "[level] [--tier <tier>]", description: "reasoning effort of the conversation model (low … max, ultra); alone: pick one. Applies to the next request", whileBusy: true, run: (host, argument) => host.effort(argument) },
@@ -301,6 +304,6 @@ export function conversationHelp(): string[] {
   const width = Math.max(...CONVERSATION_COMMANDS.map((command) => label(command).length));
   return [
     ...CONVERSATION_COMMANDS.map((command) => `${label(command).padEnd(width + 2)}${command.description}`),
-    "Keys: Esc interrupts (twice stops workers) · Shift+Tab cycles ask/auto/full/plan · Enter while working steers · @path attaches a file · Ctrl+C twice exits",
+    "Keys: Esc interrupts the turn (workers keep running in the background; /runs cancel stops them) · Ctrl+G board/graph · Down selects a worker · Shift+Tab cycles ask/auto/full/plan · Enter while working steers · @path attaches a file · Ctrl+C twice exits",
   ];
 }

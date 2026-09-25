@@ -210,7 +210,9 @@ export interface BoardOptions {
 /** Header hint of the live board while nothing is selected. */
 export function boardHint(ctx: ViewContext, mode: "board" | "graph" = "board"): string {
   const sep = ` ${ctx.glyphs.base.sep} `;
-  return [mode === "board" ? "g graph" : "g board", `${ctx.glyphs.downArrow} select`, "esc to stop"].join(sep);
+  // K3: the editor stays free while workers run in the background, so the toggle is Ctrl+G (a bare
+  // `g` would start a message) and stopping is /runs cancel rather than Esc.
+  return [mode === "board" ? "ctrl+g graph" : "ctrl+g board", `${ctx.glyphs.downArrow} select`, "/runs"].join(sep);
 }
 
 /** Header hint while a task is selected or a worker is open. */

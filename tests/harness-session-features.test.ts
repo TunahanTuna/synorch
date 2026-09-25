@@ -164,7 +164,12 @@ test("orchestration view: tasks with role, model, status, activity and dependenc
     ],
   );
   assert.equal(view.tasks[0]?.startedAtMs, 1_000);
+  // K3: a live implementer's owned paths lock the conversation agent's edits; explorers own nothing.
+  assert.equal(tracker.ownerOf("a.ts", "linux"), "edit");
+  assert.equal(tracker.ownerOf("b.ts", "linux"), undefined);
+  assert.match(tracker.statusLines().join("\n"), /- edit \(implementer\): draft · owns a\.ts/);
   tracker.observe(event("run/state_changed", { from: "running", to: "completed", reason: "done" }));
+  assert.equal(tracker.ownerOf("a.ts", "linux"), undefined, "a finished run locks nothing");
   assert.equal(tracker.view().done, true);
   assert.equal(tracker.view().outcome, "completed");
 });

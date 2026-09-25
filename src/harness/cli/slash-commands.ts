@@ -210,6 +210,10 @@ export interface ConversationCommandHost {
   report(name: "context" | "permissions" | "tasks" | "memory" | "diff" | "log", argument: string): Promise<void>;
   clear(): Promise<void>;
   resume(argument: string): Promise<void>;
+  /** K3 `/fork [name]`: continue in a branch of this conversation; the original stays resumable. */
+  fork(argument: string): Promise<void>;
+  /** K3 `/rewind` (Esc Esc): fork from before an earlier message, optionally restoring the files Synorch changed since. */
+  rewind(): Promise<void>;
   mouse(argument: string): Promise<void>;
   graph(): Promise<void>;
   /** `/config [key [value]]`: the settings screen, or read / set one key (user configuration). */
@@ -253,7 +257,9 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/compact", argsHint: "[focus]", description: "summarize older messages to free context", run: (host, argument) => host.compact(argument) },
   { name: "/context", description: "why this context: instructions, skills, memory, files and history the model received, with token estimates", whileBusy: true, run: (host, argument) => host.report("context", argument) },
   { name: "/clear", description: "start a fresh conversation (this one stays resumable)", run: (host) => host.clear() },
-  { name: "/resume", argsHint: "[n | session id]", description: "list recent conversations or switch to one", run: (host, argument) => host.resume(argument) },
+  { name: "/resume", argsHint: "[n | session id]", description: "pick a recent conversation (forks included) and switch to it", run: (host, argument) => host.resume(argument) },
+  { name: "/fork", argsHint: "[name]", description: "branch this conversation here and continue in the branch (the original stays resumable)", run: (host, argument) => host.fork(argument) },
+  { name: "/rewind", description: "go back to an earlier message: fork from before it, optionally restore files (Esc Esc)", run: (host) => host.rewind() },
   { name: "/init", argsHint: "[--yes]", description: "write the Synorch .ai/ structure into this repo to customize it (preview first; never needed to use Synorch)", run: (host, argument) => host.init(argument) },
   { name: "/memory", argsHint: "[init | review | edit <id> | retire <id> | open [id] | graph]", description: "memory ledger and decision desk: what Synorch remembers, proposals to accept / edit / reject / defer", whileBusy: true, run: (host, argument) => host.report("memory", argument) },
   { name: "/mouse", argsHint: "[on|off]", description: "toggle mouse capture (scroll / select)", whileBusy: true, rendererLocal: true, run: (host, argument) => host.mouse(argument) },

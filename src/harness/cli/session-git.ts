@@ -66,6 +66,23 @@ export async function commitAll(cwd: string, message: string, signal?: AbortSign
   return git(cwd, ["commit", "-m", message], signal);
 }
 
+/** Pathspecs of one `git status --porcelain` entry: both sides of a rename or copy (`old -> new`). */
+export function changePathspecs(entry: { readonly path: string }): string[] {
+  return entry.path.split(" -> ").map((part) => part.replace(/^"|"$/g, "")).filter((part) => part !== "");
+}
+
+/**
+ * `/commit` with a selection: stages the chosen entries only and commits exactly those paths (a
+ * pathspec commit), so other staged or unstaged changes stay out of the commit.
+ */
+export async function commitSelected(cwd: string, message: string, entries: readonly { readonly path: string }[], signal?: AbortSignal): Promise<GitResult> {
+  const paths = [...new Set(entries.flatMap(changePathspecs))];
+  if (paths.length === 0) return { ok: false, stdout: "", stderr: "no files selected" };
+  const add = await git(cwd, ["add", "-A", "--", ...paths], signal);
+  if (!add.ok) return add;
+  return git(cwd, ["commit", "-m", message, "--", ...paths], signal);
+}
+
 /** Commits made after `since` (ISO time), newest first, one line each. */
 export async function commitsSince(cwd: string, since: string, signal?: AbortSignal): Promise<string[]> {
   const log = await git(cwd, ["log", `--since=${since}`, "--format=%h %s", "-n", "20"], signal);

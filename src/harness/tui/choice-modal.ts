@@ -67,6 +67,7 @@ export class ChoiceModal {
     }));
     if (question.allowOther !== false) this.rows.push({ label: OTHER_LABEL, recommended: false, other: true });
     this.selected = initialChoiceIndex(question);
+    if (question.multiSelect === true) for (const index of question.initialChecked ?? []) if (index >= 0 && index < question.options.length && question.options[index]?.disabled === undefined) this.checked.add(index);
   }
 
   /** Test and host introspection: the highlighted row, whether the text line is open, the checked rows. */

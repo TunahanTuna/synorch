@@ -38,6 +38,7 @@ import {
   type PolicyMode,
   type ProjectId,
   type ReasoningEffort,
+  type EffortSlot,
   type RecoveryReport,
   type RenderEvent,
   type ResolvedCredential,
@@ -272,6 +273,8 @@ export interface Runtime {
   effortFor(tier: ModelTier, role: AgentRole | undefined, route: Pick<RouteBinding, "provider_id" | "model_id" | "adapter_id">): EffortResolution;
   /** K6 `/effort`: sets (or with undefined clears) a tier's level for this session; the next model request uses it. */
   setSessionEffort(tier: ModelTier, level: ReasoningEffort | undefined): void;
+  /** K6 `/config set|unset effort.<slot>` in a session: the configured level (user layer) changes at once, not only after a restart. */
+  setConfiguredEffort(slot: EffortSlot, level: ReasoningEffort | undefined): void;
   /** Crash recovery of a session and of every attempt session it started; nothing is re-executed. */
   recover(sessionId: SessionId): Promise<readonly RecoveryReport[]>;
 }
@@ -554,7 +557,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     create: async (manifest) => opened(await rawSessions.create(manifest), manifest.parent, manifest.workspace_root),
     openForWrite: async (sessionId) => wrap(await rawSessions.openForWrite(sessionId)),
     openForRead: (sessionId) => rawSessions.openForRead(sessionId),
-    fork: async (sessionId, upToSeq) => opened(await rawSessions.fork(sessionId, upToSeq), { session_id: sessionId, up_to_seq: upToSeq }, workspaceRoot),
+    fork: async (sessionId, upToSeq, forkOptions) => opened(await rawSessions.fork(sessionId, upToSeq, forkOptions), { session_id: sessionId, up_to_seq: upToSeq }, workspaceRoot),
     list: (id) => rawSessions.list(id),
   };
 
@@ -915,12 +918,13 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   for (const entry of options.efforts ?? []) if (entry.tier !== undefined) sessionEfforts.set(entry.tier, entry.level);
   const flagEffort = options.efforts?.find((entry) => entry.tier === undefined)?.level;
   const effortNotices = new Set<string>();
+  const configuredEffort: Partial<Record<EffortSlot, ReasoningEffort | undefined>> = { ...config.effort };
   const effortFor = (tier: ModelTier, role: AgentRole | undefined, route: Pick<RouteBinding, "provider_id" | "model_id" | "adapter_id">): EffortResolution => {
     // The conversation (role session) may run on the orchestrator route: its own `session` level comes first.
     const conversation = role === "session";
-    const roleLevel = role === undefined || role === "orchestrator" ? undefined : config.effort[role];
+    const roleLevel = role === undefined || role === "orchestrator" ? undefined : configuredEffort[role];
     const sessionLevel = (conversation ? sessionEfforts.get("session") : undefined) ?? sessionEfforts.get(tier);
-    const requested = sessionLevel ?? flagEffort ?? roleLevel ?? config.effort[tier];
+    const requested = sessionLevel ?? flagEffort ?? roleLevel ?? configuredEffort[tier];
     return resolveEffort(requested, { provider: route.provider_id, model: route.model_id, adapterId: route.adapter_id });
   };
   const stepEffort = (input: { readonly role: AgentRole; readonly route: ModelRoute }): ReasoningEffort | undefined => {
@@ -1092,6 +1096,10 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     setSessionEffort(tier, level) {
       if (level === undefined) sessionEfforts.delete(tier);
       else sessionEfforts.set(tier, level);
+    },
+    setConfiguredEffort(slot, level) {
+      if (level === undefined) delete configuredEffort[slot];
+      else configuredEffort[slot] = level;
     },
     async modelCatalog(signal, catalogOptions = {}) {
       const pool: AnyModelAdapter[] = [...adapters];

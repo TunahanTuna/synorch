@@ -767,6 +767,8 @@ interface DialogEntry {
 type Interruption = { readonly kind: "interrupt" | "exit" };
 type InputResult = Awaited<ReturnType<UserInputSource["next"]>>;
 
+/** Two Esc presses within this window on an empty, idle editor open /rewind. */
+const DOUBLE_ESCAPE_MS = 800;
 const BRACKETED_PASTE = /^\x1b\[200~([\s\S]*)\x1b\[201~$/;
 const IMAGE_PATH_HINT = /\.(png|jpe?g|gif|webp)['"]?\s*$/i;
 
@@ -823,6 +825,8 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
   private readonly attachmentListeners = new Set<(attachment: Attachment) => void>();
   private readonly permissionListeners = new Set<(mode: PermissionMode) => void>();
   private tray: AttachmentTray;
+  /** When the last Esc with nothing to interrupt was pressed (a second one opens /rewind). */
+  private lastIdleEscapeAt: number | undefined;
   private inputRoot = process.cwd();
   /** The session's permission mode (Shift+Tab); shown in the footer once the session reports one. */
   private permission: PermissionMode = "auto";
@@ -930,6 +934,11 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
         return self.mouseOn;
       },
       setMouseMode: (on) => this.setMouseMode(on),
+      setEditorText: (text) => {
+        if (this.stopped) return;
+        this.editor.setText(text);
+        this.tui.requestRender();
+      },
       setSessionStatus: (status) => {
         // The footer reads the presenter on every render: update it and redraw now.
         this.presenter?.configure({ model: status.model, effort: status.effort ?? null, contextWindowTokens: status.contextWindowTokens });
@@ -1559,6 +1568,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
     this.workerPane?.dispose();
     for (const dialog of [...this.dialogs].reverse()) dialog.cancel();
     this.removeInputListener?.();
+    this.tray.discard();
     if (this.mouseOn && !this.selectMode) this.terminal.write(MOUSE_DISABLE_SEQUENCE);
     await this.terminal.drainInput(this.options.drainInputMs ?? 300, 50);
     this.tui.stop();
@@ -1579,6 +1589,7 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       }
       if (!this.interrupts.requestActive && this.editor.getText().length > 0) {
         this.editor.setText("");
+        this.tray.discard();
         this.tui.requestRender();
         return { consume: true };
       }
@@ -1586,7 +1597,21 @@ export class PiTuiRenderer implements TerminalRenderer, ViewHost {
       return { consume: true };
     }
     if (matchesKey(data, "escape") && this.dialog === undefined && !this.editor.isShowingAutocomplete()) {
-      return this.interrupt("escape") === "cancel-request" ? { consume: true } : undefined;
+      if (this.interrupt("escape") === "cancel-request") {
+        this.lastIdleEscapeAt = undefined;
+        return { consume: true };
+      }
+      // K3: Esc Esc on an empty editor (nothing running) opens /rewind, like Claude Code.
+      if (this.presenter !== undefined && this.workerPane === undefined && !this.interrupts.requestActive && this.editor.getText().trim() === "") {
+        const now = this.now();
+        if (this.lastIdleEscapeAt !== undefined && now - this.lastIdleEscapeAt <= DOUBLE_ESCAPE_MS) {
+          this.lastIdleEscapeAt = undefined;
+          this.deliver({ kind: "command", text: "/rewind" });
+          return { consume: true };
+        }
+        this.lastIdleEscapeAt = now;
+      }
+      return undefined;
     }
     if (matchesKey(data, "ctrl+o") && this.dialog === undefined && this.presenter !== undefined) {
       this.expanded = !this.expanded;

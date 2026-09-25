@@ -116,7 +116,8 @@ export interface SessionStore {
   /** Acquires the lease or fails with `session_locked`, naming the current holder. */
   openForWrite(sessionId: SessionId): Promise<EventStore>;
   openForRead(sessionId: SessionId): Promise<ReadOnlyEventStore>;
-  fork(sessionId: SessionId, upToSeq: number): Promise<EventStore>;
+  /** A new session whose history is the parent's events up to `upToSeq` (read through, not copied), then its own. */
+  fork(sessionId: SessionId, upToSeq: number, options?: { readonly title?: string }): Promise<EventStore>;
   list(projectId: ProjectId): Promise<readonly SessionSummary[]>;
 }
 

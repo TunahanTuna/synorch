@@ -16,6 +16,7 @@ import {
   exitCodeFor,
   HarnessError,
   MODEL_TIERS,
+  EFFORT_SLOTS,
   HARD_RAILS,
   WORKSPACE_UNTRUSTED_CODE,
   workspaceDigest,
@@ -65,6 +66,7 @@ import { formatListing, listSettings, setUserSetting, settingFor, unsetUserSetti
 import { DEFAULT_ADAPTER_FOR_PROVIDER } from "./config.ts";
 import type { OrchestrateInput } from "./orchestrate-tool.ts";
 import { OrchestrationTracker } from "./orchestration-view.ts";
+import { applyRestore, planRestore, restoreConflicts, rewindPoints, type RestoreIO } from "./rewind.ts";
 import { runModelCommand } from "./model-picker.ts";
 import { effortLabel, effortTarget, pickEffort, runEffortCommand, type EffortCommandHost } from "./effort-command.ts";
 import { isReasoningEffort } from "../providers/index.ts";
@@ -72,7 +74,7 @@ import { failureInfo } from "./outcome.ts";
 import { createSessionRenderer, type SessionRenderer } from "./renderers.ts";
 import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts";
 import type { SessionIO } from "./session.ts";
-import { commitAll, commitsSince, uncommittedChanges, uncommittedDiff } from "./session-git.ts";
+import { changePathspecs, commitAll, commitSelected, commitsSince, uncommittedChanges, uncommittedDiff, type ChangeSummary } from "./session-git.ts";
 import {
   contextReport,
   conversationPaletteEntries,
@@ -107,6 +109,7 @@ import { UsageLedger } from "./usage-stats.ts";
  */
 
 type AgentCommand = Extract<ParsedCommand, { kind: "agent" }>;
+type ChangedFile = ChangeSummary["files"][number];
 
 const MAX_STEPS = 50;
 const CONVERSATION_TITLE = "chat: ";
@@ -517,12 +520,19 @@ class Conversation implements ConversationCommandHost {
 
   // ---- sessions -------------------------------------------------------------------------------
 
-  private async conversations(): Promise<{ readonly sessionId: SessionId; readonly title: string; readonly at: string }[]> {
+  private async conversations(): Promise<{ readonly sessionId: SessionId; readonly title: string; readonly at: string; readonly parentTitle: string | undefined; readonly forked: boolean }[]> {
     const summaries = await this.runtime.sessions.list(this.runtime.projectId);
+    const titles = new Map(summaries.map((summary) => [summary.manifest.session_id, (summary.manifest.title ?? "").replace(CONVERSATION_TITLE, "")]));
     return summaries
       .filter((summary) => summary.manifest.title?.startsWith(CONVERSATION_TITLE) === true && !summary.locked)
       .sort((left, right) => (right.lastEventAt ?? right.manifest.created_at).localeCompare(left.lastEventAt ?? left.manifest.created_at))
-      .map((summary) => ({ sessionId: summary.manifest.session_id, title: (summary.manifest.title ?? "").slice(CONVERSATION_TITLE.length), at: summary.lastEventAt ?? summary.manifest.created_at }));
+      .map((summary) => ({
+        sessionId: summary.manifest.session_id,
+        title: (summary.manifest.title ?? "").slice(CONVERSATION_TITLE.length),
+        at: summary.lastEventAt ?? summary.manifest.created_at,
+        forked: summary.manifest.parent !== undefined,
+        parentTitle: summary.manifest.parent === undefined ? undefined : titles.get(summary.manifest.parent.session_id),
+      }));
   }
 
   private async openResumed(): Promise<readonly SessionEvent[] | undefined> {
@@ -1920,50 +1930,94 @@ class Conversation implements ConversationCommandHost {
       this.print(["Nothing to commit: the working tree is clean."]);
       return;
     }
-    const statTail = changes.stat.split(/\r?\n/).at(-1)?.trim() ?? "";
-    let message = argument.trim() === "" ? await this.proposeCommitMessage(changes.files.map((file) => file.path), changes.stat) : argument.trim();
-    const count = `${changes.files.length} file${changes.files.length === 1 ? "" : "s"}`;
+    const tui = this.renderer.kind === "tui" && this.renderer.controls !== undefined;
+    let selected: readonly ChangedFile[] = changes.files;
+    if (tui && changes.files.length > 1) {
+      // Selective staging: every changed file is checked; Space unchecks what stays out of this commit.
+      const picked = await this.pickCommitFiles(changes.files);
+      if (picked === undefined) {
+        this.print(["Not committed."]);
+        return;
+      }
+      selected = picked;
+    }
+    const all = (): boolean => selected.length === changes.files.length;
+    const statFor = (): string => (all() ? changes.stat : changes.stat.split(/\r?\n/).filter((line) => selected.some((file) => changePathspecs(file).some((spec) => line.includes(spec)))).join("\n"));
+    const statTail = all() ? (changes.stat.split(/\r?\n/).at(-1)?.trim() ?? "") : "";
+    let message = argument.trim() === "" ? await this.proposeCommitMessage(selected.map((file) => file.path), statFor()) : argument.trim();
+    const countOf = (files: readonly ChangedFile[]): string => `${files.length} file${files.length === 1 ? "" : "s"}`;
     const views = this.renderer.views;
     if (views !== undefined) {
       // UX-03 action card: what, why, consequence, reversibility — before the human decides.
       views.showView({
         kind: "action",
-        title: `Commit ${count}?`,
+        title: `Commit ${countOf(selected)}?`,
         what: `git commit -m "${snippet(message.split(/\r?\n/)[0] ?? message, 90)}"`,
         why: "you ran /commit",
-        consequence: `stages every uncommitted change (git add -A) and records one commit${statTail === "" ? "" : ` · ${statTail}`}`,
+        consequence: all()
+          ? `stages every uncommitted change (git add -A) and records one commit${statTail === "" ? "" : ` · ${statTail}`}`
+          : `stages and commits only the ${countOf(selected)} you selected; the other ${changes.files.length - selected.length} stay uncommitted`,
         effect: "local",
         reversible: true,
-        paths: changes.files.map((file) => file.path),
+        paths: selected.map((file) => file.path),
         scope: "this commit once; nothing is pushed",
       });
       this.print(["Message:", ...message.split(/\r?\n/).map((line) => `  ${line}`)]);
     } else {
-      const lines = [`${g.bullet} Commit ${g.sep} ${count}`];
-      for (const file of changes.files.slice(0, 15)) lines.push(`  ${file.status.padEnd(3)}${file.path}`);
-      if (changes.files.length > 15) lines.push(`  … ${changes.files.length - 15} more`);
+      const lines = [`${g.bullet} Commit ${g.sep} ${countOf(selected)}`];
+      for (const file of selected.slice(0, 15)) lines.push(`  ${file.status.padEnd(3)}${file.path}`);
+      if (selected.length > 15) lines.push(`  … ${selected.length - 15} more`);
       if (statTail !== "") lines.push(`  ${statTail}`);
       this.print([...lines, "Proposed message:", ...message.split(/\r?\n/).map((line) => `  ${line}`)]);
     }
-    const answer = await this.askUser(`Commit ${changes.files.length} file${changes.files.length === 1 ? "" : "s"} with this message?`, ["Commit", "Edit the message", "Cancel"], this.outer.signal).catch(() => "Cancel");
-    if (/^(2|e|edit)/i.test(answer.trim())) {
+    const choices = ["Commit", "Edit the message", ...(!tui && changes.files.length > 1 ? ["Choose files"] : []), "Cancel"];
+    const answer = (await this.askUser(`Commit ${countOf(selected)} with this message?`, choices, this.outer.signal).catch(() => "Cancel")).trim();
+    if (/^(edit|e$)/i.test(answer)) {
       message = (await this.askUser("Type the commit message", undefined, this.outer.signal).catch(() => "")).trim();
       if (message === "") {
         this.print(["Not committed."]);
         return;
       }
-    } else if (!/^(1|y|yes|commit|evet)/i.test(answer.trim())) {
+    } else if (/^choose/i.test(answer)) {
+      const picked = await this.pickCommitFiles(changes.files);
+      if (picked === undefined) {
+        this.print(["Not committed."]);
+        return;
+      }
+      selected = picked;
+    } else if (!/^(y|yes|commit|evet)/i.test(answer)) {
       this.print(["Not committed."]);
       return;
     }
-    const result = await commitAll(root, message, this.outer.signal);
+    const result = all() ? await commitAll(root, message, this.outer.signal) : await commitSelected(root, message, selected, this.outer.signal);
     if (!result.ok) {
       this.note("error", `${g.fail} git commit failed: ${snippet(result.stderr || result.stdout, 300)}`);
       return;
     }
     const subject = message.split(/\r?\n/)[0] ?? message;
-    this.print([`${g.ok} Committed ${changes.files.length} file${changes.files.length === 1 ? "" : "s"}: ${subject}`]);
-    this.pendingNotes.push(`the user committed the working tree (/commit) with the message "${snippet(subject, 120)}".`);
+    const left = changes.files.length - selected.length;
+    this.print([`${g.ok} Committed ${countOf(selected)}: ${subject}${left === 0 ? "" : ` ${g.sep} ${left} left uncommitted`}`]);
+    this.pendingNotes.push(`the user committed ${all() ? "the working tree" : `${selected.map((file) => file.path).join(", ")}`} (/commit) with the message "${snippet(subject, 120)}".`);
+  }
+
+  /** The changed files as a multi-select, all checked; undefined when dismissed or nothing is left checked. */
+  private async pickCommitFiles(files: readonly ChangedFile[]): Promise<readonly ChangedFile[] | undefined> {
+    const answer = await this.choose(
+      {
+        question: "Files to commit",
+        subtitle: "Space toggles · Enter continues with the checked files · Esc cancels",
+        options: files.map((file) => ({ label: `${file.status.padEnd(2)} ${file.path}` })),
+        multiSelect: true,
+        initialChecked: files.map((_, index) => index),
+        allowOther: false,
+        escapeLabel: "cancel",
+        tone: "neutral",
+      },
+      this.outer.signal,
+    ).catch(() => undefined);
+    if (answer?.kind !== "selected") return undefined;
+    const picked = answer.indices.flatMap((index) => (files[index] === undefined ? [] : [files[index]]));
+    return picked.length === 0 ? undefined : picked;
   }
 
   /** A one-shot request to the conversation model for a commit message; a plain summary when that is not possible. */
@@ -2300,31 +2354,207 @@ class Conversation implements ConversationCommandHost {
   }
 
   public async resume(argument: string): Promise<void> {
-    const list = (await this.conversations()).filter((entry) => entry.sessionId !== this.sessionId).slice(0, 10);
+    const list = (await this.conversations()).filter((entry) => entry.sessionId !== this.sessionId).slice(0, 20);
+    const g = this.glyphs;
+    const forkLabel = (entry: (typeof list)[number]): string => (entry.forked ? ` ${g.sep} fork of ${entry.parentTitle === undefined ? "an earlier conversation" : `"${snippet(entry.parentTitle, 40)}"`}` : "");
+    let chosen: SessionId | undefined;
     if (argument === "") {
-      this.print(
-        list.length === 0
-          ? ["No other conversations in this folder."]
-          : ["Recent conversations (/resume <n>):", ...list.map((entry, index) => `  ${String(index + 1).padStart(2)}. ${snippet(entry.title, 70)} ${this.glyphs.sep} ${relativeTime(Date.parse(entry.at))}`)],
-      );
-      return;
+      if (list.length === 0) {
+        this.print(["No other conversations in this folder."]);
+        return;
+      }
+      if (this.renderer.kind !== "tui" || this.renderer.controls === undefined) {
+        this.print(["Recent conversations (/resume <n>):", ...list.map((entry, index) => `  ${String(index + 1).padStart(2)}. ${snippet(entry.title, 70)} ${g.sep} ${relativeTime(Date.parse(entry.at))}${forkLabel(entry)}`)]);
+        return;
+      }
+      if (this.turnRunning || this.orchestration !== undefined) {
+        this.print(["Synorch is working; /cancel first."]);
+        return;
+      }
+      const answer = await this.choose(
+        {
+          question: "Resume a conversation",
+          subtitle: "Enter switches · Esc cancels · this one stays saved",
+          options: list.map((entry) => ({ label: `${entry.forked ? (g.name === "rich" ? "↳ " : "-> ") : ""}${snippet(entry.title, 70)}`, description: `${relativeTime(Date.parse(entry.at))}${forkLabel(entry)}` })),
+          allowOther: false,
+          escapeLabel: "cancel",
+          tone: "neutral",
+        },
+        this.outer.signal,
+      ).catch(() => undefined);
+      if (answer?.kind !== "selected") return;
+      chosen = list[answer.indices[0] ?? -1]?.sessionId;
+      if (chosen === undefined) return;
     }
     if (this.turnRunning || this.orchestration !== undefined) {
       this.print(["Synorch is working; /cancel first."]);
       return;
     }
-    const index = Number(argument);
-    const chosen = Number.isInteger(index) && index >= 1 ? list[index - 1]?.sessionId : list.find((entry) => entry.sessionId === argument)?.sessionId;
+    if (chosen === undefined) {
+      const index = Number(argument);
+      chosen = Number.isInteger(index) && index >= 1 ? list[index - 1]?.sessionId : list.find((entry) => entry.sessionId === argument)?.sessionId;
+    }
     if (chosen === undefined) {
       this.print([`No conversation "${argument}"; /resume lists them.`]);
       return;
     }
+    await this.leaveConversation();
+    await this.showResumed(await this.openSession(chosen));
+  }
+
+  /** Closes the current conversation's log (it stays resumable) and resets per-conversation state. */
+  private async leaveConversation(): Promise<void> {
     await this.log?.close().catch(() => undefined);
     this.log = undefined;
+    this.driver = undefined;
+    this.turnId = undefined;
     this.orchestratedSessions.length = 0;
     this.pendingNotes.length = 0;
+    this.requests.clear();
     this.lastTracker = undefined;
-    await this.showResumed(await this.openSession(chosen));
+  }
+
+  // ---- K3 time travel: /fork and /rewind ------------------------------------------------------------
+
+  /**
+   * Continues in a new conversation whose history is this one's events up to `upToSeq` (the store
+   * reads the parent prefix through the fork pointer; nothing is copied). The original is closed and
+   * stays resumable. `upToSeq` 0 (before the first event) starts an empty conversation instead.
+   */
+  private async forkAt(upToSeq: number, title: string | undefined): Promise<readonly SessionEvent[] | undefined> {
+    const source = this.sessionId;
+    if (source === undefined || this.log === undefined) return undefined;
+    if (upToSeq < 1) {
+      await this.leaveConversation();
+      this.sessionId = undefined;
+      this.routeRecorded = false;
+      return [];
+    }
+    const forked = await this.runtime.sessions.fork(source, upToSeq, title === undefined ? {} : { title });
+    const forkedId = forked.sessionId;
+    await forked.close();
+    await this.leaveConversation();
+    return this.openSession(forkedId);
+  }
+
+  /** The last few exchanges of a conversation, as the resume card shows them. */
+  private replayTail(events: readonly SessionEvent[]): void {
+    const users = events.flatMap((event, index) => (event.type === "message/recorded" && event.data.role === "user" ? [index] : []));
+    const firstShown = users.length > REPLAY_EXCHANGES ? (users[users.length - REPLAY_EXCHANGES] ?? 0) : 0;
+    if (users.length > 0) this.renderer.replay?.(events.slice(firstShown));
+  }
+
+  /** `/fork [name]`: branch the conversation here; the original stays resumable. */
+  public async fork(argument: string): Promise<void> {
+    if (this.turnRunning || this.orchestration !== undefined) {
+      this.print(["Synorch is working; /cancel first."]);
+      return;
+    }
+    const log = this.log;
+    if (log === undefined || this.sessionId === undefined) {
+      this.print(["Nothing to fork yet: send a message first."]);
+      return;
+    }
+    const name = argument.replace(/\s+/g, " ").trim();
+    const previous = this.sessionId;
+    await this.forkAt(log.lastSeq, name === "" ? undefined : `${CONVERSATION_TITLE}${name.slice(0, 120)}`);
+    this.print([`${this.glyphs.ok} Forked${name === "" ? "" : ` "${snippet(name, 60)}"`} ${this.glyphs.sep} you are in the new branch ${this.glyphs.sep} the original (${previous}) stays saved: /resume`]);
+  }
+
+  private restoreIO(): RestoreIO {
+    return {
+      resolve: (relative) => this.inside(relative)?.absolute,
+      read: async (absolute) => {
+        const bytes = await readOptional(absolute);
+        return bytes === undefined ? undefined : new Uint8Array(bytes);
+      },
+      write: async (absolute, bytes) => {
+        await mkdir(path.dirname(absolute), { recursive: true });
+        await writeFile(absolute, bytes);
+      },
+      remove: (absolute) => unlink(absolute),
+      blob: (ref) => this.runtime.blobs.get(ref.digest),
+    };
+  }
+
+  /**
+   * `/rewind` (Esc Esc on an empty editor): pick an earlier message; the conversation forks from just
+   * before it and the message goes back into the editor. Optionally the files Synorch changed after
+   * that point are restored from its `/undo` checkpoints (files the user changed since are kept).
+   */
+  public async rewind(): Promise<void> {
+    const g = this.glyphs;
+    if (this.turnRunning || this.orchestration !== undefined) {
+      this.print(["Synorch is working; /cancel first."]);
+      return;
+    }
+    const events = await this.readEvents();
+    const points = rewindPoints(events).reverse().slice(0, 50);
+    if (points.length === 0) {
+      this.print(["Nothing to rewind yet: send a message first."]);
+      return;
+    }
+    const picked = await this.choose(
+      {
+        question: "Rewind to before which message?",
+        subtitle: "the conversation forks from just before it · the original stays saved (/resume) · Esc cancels",
+        options: points.map((point) => ({ label: snippet(point.text === "" ? "(attachment only)" : point.text, 72), description: relativeTime(Date.parse(point.at)) })),
+        allowOther: false,
+        escapeLabel: "cancel",
+        tone: "neutral",
+      },
+      this.outer.signal,
+    ).catch(() => undefined);
+    const point = picked?.kind === "selected" ? points[picked.indices[0] ?? -1] : undefined;
+    if (point === undefined) return;
+    const plan = planRestore(events, point.forkSeq);
+    const io = this.restoreIO();
+    const conflicts = plan.files.length === 0 ? [] : await restoreConflicts(plan, io);
+    const restorable = plan.files.length - conflicts.length;
+    const count = (n: number): string => `${n} file${n === 1 ? "" : "s"}`;
+    const options = [
+      { label: "Fork conversation from here", description: "new conversation up to just before this message; your message returns to the editor; files stay as they are" },
+      ...(plan.files.length === 0
+        ? []
+        : [
+            {
+              label: "Fork and restore files to that point",
+              description: `${count(restorable)} Synorch changed after it go back${conflicts.length === 0 ? "" : ` ${g.sep} ${count(conflicts.length)} you changed since are kept: ${conflicts.slice(0, 3).join(", ")}${conflicts.length > 3 ? ", …" : ""}`} ${g.sep} command side effects are not undone`,
+              ...(restorable === 0 ? { disabled: "every file Synorch changed was changed again since" } : {}),
+            },
+          ]),
+    ];
+    const action = await this.choose(
+      { question: `Rewind to "${snippet(point.text, 50)}"`, options, allowOther: false, escapeLabel: "cancel", tone: "neutral" },
+      this.outer.signal,
+    ).catch(() => undefined);
+    if (action?.kind !== "selected") return;
+    const restore = action.indices[0] === 1;
+    let restoredFiles: readonly string[] = [];
+    if (restore) {
+      const result = await applyRestore(plan, io);
+      restoredFiles = result.restored;
+      // The original conversation records what was undone, so its /diff and /undo stay truthful.
+      for (const checkpoint of plan.checkpoints) {
+        const mine = (file: string): boolean => checkpoint.data.files.some((entry) => entry.path === file);
+        await this.append("checkpoint/restored", { checkpoint_seq: checkpoint.seq, restored: result.restored.filter(mine), skipped: result.skipped.filter((entry) => mine(entry.path)) }, "user").catch(() => undefined);
+      }
+      for (const entry of result.skipped) this.note("warning", `${g.warn} Kept ${entry.path}: ${entry.reason}`);
+    }
+    const previous = this.sessionId;
+    const forked = await this.forkAt(point.forkSeq, undefined);
+    if (forked === undefined) return;
+    this.replayTail(forked);
+    const kept = plan.files.map((file) => file.path).filter((file) => !restoredFiles.includes(file));
+    if (kept.length > 0) this.pendingNotes.push(`the user rewound the conversation to this point; files you changed after it were kept as they are now: ${kept.join(", ")} (re-read before editing).`);
+    this.print([
+      `${g.resume} Rewound ${g.sep} new branch from before "${snippet(point.text, 50)}"${restoredFiles.length === 0 ? "" : ` ${g.sep} restored ${restoredFiles.join(", ")}`} ${g.sep} the original${previous === undefined ? "" : ` (${previous})`} stays saved: /resume`,
+    ]);
+    const controls = this.renderer.controls;
+    if (point.text !== "") {
+      if (controls?.setEditorText !== undefined) controls.setEditorText(point.text);
+      else this.print(["Your message, to edit and send again:", ...point.text.split(/\r?\n/).map((line) => `  ${line}`)]);
+    }
   }
 
   /** `/mouse [on|off]` when it reaches the session (the interactive renderer normally handles it itself). */
@@ -2441,10 +2671,13 @@ class Conversation implements ConversationCommandHost {
         effect = "applied now";
       } else if (change.key.startsWith("routes.")) effect = "new conversations use it; /model switches this one";
       else if (change.key.startsWith("effort.")) {
-        // K6: a tier level also applies to this session at once (role levels apply to new sessions).
-        const tier = MODEL_TIERS.find((candidate) => `effort.${candidate}` === change.key);
-        if (tier !== undefined) {
-          this.runtime.setSessionEffort(tier, change.value === undefined || !isReasoningEffort(change.value) ? undefined : change.value);
+        // K6: set or unset, a tier or role level applies to this session at once: the live configured level
+        // changes, and a session override of that tier (an earlier /effort) gives way to it.
+        const slot = EFFORT_SLOTS.find((candidate) => `effort.${candidate}` === change.key);
+        if (slot !== undefined) {
+          this.runtime.setConfiguredEffort(slot, change.value === undefined || !isReasoningEffort(change.value) ? undefined : change.value);
+          const tier = MODEL_TIERS.find((candidate) => candidate === slot);
+          if (tier !== undefined) this.runtime.setSessionEffort(tier, undefined);
           this.refreshStatus();
           effect = "applied from the next request";
         }

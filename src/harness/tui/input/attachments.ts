@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import type { Attachment } from "../../contracts/index.ts";
 import type { ClipboardImage } from "./clipboard.ts";
@@ -46,9 +47,13 @@ export class AttachmentTray {
     return attachment;
   }
 
-  /** Attachments referenced by the submitted text; clears the tray for the next message. */
+  /**
+   * Attachments referenced by the submitted text; clears the tray for the next message. A clipboard
+   * image whose chip was deleted before sending is never sent, so its temporary file is removed now.
+   */
   public collect(text: string): Attachment[] {
     const result: Attachment[] = this.images.filter((image) => text.includes(image.label));
+    removeTemporary(this.images.filter((image) => !result.includes(image)));
     const seen = new Set<string>();
     let fileIndex = 1;
     for (const match of text.matchAll(MENTIONS)) {
@@ -81,8 +86,19 @@ export class AttachmentTray {
     return result;
   }
 
+  /** Drops every pending image (the editor was cleared or the session ends) and removes clipboard temp files. */
+  public discard(): void {
+    removeTemporary(this.images);
+    this.images.length = 0;
+    this.nextImage = 1;
+  }
+
   private display(absolute: string): string {
     const relative = path.relative(this.root, absolute);
     return relative === "" || relative.startsWith("..") || path.isAbsolute(relative) ? absolute : relative.split(path.sep).join("/");
   }
+}
+
+function removeTemporary(images: readonly Attachment[]): void {
+  for (const image of images) if (image.temporary === true) void rm(image.path, { force: true }).catch(() => undefined);
 }

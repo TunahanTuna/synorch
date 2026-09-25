@@ -142,15 +142,16 @@ class JsonlSessionStore implements SessionStore {
     return new JsonlReadOnlyEventStore(await this.#locate(sessionId), (id) => this.#locate(id));
   }
 
-  public async fork(sessionId: SessionId, upToSeq: number): Promise<EventStore> {
+  public async fork(sessionId: SessionId, upToSeq: number, options: { readonly title?: string } = {}): Promise<EventStore> {
     const parent = await this.#locate(sessionId);
+    const title = options.title ?? parent.manifest.title;
     return this.create({
       session_id: createId("session", this.#clock().getTime()),
       project_id: parent.manifest.project_id,
       workspace_root: parent.manifest.workspace_root,
       created_at: this.#clock().toISOString(),
       parent: { session_id: sessionId, up_to_seq: upToSeq },
-      ...(parent.manifest.title === undefined ? {} : { title: parent.manifest.title }),
+      ...(title === undefined ? {} : { title: title.slice(0, 200) }),
     });
   }
 

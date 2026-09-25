@@ -164,6 +164,8 @@ export interface InteractiveInputControls {
    * resume). `effort` undefined shows none. Optional: renderers without a footer ignore it.
    */
   setSessionStatus?(status: SessionStatusView): void;
+  /** K3 `/rewind`: puts text back into the editor (replacing what is there) for the user to edit and send. */
+  setEditorText?(text: string): void;
   /** SGR mouse reporting (wheel scroll, click to expand). Off by default: it disables native selection. */
   readonly mouseMode: boolean;
   setMouseMode(on: boolean): void;

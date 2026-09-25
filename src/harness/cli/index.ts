@@ -25,6 +25,7 @@ import { configCommand } from "./config-command.ts";
 import { doctorRuntime } from "./doctor.ts";
 import { commandHelp } from "./help.ts";
 import { runsCommand, showCommand } from "./inspect.ts";
+import { mcpCommand } from "./mcp-command.ts";
 import { failureInfo } from "./outcome.ts";
 import type { RuntimeOverrides } from "./runtime.ts";
 import { conversationCommand } from "./conversation.ts";
@@ -37,7 +38,7 @@ import { trustCommand } from "./trust.ts";
  * dynamic `import("./harness/cli/index.ts")`, so `inspect/init/sync/doctor` never load it. The
  * composition root itself is `createRuntime()` in `runtime.ts`.
  */
-export const HARNESS_COMMANDS = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust", "config"] as const;
+export const HARNESS_COMMANDS = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust", "config", "mcp"] as const;
 export type HarnessCommand = (typeof HARNESS_COMMANDS)[number];
 
 export { harnessCommandFlags, parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";
@@ -262,6 +263,16 @@ async function dispatch(parsed: Exclude<ParsedCommand, { kind: "help" }>, io: Ha
           ...(overrides.configCeiling === undefined ? {} : { discovery: { ceiling: overrides.configCeiling, platform } }),
         },
       );
+    case "mcp":
+      return mcpCommand(parsed.args, parsed.target, parsed.json, {
+        home,
+        cwd: io.cwd,
+        env: io.env,
+        platform,
+        stdout: (text) => void io.stdout.write(text),
+        stderr: (text) => void io.stderr.write(text),
+        ...(overrides.configCeiling === undefined ? {} : { discovery: { ceiling: overrides.configCeiling, platform } }),
+      });
     case "memory": {
       const config = await loadRuntimeConfig(home, io.cwd, [], {
         platform,

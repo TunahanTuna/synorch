@@ -70,6 +70,7 @@ import { OrchestrationTracker } from "./orchestration-view.ts";
 import { applyRestore, planRestore, restoreConflicts, rewindPoints, type RestoreIO } from "./rewind.ts";
 import { runModelCommand } from "./model-picker.ts";
 import { effortLabel, effortTarget, pickEffort, runEffortCommand, type EffortCommandHost } from "./effort-command.ts";
+import { runMcpSlash } from "./mcp-command.ts";
 import { isReasoningEffort } from "../providers/index.ts";
 import { failureInfo } from "./outcome.ts";
 import { createSessionRenderer, type SessionRenderer } from "./renderers.ts";
@@ -468,6 +469,8 @@ class Conversation implements ConversationCommandHost {
       const controls = this.renderer.controls;
       controls?.setCommands(conversationPaletteEntries());
       this.refreshStatus();
+      // K3: MCP servers start in the background (never before the editor); problems become notes.
+      void this.startMcp();
       // Shift+Tab / Alt+M in the renderer cycles the permission mode; the session applies the policy.
       unbindControls = controls?.onPermissionModeChange((mode) => this.setMode(mode)) ?? (() => undefined);
       if (runtime.permissionMode() === "full") this.note("error", this.fullAccessNotice());
@@ -496,6 +499,7 @@ class Conversation implements ConversationCommandHost {
       // K3: a worker run never outlives the session either: it is cancelled and given time to clean up its worktrees.
       await this.settleRuns();
       await runtime.processes.killAll().catch(() => undefined);
+      await runtime.mcp.close().catch(() => undefined);
       unwatchProcesses();
       unbindControls();
       runtime.orchestrate.set(undefined);
@@ -2159,6 +2163,26 @@ class Conversation implements ConversationCommandHost {
     await runEffortCommand(this.effortHost(), argument);
   }
 
+  /** K3 `/mcp [list | tools [name] | reconnect | enable | disable | approve | revoke <name>]`. */
+  public async mcp(argument: string): Promise<void> {
+    await runMcpSlash({ manager: this.runtime.mcp, home: this.runtime.home, sep: this.glyphs.sep, print: (lines) => this.print(lines) }, argument);
+  }
+
+  /** K3: session start of the MCP servers; approvals the repository needs and start failures become notes. */
+  private async startMcp(): Promise<void> {
+    const mcp = this.runtime.mcp;
+    for (const problem of mcp.problems) this.note("warning", `MCP ${problem.file}: ${problem.message}`);
+    const pending = mcp.pendingApprovals().map((definition) => definition.name);
+    if (pending.length > 0) {
+      this.note("info", `This repository declares MCP server${pending.length === 1 ? "" : "s"} ${pending.join(", ")}; ${pending.length === 1 ? "it stays" : "they stay"} off until you approve: /mcp approve <name>`);
+    }
+    await mcp.startSession().catch(() => undefined);
+    if (this.exiting) return;
+    for (const entry of mcp.status()) {
+      if (entry.state === "failed") this.note("warning", `MCP ${entry.name} did not start: ${entry.error ?? "unknown error"} ${this.glyphs.sep} /mcp reconnect ${entry.name}`);
+    }
+  }
+
   private effortHost(): EffortCommandHost {
     return {
       runtime: this.runtime,
@@ -2494,7 +2518,10 @@ class Conversation implements ConversationCommandHost {
       const failed = info.state !== "exited" || info.exitCode !== 0;
       this.note(failed ? "warning" : "info", `${failed ? this.glyphs.warn : this.glyphs.ok} background ${describeProcess(info)}`);
     });
-    const onExit = (): void => processes.killAllSync();
+    const onExit = (): void => {
+      processes.killAllSync();
+      this.runtime.mcp.killAllSync();
+    };
     process.once("exit", onExit);
     return () => {
       unbindStatus();

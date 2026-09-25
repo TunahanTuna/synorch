@@ -23,6 +23,7 @@ import {
   type ProviderError,
   type ReasoningEffort,
   type ToolBridge,
+  type ToolDescriptor,
 } from "../../contracts/index.ts";
 import { MessagesMapper } from "../anthropic-messages.ts";
 import { anthropicWireModelId } from "../catalog.ts";
@@ -76,6 +77,12 @@ export interface ClaudeCodeAdapterOptions {
   readonly permissionMode?: () => PermissionMode | undefined;
   /** Fires when a native WebSearch/WebFetch result arrives (K4.1 web-content taint). */
   readonly onWebContentRead?: () => void;
+  /**
+   * K3 (native mode): the user's external MCP servers in Claude's `--mcp-config` format, read at
+   * session start. Claude runs them itself next to the Synorch relay (no double proxy); the relay
+   * then leaves Synorch's own `mcp__*` registry tools out of its list.
+   */
+  readonly mcpServers?: () => Readonly<Record<string, Readonly<Record<string, unknown>>>>;
 }
 
 export interface ClaudeArgsInput {
@@ -89,6 +96,8 @@ export interface ClaudeArgsInput {
   readonly native?: { readonly permissionMode: ClaudePermissionMode; readonly addDir: string };
   /** K6: `--effort low|medium|high|xhigh|max` (verified with `claude --help`, 2.1.282); `ultra` is sent as `max`. */
   readonly effort?: ReasoningEffort;
+  /** K3: extra `--allowedTools` entries (external MCP servers allowed without Claude asking, e.g. `mcp__playwright`). */
+  readonly allowedTools?: readonly string[];
 }
 
 /**
@@ -114,7 +123,7 @@ export function buildClaudeArgs(input: ClaudeArgsInput): string[] {
     input.mcpConfigPath,
     "--strict-mcp-config",
     "--allowedTools",
-    `${CLAUDE_TOOL_PREFIX}*`,
+    [`${CLAUDE_TOOL_PREFIX}*`, ...(input.allowedTools ?? [])].join(","),
     "--permission-prompt-tool",
     `${CLAUDE_TOOL_PREFIX}${PERMISSION_TOOL_NAME}`,
     "--setting-sources",
@@ -224,6 +233,7 @@ export function createClaudeCodeAdapter(options: ClaudeCodeAdapterOptions): Agen
         native,
         permissionMode: options.permissionMode ?? (() => undefined),
         onWebContentRead: options.onWebContentRead ?? (() => undefined),
+        mcpServers: native ? (options.mcpServers?.() ?? {}) : {},
       });
     },
     async health(signal) {
@@ -277,6 +287,8 @@ interface SessionConfig {
   readonly native: boolean;
   readonly permissionMode: () => PermissionMode | undefined;
   readonly onWebContentRead: () => void;
+  /** External MCP servers Claude runs itself (native mode only; empty otherwise). */
+  readonly mcpServers: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
 }
 
 /** sun_path holds 104 bytes on macOS and 108 on Linux, including the terminating NUL. */
@@ -342,7 +354,7 @@ class ClaudeCodeSession implements BackendSession {
     const session = new ClaudeCodeSession(executable, options, config, directory, server, socketDirectory);
     const mcp = new McpToolServer(
       {
-        list: () => session.active?.tools.list() ?? [],
+        list: () => session.visibleTools(),
         call: (call, signal) => session.callTool(call.name, call.arguments, call.rpcId, signal),
         permission: (toolName, input, signal) => session.permission(toolName, input, signal),
       },
@@ -361,8 +373,10 @@ class ClaudeCodeSession implements BackendSession {
           resolve();
         });
       });
+      const external = Object.fromEntries(Object.entries(config.mcpServers).filter(([name]) => name !== MCP_SERVER_NAME));
       const mcpConfig = {
         mcpServers: {
+          ...external,
           [MCP_SERVER_NAME]: {
             type: "stdio",
             command: process.execPath,
@@ -378,6 +392,22 @@ class ClaudeCodeSession implements BackendSession {
       throw new ProviderFailure(providerError("bridge_unavailable", `could not prepare the MCP bridge: ${error instanceof Error ? error.message : String(error)}`));
     }
     return session;
+  }
+
+  /**
+   * K3: external MCP servers run without Claude asking in auto and full (auto = autonomous, as in
+   * the gateway); in ask its prompts reach Synorch's card, and plan refuses them there.
+   */
+  private externalAllowed(): string[] {
+    const mode = this.config.permissionMode();
+    if (mode !== "auto" && mode !== "full") return [];
+    return Object.keys(this.config.mcpServers).filter((name) => name !== MCP_SERVER_NAME).map((name) => `mcp__${name}`);
+  }
+
+  /** The relay's tool list: Synorch's registry, minus proxied MCP tools when Claude runs those servers itself. */
+  private visibleTools(): readonly ToolDescriptor[] {
+    const tools = this.active?.tools.list() ?? [];
+    return Object.keys(this.config.mcpServers).length === 0 ? tools : tools.filter((tool) => !tool.name.startsWith("mcp__"));
   }
 
   public runTurn(input: BackendTurnInput, bridges: BackendBridges, signal: AbortSignal): AsyncIterable<ModelStreamEvent> {
@@ -741,7 +771,7 @@ class ClaudeCodeSession implements BackendSession {
       // Native mode: Claude's own permission prompt for a built-in goes to Synorch's approval broker.
       return active.approvals.decide(toolName, input, AbortSignal.any([signal, active.signal]));
     }
-    if (active === undefined || stripped === undefined || !active.tools.list().some((tool) => tool.name === stripped)) {
+    if (active === undefined || stripped === undefined || !this.visibleTools().some((tool) => tool.name === stripped)) {
       return { allow: false, reason: "only Synorch bridge tools are permitted" };
     }
     return active.approvals.decide(toolName, input, AbortSignal.any([signal, active.signal]));
@@ -760,6 +790,7 @@ class ClaudeCodeSession implements BackendSession {
       resume: this.resume,
       ...(this.options.reasoningEffort === undefined ? {} : { effort: this.options.reasoningEffort }),
       ...(this.config.native ? { native: { permissionMode: claudePermissionMode(this.config.permissionMode()), addDir: this.options.cwd } } : {}),
+      ...(this.externalAllowed().length === 0 ? {} : { allowedTools: this.externalAllowed() }),
     });
     let child: ChildProcess;
     try {

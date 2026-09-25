@@ -40,12 +40,19 @@ export function claudeToolEffect(name: string): ToolEffect {
   if (EXEC_TOOLS.has(name)) return "exec";
   if (WRITE_TOOLS.has(name)) return "workspace-write";
   if (name === "WebFetch" || name === "WebSearch") return "network-read";
+  // K3: a user MCP server Claude runs itself (`mcp__<server>__<tool>`) gets the same `exec` class as in the gateway.
+  if (isExternalMcpTool(name)) return "exec";
   return "read";
 }
 
-/** Tools whose results carry web content (K4.1 taint: `onWebContentRead`). */
+/** A tool of an external MCP server (not the Synorch relay). */
+export function isExternalMcpTool(name: string): boolean {
+  return name.startsWith("mcp__") && !name.startsWith("mcp__synorch__");
+}
+
+/** Tools whose results carry untrusted content (K4.1 taint: `onWebContentRead`; K3: external MCP results too). */
 export function isClaudeWebTool(name: string): boolean {
-  return name === "WebFetch" || name === "WebSearch";
+  return name === "WebFetch" || name === "WebSearch" || isExternalMcpTool(name);
 }
 
 function str(input: Readonly<Record<string, unknown>>, key: string): string | undefined {

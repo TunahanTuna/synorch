@@ -80,7 +80,7 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 ### K3 — Güç kullanıcısı
 - Worker'lar arka planda çalışırken sohbet (UX-GATE-02). ✅ (branch `k3-background-orchestration`; tasarım: [conversation-runtime §7](../design/conversation-runtime.md#7-arka-plan-orkestrasyonu-k3-ux-gate-02); gerçek terminal/gerçek model denemesi bekliyor)
 - Çapraz sağlayıcılı review (K1.5 ile birleşir).
-- MCP client (harici araçlar, gateway altında).
+- MCP client (harici araçlar, gateway altında). ✅ (dal `k3-mcp-client`): `syn mcp list|add|remove|approve|revoke|enable|disable|test`, `/mcp`; stdio + streamable HTTP (resmi SDK); proje server'ları ve `.mcp.json` tek seferlik onayla; Claude native modda `--mcp-config`. Playwright: `syn mcp add playwright -- npx @playwright/mcp@latest`. Ayrıntı: [ADR-13 revizyonu](../decisions/ADR-13-mcp-acp.md).
 - Zamanda yolculuk: oturumun herhangi bir anından fork.
 - ✅ (`8ae9e99`) **UI eki — alt durum satırı (ürün sahibi, 2026-09-25):** Hata: `/model` ile model değişince alttaki model/bağlam bilgisi güncellenmiyor. Durum satırı canlı state'ten beslenmeli: model, efor (K6), izin modu, bağlam %, kota; her değişiklikte (`/model`, `/effort`, Shift+Tab, compact) anında yenilenmeli. Görünüm daha okunur ve renkli olmalı: alanlar ayrı renk/ton, bağlam ve kota eşiklere göre renk (yeşil → sarı → kırmızı), dar terminalde öncelik sırasıyla kısalma.
 

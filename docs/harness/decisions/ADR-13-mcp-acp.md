@@ -40,3 +40,15 @@ MCP harici server ile client arasında açık protokol sunar; server'ın bildird
 ## Revisit trigger
 
 Kullanıcıların harici MCP araçlarına ihtiyaç bildirmesi veya ACP istemci ekosisteminin olgunlaşması.
+
+## 2026-09-25 revizyon — K3 MCP istemcisi uygulandı
+
+Harici MCP server'larına bağlanan istemci Faz 4'ten öne alındı (K3 + K4.3; ürün sahibi: "yetenekli bir araç", Playwright ile tarayıcı otomasyonu). Bu bölüm önceki kararları silmez; yalnız etki sınıfını günceller.
+
+- **Kütüphane:** resmi `@modelcontextprotocol/sdk` (stdio, streamable HTTP, eski SSE); SDK yalnız ilk bağlantıda yüklenir. Modül: `src/harness/mcp/` (yalnız `contracts`'a bağımlı).
+- **Yapılandırma:** kullanıcı `~/.synorch/config.yaml` `mcp.servers`; proje `.synorch/config.yaml` `mcp.servers` ve kökteki `.mcp.json` (`mcpServers`). Depo katmanı yalnız daraltabilir (SEC-C1): proje server'ı, kullanıcı o tanımı (digest) bu çalışma alanı için bir kez onaylamadan (`syn mcp approve` / `/mcp approve`) başlatılmaz; onay kullanıcı kapsamında (`mcp-approvals.json`). Tanım değişirse yeniden onay gerekir.
+- **Etki sınıfı (revize):** `default-high-risk → external-write` yerine `effect_source: user-config`: `trust: full` (varsayılan) → `exec`, `trust: read-only` → `read`. Gerekçe: `external-write` `auto`'da her çağrıda sorar; ürün sahibinin "auto = otonom, izin yorgunluğu yok" kararıyla çelişir. Sonuç: `ask` sorar, `auto`/`full` sormaz, `plan` reddeder; sunucunun kendi `readOnlyHint` beyanı politika değildir.
+- **Güvenilmeyen veri:** her MCP sonucu `<untrusted_mcp_content>` zarfında döner ve web içeriği gibi prompt-injection kalkanını tetikler (aynı turda dışa etkili eylem yine sorar). Büyük sonuç gateway'de blob'a kesilir; görsel içerik görsel blob olarak eklenir.
+- **Roller:** `full` server'lar session/implementer/debugger; `read-only` server'lar ayrıca explorer/reviewer (orchestrator hiçbirini görmez); `roles:` ile daraltılabilir.
+- **Başlatma:** `startup: lazy` (varsayılan) araç listesi önbellekteyse server'ı ilk çağrıda başlatır, değilse oturum başında bağlanır; `session` her oturumda bağlanır. stderr `~/.synorch/logs/mcp/<server>.log`'a gider; server'lar oturumla kapanır (Windows'ta süreç ağacı).
+- **Claude Code native mod:** server'lar çift proxy yerine `--mcp-config` ile Claude'a verilir (Synorch relay'inin yanında); relay listesi o zaman `mcp__*` araçlarını dışarıda bırakır. `auto`/`full`'da `--allowedTools mcp__<server>` ile sorulmaz; `ask`'ta Claude'un izin istemi Synorch kartına gelir (`exec`), `plan` reddeder. Restricted modda araçlar relay (gateway) üzerinden gider. Sınırlama: native modda rol daraltması Claude'a uygulanmaz; oturum ortasındaki `/mcp disable` Claude'a bir sonraki oturumda yansır.

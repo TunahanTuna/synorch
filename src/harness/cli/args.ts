@@ -99,7 +99,9 @@ export type ParsedCommand =
   | { readonly kind: "logout"; readonly common: CommonFlags; readonly provider: ProviderId; readonly profile: string | undefined; readonly args: readonly string[] }
   | { readonly kind: "auth-status"; readonly common: CommonFlags; readonly json: boolean; readonly args: readonly string[] }
   | { readonly kind: "memory"; readonly subcommand: MemorySubcommand; readonly args: readonly string[] }
-  | { readonly kind: "config"; readonly common: CommonFlags; readonly subcommand: ConfigSubcommand; readonly args: readonly string[]; readonly json: boolean };
+  | { readonly kind: "config"; readonly common: CommonFlags; readonly subcommand: ConfigSubcommand; readonly args: readonly string[]; readonly json: boolean }
+  /** K3 `syn mcp …`: sub-command arguments are parsed by the mcp command (`--` separates a server command). */
+  | { readonly kind: "mcp"; readonly target: string | undefined; readonly json: boolean; readonly args: readonly string[] };
 
 const COMMON_OPTIONS = {
   target: { type: "string", short: "t" },
@@ -166,7 +168,7 @@ function unknownOption(command: string, flag: string): string {
   return `Unknown option ${flag} for syn ${command}${match === undefined ? "" : `. Did you mean ${match}?`}`;
 }
 
-export const HARNESS_COMMANDS = [...Object.keys(HARNESS_COMMAND_OPTIONS), "memory"] as const;
+export const HARNESS_COMMANDS = [...Object.keys(HARNESS_COMMAND_OPTIONS), "memory", "mcp"] as const;
 
 function unknownCommand(command: string): string {
   const match = closestMatch(command, HARNESS_COMMANDS);
@@ -376,6 +378,26 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
       if ("error" in parsed) throw new UsageError(parsed.error, command);
       if (values.json && parsed.subcommand !== "list" && parsed.subcommand !== "get") throw new UsageError(`--json applies to syn config list and get, not ${parsed.subcommand}.`, command);
       return { kind: "config", common: common(command, values), subcommand: parsed.subcommand, args: parsed.args, json: values.json };
+    }
+    case "mcp": {
+      const terminator = args.indexOf("--");
+      const head = terminator === -1 ? [...args] : args.slice(0, terminator);
+      const tail = terminator === -1 ? [] : args.slice(terminator);
+      if (head.includes("--help") || head.includes("-h")) return { kind: "help", command };
+      const kept: string[] = [];
+      let target: string | undefined;
+      let json = false;
+      for (let index = 0; index < head.length; index += 1) {
+        const token = head[index] ?? "";
+        if (token === "--json") json = true;
+        else if (token === "--target") {
+          target = head[index + 1];
+          if (target === undefined || target.trim() === "") throw new UsageError("--target needs a path.", command);
+          index += 1;
+        } else if (token.startsWith("--target=")) target = token.slice("--target=".length);
+        else kept.push(token);
+      }
+      return { kind: "mcp", target, json, args: [...kept, ...tail] };
     }
     case "memory": {
       const [subcommand, ...rest] = args;

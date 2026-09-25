@@ -30,6 +30,7 @@ const HARNESS_MODULES = [
   "orchestration",
   "context",
   "memory",
+  "mcp",
   "tui",
   "cli",
 ] as const;
@@ -46,6 +47,7 @@ const ALLOWED_HARNESS_DEPENDENCIES: { readonly [M in HarnessModule]: readonly Ha
   orchestration: ["contracts"],
   context: ["contracts"],
   memory: ["contracts"],
+  mcp: ["contracts"],
   tui: ["contracts"],
   cli: HARNESS_MODULES.filter((module) => module !== "cli"),
 };

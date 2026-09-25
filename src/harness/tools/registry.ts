@@ -40,6 +40,7 @@ export function createToolRegistry(options: ToolRegistryOptions = {}): ToolRegis
       if (tools.has(tool.metadata.name)) throw new Error(`tool ${tool.metadata.name} is already registered`);
       tools.set(tool.metadata.name, tool);
     },
+    unregister: (name) => tools.delete(name),
     get: (name) => tools.get(name),
     visibleTo(role: AgentRole, policy: EffectivePolicy): readonly ToolDescriptor[] {
       return [...tools.values()]

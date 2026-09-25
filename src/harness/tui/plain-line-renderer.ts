@@ -429,7 +429,7 @@ export class PlainLineRenderer implements TerminalRenderer, ViewHost {
         if (line === undefined) return { kind: "exit" };
         const text = line.trim();
         if (text === "") continue;
-        if (text === "/exit" || text === "/quit") return { kind: "exit" };
+        if (text === "/exit" || text === "/quit") return { kind: "exit", command: true };
         return { kind: text.startsWith("/") ? "command" : "message", text };
       }
     } finally {

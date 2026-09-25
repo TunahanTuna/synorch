@@ -78,7 +78,7 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 `/memory graph`: Obsidian graph view benzeri, hafıza notlarının (karar, varsayım, soru, kanıt, kavram, tercih) ilişki yumağını terminalde göster; ilişki türleri + not bağlantıları, filtreler, odakla-genişlet gezinme (ajan grafıyla aynı etkileşim), çelişki vurgusu, `o` ile notu Obsidian'da aç, `--obsidian` ile Obsidian'ın kendi graph view'unu aç. K2 ajanına eklendi.
 
 ### K3 — Güç kullanıcısı
-- Worker'lar arka planda çalışırken sohbet (UX-GATE-02).
+- Worker'lar arka planda çalışırken sohbet (UX-GATE-02). ✅ (branch `k3-background-orchestration`; tasarım: [conversation-runtime §7](../design/conversation-runtime.md#7-arka-plan-orkestrasyonu-k3-ux-gate-02); gerçek terminal/gerçek model denemesi bekliyor)
 - Çapraz sağlayıcılı review (K1.5 ile birleşir).
 - MCP client (harici araçlar, gateway altında).
 - Zamanda yolculuk: oturumun herhangi bir anından fork.

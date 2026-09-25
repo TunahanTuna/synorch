@@ -164,6 +164,11 @@ export interface InteractiveInputControls {
    * resume). `effort` undefined shows none. Optional: renderers without a footer ignore it.
    */
   setSessionStatus?(status: SessionStatusView): void;
+  /**
+   * K3: when the user last pressed a key in the editor and whether it holds a draft. A prompt from a
+   * background worker waits for a typing pause so it never swallows keystrokes meant for the editor.
+   */
+  inputActivity?(): { readonly lastKeyAtMs: number; readonly draft: boolean };
   /** SGR mouse reporting (wheel scroll, click to expand). Off by default: it disables native selection. */
   readonly mouseMode: boolean;
   setMouseMode(on: boolean): void;
@@ -171,7 +176,8 @@ export interface InteractiveInputControls {
 
 export type UserInputResult =
   | { readonly kind: "message" | "command"; readonly text: string; readonly attachments?: readonly Attachment[] }
-  | { readonly kind: "interrupt" | "exit" };
+  /** `command`: the user typed /exit or /quit (K3: a background worker run is then stopped without asking). */
+  | { readonly kind: "interrupt" | "exit"; readonly command?: boolean };
 
 export interface UserInputSource {
   /** Resolves with the next submitted message; Ctrl+C first cancels the active request (ADR-04). */

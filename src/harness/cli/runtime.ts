@@ -120,7 +120,7 @@ import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts"
 import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
 import { withRoleDefinitions } from "./role-policy.ts";
 import { plannerHint, renderProfileBlock, startProjectProfile, within, type ProjectProfileHandle } from "./project-profile.ts";
-import { createOrchestrateSlot, createOrchestrateTool, type OrchestrateSlot } from "./orchestrate-tool.ts";
+import { createOrchestrateSlot, createOrchestrateTool, createRunControlTools, type OrchestrateSlot } from "./orchestrate-tool.ts";
 import { loadScript } from "./scripted-script.ts";
 import { recordTrustDecision } from "./trust.ts";
 
@@ -769,6 +769,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
 
   const orchestrate = createOrchestrateSlot();
   registry.register(createOrchestrateTool(orchestrate) as never);
+  for (const tool of createRunControlTools(orchestrate)) registry.register(tool);
 
   // K4.1 native OpenAI search: on in auto/full/plan, one question per session in ask, headless only with web.openai_hosted: true.
   let hostedConsent: boolean | undefined;

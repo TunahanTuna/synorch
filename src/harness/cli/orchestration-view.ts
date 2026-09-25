@@ -1,5 +1,6 @@
 import type { SessionEvent, SessionId, TaskState } from "../contracts/index.ts";
 import type { OrchestrationTaskView, OrchestrationView, ReviewVerdictView } from "../contracts/views.ts";
+import { isOwnedPath } from "../context/index.ts";
 
 /**
  * Projects one orchestration (the coordinator's run session plus its attempt sessions) into U3's
@@ -30,6 +31,8 @@ interface TaskEntry {
   review: { verdict: ReviewVerdictView; revisions: number } | undefined;
   /** K1.7: the user paused the running attempt (cleared by resume, cancel or a new attempt). */
   paused: boolean;
+  /** K3: the plan's owned paths (patterns); the conversation agent may not edit them while the task is live. */
+  readonly ownedPaths: readonly string[];
 }
 
 const TOOL_VERBS: Readonly<Record<string, string>> = {
@@ -84,6 +87,36 @@ export class OrchestrationTracker {
     return this.phase;
   }
 
+  /** The coordinator's run id once `run/created` was seen. */
+  public get run(): string | undefined {
+    return this.runId;
+  }
+
+  /** K3: the key of a task that is not yet terminal and owns `relative` (a workspace-relative path). */
+  public ownerOf(relative: string, platform: NodeJS.Platform): string | undefined {
+    if (this.phase === "done" || this.phase === "failed" || this.phase === "cancelled") return undefined;
+    for (const task of this.tasks.values()) {
+      if (TERMINAL_TASK_STATES.includes(task.state) || task.role === "explorer" || task.role === "reviewer") continue;
+      if (isOwnedPath(relative, task.ownedPaths, platform)) return task.key;
+    }
+    return undefined;
+  }
+
+  /** K3 `run_status` / `/runs <id>`: one line per task with state, activity and owned paths. */
+  public statusLines(): string[] {
+    const seconds = Math.round(((this.endedAt ?? this.now()) - this.startedAt) / 1000);
+    const list = [...this.tasks.values()];
+    const done = list.filter((task) => task.state === "completed").length;
+    return [
+      `Phase: ${this.phase} · ${seconds}s · ${done}/${list.length} tasks completed`,
+      ...list.map((task) => {
+        const detail = TERMINAL_TASK_STATES.includes(task.state) ? (this.summary(task) ?? task.reason) : task.activity;
+        const owns = task.ownedPaths.length === 0 ? "" : ` · owns ${task.ownedPaths.slice(0, 6).join(", ")}${task.ownedPaths.length > 6 ? ", …" : ""}`;
+        return `- ${task.key} (${task.role}${task.model === undefined ? "" : `, ${task.model}`}): ${task.state.replaceAll("_", " ")}${task.paused ? " (paused)" : ""}${detail === undefined ? "" : ` · ${detail}`}${owns}`;
+      }),
+    ];
+  }
+
   /** Returns true when the event belongs to this orchestration and changed the view. */
   public observe(event: SessionEvent): boolean {
     if (event.type === "run/created" && this.runId === undefined && event.data.goal === this.goal) {
@@ -126,6 +159,7 @@ export class OrchestrationTracker {
           integratedPaths: [],
           review: undefined,
           paused: false,
+          ownedPaths: event.data.owned_paths,
         });
         if (this.phase === "planning" || this.phase === "awaiting-approval") this.phase = "running";
         return true;

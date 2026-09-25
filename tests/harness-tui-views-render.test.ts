@@ -12,7 +12,7 @@ const SGR = /\x1b\[/;
 
 test("the live board shows one row per task with glyph, role, model, activity and elapsed", () => {
   const lines = renderView(BOARD, viewContext({ glyphs: "rich", width: 80, now: NOW, frame: 0 }));
-  assert.match(lines[0] ?? "", /^● Workers · 4 tasks · 2 running\s+g graph · ↓ select · esc to stop$/);
+  assert.match(lines[0] ?? "", /^● Workers · 4 tasks · 2 running\s+ctrl\+g graph · ↓ select · \/runs$/);
   assert.match(lines[1] ?? "", /^ {2}✓ map-usage\s+explorer\s+luna\s+38 files mapped, 4 use mocks\s+14s$/);
   assert.match(lines[2] ?? "", /^ {2}⠋ convert-mocks\s+implementer astra editing tests\/http\.test\.ts\s+41s$/);
   assert.match(lines[3] ?? "", /checking · npm test/);

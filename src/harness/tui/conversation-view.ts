@@ -467,7 +467,9 @@ export class ConversationPresenter {
       if (event.data.request_id !== undefined) return [];
       if (this.options.echoesUser && !this.replaying) return [];
       const text = message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
-      return text.trim() === "" ? [] : [this.user(stripHarnessNotes(text))];
+      // A K3 completion turn carries only a harness note (no user text): nothing to show as the user's line.
+      const shown = stripHarnessNotes(text);
+      return shown.trim() === "" ? [] : [this.user(shown)];
     }
     if (message.role !== "assistant") return [];
     const ops: ViewOp[] = [];

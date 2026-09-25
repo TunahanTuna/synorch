@@ -10,6 +10,7 @@ export * from "./jsonl.ts";
 export * from "./memory.ts";
 export * from "./model.ts";
 export * from "./packets.ts";
+export * from "./panel.ts";
 export * from "./paths.ts";
 export * from "./policy.ts";
 export * from "./projection.ts";

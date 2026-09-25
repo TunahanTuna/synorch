@@ -2,6 +2,7 @@ import type { AuthInteraction } from "./auth.ts";
 import type { ChoiceAnswer, ChoiceQuestion } from "./choice.ts";
 import type { SessionEvent } from "./events.ts";
 import type { ModelStreamEvent } from "./model.ts";
+import type { PanelPage } from "./panel.ts";
 import type { ApprovalBroker, PermissionMode } from "./policy.ts";
 
 /**
@@ -231,6 +232,12 @@ export interface InteractiveInputControls {
   setMouseMode(on: boolean): void;
   /** K8 theme and welcome customization (interactive renderer with the conversation view). */
   readonly appearance?: AppearanceControls;
+  /**
+   * Layered panels: opens `page` as a navigable overlay in place of the transcript (restored on
+   * close). Resolves when the user closes it (Esc at the root, `q`, Ctrl+C) or on abort. Optional:
+   * without it the command prints its text report.
+   */
+  openPanel?(page: PanelPage, signal?: AbortSignal): Promise<void>;
 }
 
 export type UserInputResult =

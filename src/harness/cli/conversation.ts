@@ -44,6 +44,7 @@ import {
   type SessionHeaderView,
   type SessionId,
   type ModelPickerEntry,
+  type PanelPage,
   type ToolCallRequest,
   type ToolExecutionContext,
   type ToolGateway,
@@ -76,6 +77,10 @@ import { applyRestore, planRestore, restoreConflicts, rewindPoints, type Restore
 import { runModelCommand } from "./model-picker.ts";
 import { effortLabel, effortTarget, pickEffort, runEffortCommand, type EffortCommandHost } from "./effort-command.ts";
 import { runMcpSlash } from "./mcp-command.ts";
+import { mcpPanel, type McpPanelHost } from "./panels/mcp.ts";
+import { pluginsPanel } from "./panels/plugins.ts";
+import { cardPanel, configPanel, helpPanel, memoryPanel, resumePanel, runsPanel, statusPanel } from "./panels/session.ts";
+import { skillsPanel } from "./panels/skills.ts";
 import { defaultEffort, isReasoningEffort } from "../providers/index.ts";
 import { openBrowser } from "../tui/open-browser.ts";
 import { acknowledgedNotices, acknowledgeNotice, approvalNotice, mcpStartNotices, StartupNotices } from "./startup-notices.ts";
@@ -85,7 +90,9 @@ import { createRuntime, type Runtime, type RuntimeOverrides } from "./runtime.ts
 import type { SessionIO } from "./session.ts";
 import { changePathspecs, commitAll, commitSelected, commitsSince, lastCommitDiff, uncommittedChanges, uncommittedDiff, type ChangeSummary } from "./session-git.ts";
 import {
+  CONVERSATION_COMMANDS,
   contextReport,
+  conversationHelp,
   conversationPaletteEntries,
   findConversationCommand,
   reservedCommandNames,
@@ -601,6 +608,26 @@ class Conversation implements ConversationCommandHost {
 
   public print(lines: readonly string[]): void {
     for (const line of lines) this.note("info", line);
+  }
+
+  /**
+   * Layered panels: in the TUI a report command opens its panel (resolves true once it is closed);
+   * plain and JSONL modes, or a renderer without panels, get false and print the text report.
+   */
+  private async showPanel(build: () => PanelPage | Promise<PanelPage>): Promise<boolean> {
+    const controls = this.renderer.controls;
+    if (this.renderer.kind !== "tui" || controls?.openPanel === undefined) return false;
+    const page = await build();
+    await controls.openPanel(page, this.outer.signal);
+    return true;
+  }
+
+  /** `/help`: the command browser in the TUI, the list otherwise. */
+  public async help(): Promise<void> {
+    const invocable = this.runtime.extensions.invocable(reservedCommandNames()).map((entry) => ({ name: entry.name, description: entry.meta.description, argsHint: entry.meta.argumentHint, source: entry.source }));
+    const keys = conversationHelp().at(-1) ?? "";
+    if (await this.showPanel(() => helpPanel(CONVERSATION_COMMANDS, invocable, keys, this.glyphs.sep))) return;
+    this.print(conversationHelp());
   }
 
   /** Only this conversation's events and model streams reach the view; worker and coordinator traffic feeds the board instead. */
@@ -1767,6 +1794,17 @@ class Conversation implements ConversationCommandHost {
       this.print(run === undefined ? [this.unknownRun(verb)] : this.runStatusText(run).split("\n"));
       return;
     }
+    const runEntries = () =>
+      this.workerRuns.map((run) => ({
+        id: run.id,
+        goal: run.goal,
+        status: run.status === "running" ? (run.foreground ? "running" : "background") : run.status,
+        running: run.status === "running",
+        view: () => run.tracker.view(),
+        report: () => this.runStatusText(run),
+        cancel: () => run.controller.abort(),
+      }));
+    if (await this.showPanel(() => runsPanel(runEntries, g.sep))) return;
     this.print([
       `${g.bullet} Worker runs ${g.sep} ${this.workerRuns.filter((run) => run.status === "running").length} running`,
       ...this.workerRuns.map((run) => {
@@ -2236,6 +2274,12 @@ class Conversation implements ConversationCommandHost {
 
   /** `/status`: mode, sandbox, MCP servers and every notice of this session's start. */
   public async status(): Promise<void> {
+    const lines = this.statusLines();
+    if (await this.showPanel(() => statusPanel(lines, this.mcpPanelHost(), this.glyphs.sep))) return;
+    this.print(lines);
+  }
+
+  private statusLines(): string[] {
     const runtime = this.runtime;
     const g = this.glyphs;
     const mode = runtime.permissionMode();
@@ -2264,7 +2308,7 @@ class Conversation implements ConversationCommandHost {
     const notices = this.notices?.all ?? [];
     lines.push(`Notices         ${notices.length === 0 ? "none" : notices.length}`);
     for (const notice of notices) lines.push(`                ${notice.text}`);
-    this.print(lines);
+    return lines;
   }
 
   public async trust(): Promise<void> {
@@ -2313,26 +2357,31 @@ class Conversation implements ConversationCommandHost {
 
   /** K3 `/mcp [list | tools [name] | reconnect | enable | disable | approve | revoke <name>]`. */
   public async mcp(argument: string): Promise<void> {
-    await runMcpSlash(
-      {
-        manager: this.runtime.mcp,
-        home: this.runtime.home,
-        sep: this.glyphs.sep,
-        print: (lines) => this.print(lines),
-        openBrowser: (url) => openBrowser(url, { platform: process.platform, env: this.io.env }),
-        signal: this.outer.signal,
-      },
-      argument,
-    );
+    if (argument.trim() === "" && (await this.showPanel(() => mcpPanel(this.mcpPanelHost())))) return;
+    await runMcpSlash(this.mcpPanelHost(), argument);
+  }
+
+  private mcpPanelHost(): McpPanelHost {
+    return {
+      manager: this.runtime.mcp,
+      home: this.runtime.home,
+      sep: this.glyphs.sep,
+      env: this.io.env,
+      print: (lines) => this.print(lines),
+      openBrowser: (url) => openBrowser(url, { platform: process.platform, env: this.io.env }),
+      signal: this.outer.signal,
+    };
   }
 
   /** K7 `/skills [show | enable | disable <name>]`. */
   public async skills(argument: string): Promise<void> {
+    if (argument.trim() === "" && (await this.showPanel(() => skillsPanel(this.extensionHost())))) return;
     await runSkillsSlash(this.extensionHost(), argument);
   }
 
   /** K7 `/plugins [install <spec> | remove | enable | disable <name>]`. */
   public async plugins(argument: string): Promise<void> {
+    if (argument.trim() === "" && (await this.showPanel(() => pluginsPanel(this.extensionHost())))) return;
     await runPluginsSlash(this.extensionHost(), argument);
   }
 
@@ -2700,6 +2749,8 @@ class Conversation implements ConversationCommandHost {
   public async usage(): Promise<void> {
     const ledger = this.usageLedger;
     if (ledger === undefined) return;
+    const usagePage = async (): Promise<PanelPage> => cardPanel("Usage", await ledger.view(Date.now() - this.startedAt), [], usagePage);
+    if (await this.showPanel(usagePage)) return;
     const views = this.renderer.views;
     if (views !== undefined) views.showView(await ledger.view(Date.now() - this.startedAt, await this.quotaPlans(), quotaProviderLabel));
     else this.print(await ledger.report());
@@ -2903,6 +2954,7 @@ class Conversation implements ConversationCommandHost {
         // K2 "Why this context?" (UX-07): provenance and token estimate of every block of the last request.
         const events = await this.readEvents();
         const view = await buildContextView(events, this.runtime.blobs, DEFAULT_CONTEXT_WINDOW).catch(() => undefined);
+        if (view !== undefined && (await this.showPanel(() => cardPanel("Context", view)))) return;
         const views = this.renderer.views;
         if (view !== undefined && views !== undefined) views.showView(view);
         else if (view !== undefined) this.print(view.groups.flatMap((group) => [`${group.title}:`, ...group.items.map((item) => `  ${item.label} ~${item.tokens}${item.detail === undefined ? "" : ` (${item.detail})`}`)]));
@@ -2921,6 +2973,7 @@ class Conversation implements ConversationCommandHost {
         return;
       }
       case "memory":
+        if (argument.trim() === "" && (await this.showPanel(() => memoryPanel(this.memoryDesk())))) return;
         await runMemoryDesk(this.memoryDesk(), argument);
         return;
       case "diff": {
@@ -3013,6 +3066,8 @@ class Conversation implements ConversationCommandHost {
         this.print(["No other conversations in this folder."]);
         return;
       }
+      const resumeEntries = list.map((entry) => ({ sessionId: entry.sessionId, title: snippet(entry.title, 90), when: relativeTime(Date.parse(entry.at)), forkOf: entry.forked ? (entry.parentTitle === undefined ? "an earlier conversation" : `"${snippet(entry.parentTitle, 40)}"`) : undefined }));
+      if (await this.showPanel(() => resumePanel(resumeEntries, g.sep))) return;
       if (this.renderer.kind !== "tui" || this.renderer.controls === undefined) {
         this.print(["Recent conversations (/resume <n>):", ...list.map((entry, index) => `  ${String(index + 1).padStart(2)}. ${snippet(entry.title, 70)} ${g.sep} ${relativeTime(Date.parse(entry.at))}${forkLabel(entry)}`)]);
         return;
@@ -3251,6 +3306,17 @@ class Conversation implements ConversationCommandHost {
       if (current !== undefined) this.print([...formatListing(current).slice(0, -1), "Change: /config <key> <value> (or syn config set)"]);
       return;
     }
+    const panelShown = await this.showPanel(() =>
+      configPanel({
+        sep: this.glyphs.sep,
+        rows: listing,
+        edit: async (row) => {
+          const value = await this.pickSettingValue(row, controls);
+          return value === undefined ? undefined : this.applySetting(row.key, value);
+        },
+      }),
+    );
+    if (panelShown) return;
     for (;;) {
       const current = await listing();
       if (current === undefined) return;
@@ -3308,7 +3374,7 @@ class Conversation implements ConversationCommandHost {
     return answer.trim() === "" ? undefined : answer.trim();
   }
 
-  private async applySetting(key: string, value: string): Promise<void> {
+  private async applySetting(key: string, value: string): Promise<string> {
     const g = this.glyphs;
     try {
       const change = value === UNSET_SETTING ? await unsetUserSetting(this.runtime.home, key) : await setUserSetting(this.runtime.home, key, value);
@@ -3342,9 +3408,13 @@ class Conversation implements ConversationCommandHost {
           effect = "applied from the next request";
         }
       }
-      this.print([`${g.ok} ${change.key} = ${shown}${change.previous !== undefined && change.previous !== change.value ? ` (was ${change.previous})` : ""} ${g.sep} ${effect}`]);
+      const line = `${g.ok} ${change.key} = ${shown}${change.previous !== undefined && change.previous !== change.value ? ` (was ${change.previous})` : ""} ${g.sep} ${effect}`;
+      this.print([line]);
+      return line;
     } catch (error) {
-      this.print([`${g.warn} ${error instanceof Error ? error.message : String(error)}`]);
+      const line = `${g.warn} ${error instanceof Error ? error.message : String(error)}`;
+      this.print([line]);
+      return line;
     }
   }
 

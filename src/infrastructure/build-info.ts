@@ -15,7 +15,7 @@ export function buildCommit(file: string = BUILD_INFO): string | undefined {
   }
 }
 
-/** `0.4.0-beta.0 (abc1234)` for a built package, plain `0.4.0-beta.0` from sources (the legacy snapshot). */
+/** `0.4.0-beta.1 (abc1234)` for a built package, plain `0.4.0-beta.1` from sources (the legacy snapshot). */
 export function versionLine(file?: string): string {
   const commit = buildCommit(file);
   return commit === undefined ? SYNORCH_VERSION : `${SYNORCH_VERSION} (${commit})`;

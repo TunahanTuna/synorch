@@ -70,7 +70,7 @@ Installing from a local checkout (works on Windows, macOS and Linux; no `syn ini
 ```bash
 pnpm install
 pnpm run install:global   # build, pack and install a self-contained global copy
-syn --version             # 0.4.0-beta.0 (<commit>)
+syn --version             # 0.4.0-beta.1 (<commit>)
 ```
 
 See [docs/harness/delivery/install.md](./docs/harness/delivery/install.md) for the linked (live-rebuild) variant, updating and uninstalling.
@@ -353,7 +353,7 @@ pnpm dev -- inspect # run the CLI from source
 | [Architecture](./docs/AI-ORCHESTRATION-ARCHITECTURE.md) | The full design: orchestration model, protocol system, context architecture, model routing, discovery, open decisions, and the dated decision log. |
 | [Multi-provider harness vision](./docs/FUTURE-MULTI-PROVIDER-HARNESS.md) | Where this goes next — running different providers in different roles under one orchestrator. Proposal stage, not implemented. |
 | [CHANGELOG](./CHANGELOG.md) | Version history, Keep a Changelog + SemVer. |
-| [Release notes v0.4.0-beta.0](./docs/releases/v0.4.0-beta.0.md) | Human-readable notes for the current beta (`synorch@beta`). |
+| [Release notes v0.4.0-beta.1](./docs/releases/v0.4.0-beta.1.md) | Human-readable notes for the current beta (`synorch@beta`). |
 | [Release notes v0.3.0](./docs/releases/v0.3.0.md) | Human-readable notes for the current stable release. |
 | [Security policy](./SECURITY.md) | Report vulnerabilities through the private channel, not a public issue. |
 

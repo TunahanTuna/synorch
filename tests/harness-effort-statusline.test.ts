@@ -85,7 +85,7 @@ test("syn config set effort.<slot> writes a validated level to the user configur
   }
 });
 
-const HEADER: SessionHeaderView = { workspaceRoot: "/work/demo", gitBranch: "main", policyMode: "autonomous", routes: [], sandboxEnforcement: "full", notices: [], version: "0.4.0-beta.0", model: "gpt-6-sol", permissionMode: "auto" };
+const HEADER: SessionHeaderView = { workspaceRoot: "/work/demo", gitBranch: "main", policyMode: "autonomous", routes: [], sandboxEnforcement: "full", notices: [], version: "0.4.0-beta.1", model: "gpt-6-sol", permissionMode: "auto" };
 
 test("the status line follows /model and /effort at once", async () => {
   const terminal = new VirtualTerminal(100, 24);

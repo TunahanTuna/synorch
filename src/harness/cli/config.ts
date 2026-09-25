@@ -49,6 +49,20 @@ const webConfigSchema = z.strictObject({
     .optional(),
 });
 
+/** K7 `skills` / `plugins` blocks: read Claude Code's own items too (default true), and items turned off in Synorch. */
+const extensionSwitchSchema = z.strictObject({
+  include_claude: z.boolean().optional(),
+  /** Skill / command names (`name`, `plugin:name`) or plugin ids (`name`, Claude's `name@marketplace`) turned off in Synorch only. */
+  disabled: z.array(z.string().min(1).max(200)).max(2000).optional(),
+});
+
+export interface ExtensionsConfig {
+  readonly includeClaudeSkills: boolean;
+  readonly includeClaudePlugins: boolean;
+  readonly disabledSkills: readonly string[];
+  readonly disabledPlugins: readonly string[];
+}
+
 export interface WebConfig {
   readonly searchProvider: WebSearchProvider | undefined;
   readonly searchModel: string | undefined;
@@ -184,6 +198,10 @@ const configFileSchema = z.strictObject({
   effort: effortConfigSchema.optional(),
   /** K3 MCP servers: user layer as written; a project layer's servers wait for a one-time approval each. */
   mcp: mcpConfigSchema.optional(),
+  /** K7 skills and markdown commands (user layer only). */
+  skills: extensionSwitchSchema.optional(),
+  /** K7 plugins (user layer only). */
+  plugins: extensionSwitchSchema.optional(),
 });
 type ConfigFile = z.infer<typeof configFileSchema>;
 export type UserConfigFile = ConfigFile;
@@ -261,6 +279,8 @@ export interface RuntimeConfig {
   readonly effort: EffortConfig;
   /** K3 `mcp` blocks: the user layer's, and the project layer's (approval-gated per server). */
   readonly mcp: { readonly user: McpConfig | undefined; readonly userFile: string; readonly project: McpConfig | undefined; readonly projectFile: string };
+  /** K7 `skills.*` / `plugins.*` (user layer only). */
+  readonly extensions: ExtensionsConfig;
 }
 
 function configError(message: string, file?: string): HarnessError {
@@ -321,6 +341,8 @@ const IGNORED_KEY_REASON: Readonly<Record<string, string>> = {
   web: "web search and fetch settings are chosen in the user configuration only",
   claude_code: "the Claude Code bridge mode is chosen in the user configuration only",
   effort: "reasoning effort is chosen in the user configuration only",
+  skills: "skills are enabled and disabled in the user configuration only",
+  plugins: "plugins are enabled and disabled in the user configuration only",
 };
 
 function warningsOf(layer: "workspace" | "project", file: string, read: LayerRead | undefined): ConfigWarning[] {
@@ -490,6 +512,15 @@ function adaptersOf(file: ConfigFile | undefined, layer: ConfigLayer, configPath
   });
 }
 
+export function extensionsConfigOf(user: ConfigFile | undefined): ExtensionsConfig {
+  return {
+    includeClaudeSkills: user?.skills?.include_claude !== false,
+    includeClaudePlugins: user?.plugins?.include_claude !== false,
+    disabledSkills: user?.skills?.disabled ?? [],
+    disabledPlugins: user?.plugins?.disabled ?? [],
+  };
+}
+
 /** `~/.synorch` or `$SYNORCH_HOME`, matching the auth module's resolution. */
 export function resolveHome(env: Readonly<Record<string, string | undefined>>): string {
   const override = env.SYNORCH_HOME;
@@ -558,5 +589,6 @@ export async function loadRuntimeConfig(
     },
     effort: user?.effort ?? {},
     mcp: { user: user?.mcp, userFile: userPath, project: project?.mcp, projectFile: projectPath },
+    extensions: extensionsConfigOf(user),
   };
 }

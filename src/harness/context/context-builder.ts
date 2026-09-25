@@ -98,6 +98,8 @@ export interface ContextBuilderDependencies {
   readonly skillContext?: SkillContextRegistry;
   /** The auto-detected "Project profile" block (zero-config onboarding); undefined while unknown. */
   readonly projectProfile?: () => Promise<string | undefined>;
+  /** K7: a Claude Code native route (it loads Claude's own skills itself; the catalog leaves them out). */
+  readonly claudeNativeRoute?: (route: ModelRoute) => boolean;
 }
 
 interface DraftBlock {
@@ -266,7 +268,7 @@ export function createContextBuilder(deps: ContextBuilderDependencies): ContextB
       deps.skillContext?.sync(scope, [], loaded);
       return { blocks: [], loadable: false };
     }
-    const entries = [...(await deps.skills.list(input.role))].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const entries = [...(await deps.skills.list(input.role, deps.claudeNativeRoute?.(input.route) === true ? { claudeNative: true } : undefined))].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     if (entries.length === 0) return { blocks: [], loadable: false };
     // Triggers read only session-stable text (packet and opening request), so the prefix stays byte-identical.
     const taskText = [input.packet?.objective ?? "", ...(input.packet?.decisions ?? []), firstUserText(history)].join("\n");

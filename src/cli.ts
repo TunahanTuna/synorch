@@ -43,7 +43,7 @@ Safety:
   Model fallback is never silent.
 `;
 
-const HARNESS_COMMAND_NAMES: readonly string[] = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust", "config", "mcp"];
+const HARNESS_COMMAND_NAMES: readonly string[] = ["agent", "run", "runs", "show", "login", "logout", "auth", "memory", "trust", "config", "mcp", "skills", "plugin"];
 
 const LEGACY_OPTIONS = {
   target: { type: "string", short: "t" },

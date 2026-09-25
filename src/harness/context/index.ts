@@ -46,6 +46,7 @@ export {
   type SkillContextRegistry,
   type SkillEntry,
   type SkillLoadCallback,
+  type SkillListOptions,
   type SkillLoadDependencies,
   type SkillScope,
 } from "./skills.ts";

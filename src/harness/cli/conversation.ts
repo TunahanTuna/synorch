@@ -58,7 +58,8 @@ import { classifyCommand, createHeadlessApprovalBroker, evaluateExecAllowlist } 
 import { bindBackgroundStatus, describeEvent, formatHarnessError, GLYPH_SETS, lineDiff, patchPaths, selectGlyphs, suggestedCommandPrefix, type GlyphSet } from "../tui/index.ts";
 import { DEFAULT_WEB_DOMAINS, describeProcess } from "../tools/index.ts";
 import type { ParsedCommand } from "./args.ts";
-import { mayContainImage, resolveAttachments } from "./attachments.ts";
+import { ATTACHMENTS_OPEN, mayContainImage, resolveAttachments } from "./attachments.ts";
+import { runPluginsSlash, runSkillsSlash, type ExtensionSlashHost } from "./extensions-command.ts";
 
 /** Adapters that turn `image` message parts into provider image input. */
 const IMAGE_ADAPTERS: ReadonlySet<string> = new Set(["openai-chatgpt", "openai-responses", "anthropic-messages", "claude-code"]);
@@ -82,6 +83,7 @@ import {
   contextReport,
   conversationPaletteEntries,
   findConversationCommand,
+  reservedCommandNames,
   unknownConversationCommand,
   tasksReport,
   type ConversationCommandHost,
@@ -305,6 +307,8 @@ interface ActiveOrchestration {
 interface QueuedMessage {
   readonly text: string;
   readonly attachments: readonly Attachment[];
+  /** K7: a skill / command invocation, sent as is (no @path resolution). */
+  readonly verbatim?: boolean;
 }
 
 export async function conversationCommand(parsed: AgentCommand, io: SessionIO, overrides: RuntimeOverrides): Promise<number> {
@@ -478,7 +482,7 @@ class Conversation implements ConversationCommandHost {
       const resumed = await this.openResumed();
       await this.renderer.start(this.header(rule));
       const controls = this.renderer.controls;
-      controls?.setCommands(conversationPaletteEntries());
+      this.refreshPalette();
       this.refreshStatus();
       // K3: MCP servers start in the background (never before the editor); problems become notes.
       void this.startMcp();
@@ -972,7 +976,7 @@ class Conversation implements ConversationCommandHost {
         message = { text, attachments };
         if (next.kind === "command" && !text.startsWith("/")) message = { text: `/${text}`, attachments };
       }
-      const work = message.text.startsWith("/") ? this.command(message.text) : this.turn(message.text, message.attachments);
+      const work = message.verbatim === true ? this.turn(message.text, [], false, true) : message.text.startsWith("/") ? this.command(message.text) : this.turn(message.text, message.attachments);
       const left = concurrent ? await this.alongside(work, input) : await work;
       if (left === true && (await this.confirmExit(true))) return;
     }
@@ -1161,7 +1165,7 @@ class Conversation implements ConversationCommandHost {
   }
 
   /** One turn; `followUp` (K3) is the harness's own turn that reports a finished background run (no user text). */
-  private async turn(typed: string, attachments: readonly Attachment[], followUp = false): Promise<boolean> {
+  private async turn(typed: string, attachments: readonly Attachment[], followUp = false, verbatim = false): Promise<boolean> {
     this.submittedAt = followUp ? undefined : performance.now();
     let text = followUp ? "" : typed;
     if (followUp && this.unreportedRuns === 0) return false;
@@ -1171,7 +1175,7 @@ class Conversation implements ConversationCommandHost {
     }
     let log: EventStore;
     try {
-      log = await this.ensureLog(text);
+      log = await this.ensureLog(text.split(ATTACHMENTS_OPEN)[0] ?? text);
     } catch (error) {
       this.showFailure(failureInfo(error));
       return false;
@@ -1185,7 +1189,7 @@ class Conversation implements ConversationCommandHost {
     }
     let body = text;
     let images: readonly BlobRef[] = [];
-    if (attachments.length > 0 || /(^|\s)@\S/.test(text)) {
+    if (!verbatim && (attachments.length > 0 || /(^|\s)@\S/.test(text))) {
       const support = mayContainImage(text, attachments) ? await this.imageSupport(route) : { send: false, reason: "" };
       const blobs = this.runtime.blobs;
       const resolved = await resolveAttachments(text, attachments, {
@@ -1875,6 +1879,13 @@ class Conversation implements ConversationCommandHost {
     const argument = text.slice(name.length).trim();
     const command = findConversationCommand(name);
     if (command === undefined) {
+      // K7: a skill or markdown command runs as the next message (its body plus the arguments).
+      const entry = name.startsWith("/") ? this.runtime.extensions.find(name.slice(1)) : undefined;
+      const expanded = entry === undefined ? undefined : await this.runtime.extensions.invocationText(entry, argument).catch(() => undefined);
+      if (expanded !== undefined) {
+        this.queued.unshift({ text: expanded, attachments: [], verbatim: true });
+        return false;
+      }
       this.print([unknownConversationCommand(name, this.glyphs.sep)]);
       return false;
     }
@@ -2190,6 +2201,46 @@ class Conversation implements ConversationCommandHost {
   /** K3 `/mcp [list | tools [name] | reconnect | enable | disable | approve | revoke <name>]`. */
   public async mcp(argument: string): Promise<void> {
     await runMcpSlash({ manager: this.runtime.mcp, home: this.runtime.home, sep: this.glyphs.sep, print: (lines) => this.print(lines) }, argument);
+  }
+
+  /** K7 `/skills [show | enable | disable <name>]`. */
+  public async skills(argument: string): Promise<void> {
+    await runSkillsSlash(this.extensionHost(), argument);
+  }
+
+  /** K7 `/plugins [install <spec> | remove | enable | disable <name>]`. */
+  public async plugins(argument: string): Promise<void> {
+    await runPluginsSlash(this.extensionHost(), argument);
+  }
+
+  private extensionHost(): ExtensionSlashHost {
+    return {
+      extensions: this.runtime.extensions,
+      home: this.runtime.home,
+      workspaceRoot: this.runtime.workspaceRoot,
+      env: this.runtime.extensions.env,
+      sep: this.glyphs.sep,
+      print: (lines) => this.print(lines),
+      choose: (question) => this.choose(question, this.outer.signal).catch(() => undefined),
+      changed: async () => {
+        this.refreshPalette();
+        // Plugin MCP servers follow the plugin set: re-resolve the definitions (a new server starts lazily).
+        const mcp = this.runtime.mcp;
+        const before = new Set(mcp.definitions().map((definition) => definition.name));
+        await mcp.load().catch(() => undefined);
+        for (const definition of mcp.definitions()) if (!before.has(definition.name) && definition.enabled) await mcp.reconnect(definition.name).catch(() => undefined);
+      },
+    };
+  }
+
+  /** The command palette: built-in commands, then every active skill and markdown command (K7). */
+  private refreshPalette(): void {
+    const extensions = this.runtime.extensions.invocable(reservedCommandNames()).map((entry) => ({
+      name: entry.name,
+      description: `${entry.kind === "skill" ? "skill" : "command"} (${entry.source}) ${entry.meta.description.replace(/\s+/g, " ").slice(0, 90)}`,
+      argsHint: entry.meta.argumentHint ?? "[args]",
+    }));
+    this.renderer.controls?.setCommands([...conversationPaletteEntries(), ...extensions]);
   }
 
   /** K3: session start of the MCP servers; approvals the repository needs and start failures become notes. */

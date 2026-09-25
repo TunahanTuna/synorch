@@ -121,7 +121,8 @@ import { createClaudeNativeApprovals } from "./claude-native-approvals.ts";
 import { createCommandGrantStore } from "./command-grants.ts";
 import type { EffortOverride, RouteOverride } from "./args.ts";
 import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts";
-import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
+import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, isSynorchHome, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
+import { claudeHome as resolveClaudeHome, createExtensions, type Extensions } from "./extensions/index.ts";
 import { withRoleDefinitions } from "./role-policy.ts";
 import { plannerHint, renderProfileBlock, startProjectProfile, within, type ProjectProfileHandle } from "./project-profile.ts";
 import { createOrchestrateSlot, createOrchestrateTool, createRunControlTools, type OrchestrateSlot } from "./orchestrate-tool.ts";
@@ -151,6 +152,11 @@ export interface RuntimeOverrides {
   readonly platform?: NodeJS.Platform;
   /** Highest directory the workspace-config walk may inspect (tests anchor it at their sandbox root). */
   readonly configCeiling?: string;
+  /**
+   * K7: Claude Code's home to read skills and plugins from. Default: `claudeHome(env)`, except that a
+   * runtime with an injected `home` (tests) reads no Claude home unless this names one.
+   */
+  readonly claudeHome?: string;
 }
 
 export interface RuntimeOptions {
@@ -225,6 +231,8 @@ export interface Runtime {
   readonly web: WebSession;
   /** K3 MCP client: configured external servers; their tools join the registry as `mcp__<server>__<tool>`. */
   readonly mcp: McpManager;
+  /** K7 skills, markdown commands and plugins (Synorch, the repository, Claude Code). */
+  readonly extensions: Extensions;
   /** Lazily opened: probing the OS keychain can spawn a helper process. */
   credentialStore(): SynorchCredentialStore;
   authProvider(providerId: string, method: AuthProvider["method"], profile: string): AuthProvider | undefined;
@@ -716,6 +724,19 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       return trustState;
     },
   };
+  // K7: skills, commands and plugins; repository items follow the live trust state.
+  const extensions = await createExtensions({
+    home,
+    workspaceRoot,
+    env,
+    platform,
+    claudeHome: overrides.claudeHome ?? (overrides.home === undefined ? resolveClaudeHome(env) : undefined),
+    settings: config.extensions,
+    trusted: () => effectiveTrust().trusted,
+    canonicalCatalog: canonical.skills,
+    canonical: { origin: canonical.origin, skills: canonical.skillEntries },
+    skipProjectSynorch: isSynorchHome(path.join(workspaceRoot, ".synorch"), home, platform),
+  });
   const webSession = createWebSession({ home });
   webHooksState.contentRead = () => webSession.markContentRead();
   const policy = withRoleDefinitions(
@@ -773,7 +794,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       // Only catalog skills the caller's role may use (never widening a read scope to .ai/**); a skill
       // already in the caller's context is not served again (ADR-20). One registry is shared with the
       // ContextBuilder, which records what each build injected.
-      loadSkill: createSkillLoadCallback({ skills: canonical.skills, registry: skillContext }),
+      loadSkill: createSkillLoadCallback({ skills: extensions.skills, registry: skillContext }),
       async askUser(input, context) {
         if ((context.role !== "orchestrator" && context.role !== "session") || userPrompt === undefined) {
           return { status: "error", text: "", truncated: false, redactions: 0, error: { code: "approval_unavailable", message: ASK_USER_HEADLESS_MESSAGE } };
@@ -823,6 +844,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     // MCP results are untrusted like web content: the outward-action shield applies for the rest of the turn.
     onUntrustedContent: () => webSession.markContentRead(),
     addRedaction: (value) => redactionValues.add(value),
+    plugins: () => extensions.mcpServers(),
   });
   await mcp.load();
   mcpHolder.current = mcp;
@@ -897,8 +919,10 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     tools: registry,
     sources: createSourceReader(workspaceRoot),
     instructions: canonical.instructions,
-    skills: canonical.skills,
+    skills: extensions.skills,
     skillContext,
+    // K7: Claude Code native routes load Claude's own skills themselves.
+    claudeNativeRoute: (route) => route.adapter_kind === "agent-backend" && (config.claudeCodeMode ?? "native") === "native",
     memory: { store: memory, projectId, branch: gitBranch },
     budget: budgetGate,
     compactor: createCompactor({ blobs, writerFor: (sessionId) => writers.get(sessionId) }),
@@ -1039,6 +1063,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     orchestrate,
     web: webSession,
     mcp,
+    extensions,
     credentialStore,
     authProvider,
     subscribe(listener) {

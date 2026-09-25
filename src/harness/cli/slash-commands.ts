@@ -68,6 +68,10 @@ export interface ConversationCommandHost {
   ps(argument: string): Promise<void>;
   /** K3 `/mcp`: MCP servers, their tools and state; reconnect, enable, disable, approve. */
   mcp(argument: string): Promise<void>;
+  /** K7 `/skills`: skills and markdown commands with source and state; show, enable, disable. */
+  skills(argument: string): Promise<void>;
+  /** K7 `/plugins`: installed plugins (Synorch and Claude Code); install, remove, enable, disable. */
+  plugins(argument: string): Promise<void>;
   /** K2 `/evidence [turn | <n>]`. */
   evidence(argument: string): Promise<void>;
   why(argument: string): Promise<void>;
@@ -131,6 +135,8 @@ export const CONVERSATION_COMMANDS: readonly SlashCommand[] = [
   { name: "/mouse", argsHint: "[on|off]", description: "toggle mouse capture (scroll / select)", whileBusy: true, rendererLocal: true, run: (host, argument) => host.mouse(argument) },
   { name: "/diff", description: "files changed by Synorch in this conversation", whileBusy: true, run: (host, argument) => host.report("diff", argument) },
   { name: "/mcp", argsHint: "[tools | reconnect | enable | disable | approve <name>]", description: "MCP servers (external tools such as Playwright): state, tools, reconnect, enable / disable, approve a project server", whileBusy: true, run: (host, argument) => host.mcp(argument) },
+  { name: "/skills", argsHint: "[show | enable | disable <name>]", description: "skills and slash commands (yours, the repo's, plugins', Claude Code's): source, state; /<name> runs one", whileBusy: true, run: (host, argument) => host.skills(argument) },
+  { name: "/plugins", argsHint: "[install <spec> | remove | enable | disable <name>]", description: "plugins (Claude Code format): what each adds; install, remove, enable / disable", whileBusy: true, run: (host, argument) => host.plugins(argument) },
   { name: "/ps", argsHint: "[kill <handle|all>]", description: "background processes (dev servers, watchers); stop one or all", whileBusy: true, run: (host, argument) => host.ps(argument) },
   { name: "/graph", description: "the plan graph of the current or last worker run", whileBusy: true, run: (host) => host.graph() },
   { name: "/tasks", description: "tasks of this conversation's worker runs", whileBusy: true, run: (host, argument) => host.report("tasks", argument) },
@@ -161,6 +167,11 @@ export function conversationPaletteEntries(): CommandPaletteEntry[] {
     ...(argsHint === undefined ? {} : { argsHint }),
     ...(aliases === undefined ? {} : { aliases: aliases.map((alias) => alias.slice(1)) }),
   }));
+}
+
+/** K7: names a skill or markdown command cannot take (a built-in command always wins), without the slash. */
+export function reservedCommandNames(): ReadonlySet<string> {
+  return new Set(CONVERSATION_COMMANDS.flatMap((command) => [command.name, ...(command.aliases ?? [])]).map((name) => name.slice(1)));
 }
 
 export function conversationHelp(): string[] {

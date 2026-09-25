@@ -14,8 +14,13 @@ export interface SkillEntry {
   readonly triggers: readonly string[];
 }
 
+/** K7: `claudeNative` lists for a Claude Code native route, which loads Claude's own skills itself. */
+export interface SkillListOptions {
+  readonly claudeNative?: boolean;
+}
+
 export interface SkillCatalog {
-  list(role?: AgentRole): readonly SkillEntry[] | Promise<readonly SkillEntry[]>;
+  list(role?: AgentRole, options?: SkillListOptions): readonly SkillEntry[] | Promise<readonly SkillEntry[]>;
   /** The full SKILL.md text, or undefined when the skill cannot be loaded (or is not for `role`). */
   load(name: string, role?: AgentRole): Promise<string | undefined>;
   /** Skills always loaded for `role` (e.g. the ones its agent manifest points at); a subset of `list(role)`. */

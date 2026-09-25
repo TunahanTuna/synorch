@@ -74,7 +74,7 @@ Hepsi opsiyonel alan veya enum eklemesidir; eski olaylar okunmaya devam eder (go
 
 ## 5. Test geçişi (önce inşa et)
 
-- Mevcut `syn agent`/`syn run` e2e testleri (`harness-e2e-agent`, `-steer`, `-ask-user`, `-trust`, `-recovery`, `-headless`, `-trivial`, `-standard`, `-conflict`, `-high-risk`, `-provider`, `-live-*`) argümanlarına `--orchestrate` (run) veya `--legacy` (agent) eklenerek **aynen** geçer; script'leri değişmez. `--legacy` K0 onayından sonra kaldırılırken agent testleri `syn run --orchestrate`'e taşınır.
+- Mevcut `syn agent`/`syn run` e2e testleri (`harness-e2e-agent`, `-steer`, `-ask-user`, `-trust`, `-recovery`, `-headless`, `-trivial`, `-standard`, `-conflict`, `-high-risk`, `-provider`, `-live-*`) argümanlarına `--orchestrate` (run) veya `--legacy` (agent) eklenerek **aynen** geçer; script'leri değişmez. `--legacy` K0 onayından sonra kaldırılırken agent testleri `syn run --orchestrate`'e taşınır. *(Güncelleme 2026-09-25: `--legacy` kaldırıldı; agent/steer/recovery testleri konuşma yoluna (`syn agent`, `orchestrate {wait: true}`, `--resume`) taşındı; `syn run` headless orkestrasyon girişi olarak kaldı — bkz. [backlog Sadeleştirme](../delivery/backlog.md).)*
 - `harness-cli-args`, `harness-tui-*` yeni bayraklar ve `turn` frame'i için güncellenir.
 - Yeni testler yalnız şunlar: (1) scripted adapter'la konuşma e2e'si (selam → okuma → düzenleme → exec); (2) kritik güvenlik rail'leri (`session` → `.git`/`.synorch`/rol manifesti yazma reddi, git mutasyon reddi, plan modu yazma/exec reddi, gösterilmemiş planla worker başlamaması); (3) ana konuşma görünümü snapshot'ları (TUI §15); (4) tek zamanlama testi (L3/L4).
 - `pnpm check` ve legacy snapshot her dalgada yeşil. Kapsamlı matris ve replay paketi yok (ürün sahibi kararı).

@@ -85,8 +85,6 @@ export type ParsedCommand =
       readonly fork: { readonly sessionId: SessionId; readonly upToSeq: number | undefined } | undefined;
       /** `--continue`: reopen the most recent conversation of this workspace. */
       readonly continue: boolean;
-      /** `--legacy`: the pre-ADR-21 orchestrated session (every message is a coordinator run). */
-      readonly legacy: boolean;
       /** `--debug` (or `SYN_DEBUG=1`): raw event lines under the conversation (L2). */
       readonly debug: boolean;
     }
@@ -124,12 +122,13 @@ export const HARNESS_COMMAND_OPTIONS = {
     resume: { type: "string" },
     fork: { type: "string" },
     continue: { type: "boolean", short: "c", default: false },
-    legacy: { type: "boolean", default: false },
     debug: { type: "boolean", default: false },
   },
   run: {
     ...COMMON_OPTIONS,
     ...SESSION_OPTIONS,
+    /** ADR-21 D9 spelling of the forced worker path; `syn run` always orchestrates, so it only documents intent. */
+    orchestrate: { type: "boolean", default: false },
     mode: { type: "string" },
     json: { type: "boolean", default: false },
     "stream-deltas": { type: "boolean", default: false },
@@ -273,7 +272,6 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
       noPositionals(command, positionals);
       if (values.resume !== undefined && values.fork !== undefined) throw new UsageError("--resume and --fork cannot be combined.", command);
       if (values.continue && (values.resume !== undefined || values.fork !== undefined)) throw new UsageError("--continue cannot be combined with --resume or --fork.", command);
-      if (values.continue && values.legacy) throw new UsageError("--continue is not available with --legacy (use --resume <session>).", command);
       let fork: { readonly sessionId: SessionId; readonly upToSeq: number | undefined } | undefined;
       if (values.fork !== undefined) {
         const [id = "", seq, ...rest] = values.fork.split("@");
@@ -289,7 +287,6 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
         resume: values.resume === undefined ? undefined : sessionId(command, "--resume", values.resume),
         fork,
         continue: values.continue,
-        legacy: values.legacy,
         debug: values.debug,
       };
     }

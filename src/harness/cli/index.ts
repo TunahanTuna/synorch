@@ -29,7 +29,7 @@ import { mcpCommand } from "./mcp-command.ts";
 import { failureInfo } from "./outcome.ts";
 import type { RuntimeOverrides } from "./runtime.ts";
 import { conversationCommand } from "./conversation.ts";
-import { agentCommand, runCommand, type SessionIO } from "./session.ts";
+import { runCommand, type SessionIO } from "./session.ts";
 import { resolveTerminalSettings, streamHasColors, type TerminalSettings } from "./terminal.ts";
 import { trustCommand } from "./trust.ts";
 
@@ -211,8 +211,7 @@ async function dispatch(parsed: Exclude<ParsedCommand, { kind: "help" }>, io: Ha
         signal: io.signal,
         ...(io.terminal === undefined ? {} : { terminal: io.terminal }),
       };
-      if (parsed.kind === "run") return runCommand(parsed, sessionIO, overrides);
-      return parsed.legacy ? agentCommand(parsed, sessionIO, overrides) : conversationCommand(parsed, sessionIO, overrides);
+      return parsed.kind === "run" ? runCommand(parsed, sessionIO, overrides) : conversationCommand(parsed, sessionIO, overrides);
     }
     case "runs":
     case "show": {

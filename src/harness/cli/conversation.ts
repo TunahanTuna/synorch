@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -160,6 +161,16 @@ function diffLines(view: DiffView): string[] {
 }
 
 /** A `git push` with no destructive form (no force, no history rewrite): approving one lets auto push for the session. */
+/** Whether `root` lies in a git work tree (a `.git` entry here or in a parent). */
+function insideGitRepository(root: string): boolean {
+  for (let directory = path.resolve(root); ; ) {
+    if (existsSync(path.join(directory, ".git"))) return true;
+    const parent = path.dirname(directory);
+    if (parent === directory) return false;
+    directory = parent;
+  }
+}
+
 function isPlainGitPush(argv: readonly string[] | undefined): boolean {
   if (argv === undefined || argv.length === 0) return false;
   const classified = classifyCommand(argv, { cwd: ".", writeScope: ["**"], forbidden: [] });
@@ -308,6 +319,7 @@ class Conversation implements ConversationCommandHost {
   private readonly desk = new QuestionDesk();
   private readonly requests = new Set<string>();
   private readonly pendingNotes: string[] = [];
+  private recoveryNotes: string[] = [];
   private readonly queued: QueuedMessage[] = [];
   private runtime!: Runtime;
   private renderer!: SessionRenderer;
@@ -412,7 +424,6 @@ class Conversation implements ConversationCommandHost {
       streamDeltas: false,
       wantsInput: true,
       interactive: io.stdinIsTTY,
-      fallbackSessionId: undefined,
       onInterrupt: () => this.interrupt(),
       onExit: () => {
         // K3: with workers in the background the exit request reaches the input loop, which asks first.
@@ -614,7 +625,14 @@ class Conversation implements ConversationCommandHost {
 
   private async openSession(sessionId: SessionId): Promise<readonly SessionEvent[]> {
     this.sessionId = sessionId;
-    await this.runtime.recover(sessionId);
+    // Crash recovery (I1 AC-4): what was closed is shown with the resume card; a clean resume stays quiet.
+    this.recoveryNotes = (await this.runtime.recover(sessionId))
+      .filter((report) => report.recovered.length + report.interruptedToolCalls.length + report.cancelledToolCalls.length > 0 || report.tornTail !== undefined)
+      .map(
+        (report) =>
+          `recovered ${report.sessionId}: ${report.recovered.length} open item(s) closed, ${report.interruptedToolCalls.length} tool call(s) interrupted with unknown outcome (not re-run), ${report.cancelledToolCalls.length} cancelled` +
+          (report.tornTail === undefined ? "" : `, torn tail of ${report.tornTail.bytes} bytes quarantined`),
+      );
     this.log = await this.runtime.sessions.openForWrite(sessionId);
     this.driver = undefined;
     const events: SessionEvent[] = [];
@@ -633,6 +651,7 @@ class Conversation implements ConversationCommandHost {
     const folded = users.length > REPLAY_EXCHANGES ? users.length - REPLAY_EXCHANGES : 0;
     this.note("info", `${g.resume} Resumed${ago} ${g.sep} ${users.length} message${users.length === 1 ? "" : "s"}${folded === 0 ? "" : ` ${g.sep} ${folded} earlier not shown`}`);
     this.renderer.replay?.(events.slice(firstShown));
+    for (const line of this.recoveryNotes.splice(0)) this.note("info", line);
     for (const line of await this.continuity(events)) this.note("info", line);
   }
 
@@ -1390,6 +1409,10 @@ class Conversation implements ConversationCommandHost {
     this.workerRuns.push(run);
     const views = this.renderer.views;
     this.note("info", `${g.bullet} Starting workers ${g.sep} ${input.reason}`);
+    // ADR-07/19: without git, writing workers edit in place one at a time (scoped-dir with a revertable snapshot).
+    if (this.workerRuns.length === 1 && !insideGitRepository(runtime.workspaceRoot)) {
+      this.note("info", `No git repository here: workers edit in place one at a time ${g.sep} git init and a first commit give each worker its own worktree`);
+    }
     if (this.renderer.kind === "tui") views?.setBoard(tracker.view());
     run.done = this.driveRun(run, goal);
     return run;

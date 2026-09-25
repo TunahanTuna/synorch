@@ -17,7 +17,7 @@ import type { Runtime } from "./runtime.ts";
 
 /** Turns a run's recorded events into the header, the JSONL result/error frame and the human summary. */
 
-export function headerFor(runtime: Runtime, notices: readonly string[] = []): SessionHeaderView {
+export function headerFor(runtime: Runtime): SessionHeaderView {
   const routes: { tier: string; model: string; source: string }[] = [];
   for (const tier of ["orchestrator", "complex_worker", "fast_worker"] as const) {
     const rule = runtime.config.router.rules
@@ -39,7 +39,7 @@ export function headerFor(runtime: Runtime, notices: readonly string[] = []): Se
     policyMode: runtime.policyMode,
     routes,
     sandboxEnforcement: runtime.sandbox.enforcement,
-    notices: [...runtime.config.warnings.map((warning) => warning.message), ...canonicalNotes, ...sandboxNotes, ...notices],
+    notices: [...runtime.config.warnings.map((warning) => warning.message), ...canonicalNotes, ...sandboxNotes],
   };
 }
 

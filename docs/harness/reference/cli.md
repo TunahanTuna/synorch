@@ -15,7 +15,7 @@ Bu belge Aşama A'da kesinleşen davranışı (argüman ayrıştırma, yardım m
 | Komut | Ayrıştırma kuralları |
 | --- | --- |
 | `syn agent [--resume <ses>] [--fork <ses>[@seq]]` | `--resume` ve `--fork` birlikte kullanılamaz; kimlikler `ses_<ULID>`, `seq` pozitif tamsayı; konumsal argüman yok. |
-| `syn run "<hedef>" [--mode jsonl \| --json] [--stream-deltas] [--trust-workspace]` | Tam bir hedef (tırnaklı); `-` hedefi stdin'den okur (Aşama B). `--mode` yalnız `jsonl` alır; `--stream-deltas` JSONL ister; `--plain` JSONL ile birleşmez. `--trust-workspace` yalnız `run`'da vardır (`syn agent` reddeder). |
+| `syn run "<hedef>" [--orchestrate] [--mode jsonl \| --json] [--stream-deltas] [--trust-workspace]` | Tam bir hedef (tırnaklı); `-` hedefi stdin'den okur (Aşama B). `syn run` her zaman orkestre eder (headless giriş noktası); `--orchestrate` bunu açıkça yazmak için kabul edilir (ADR-21 D9). `--mode` yalnız `jsonl` alır; `--stream-deltas` JSONL ister; `--plain` JSONL ile birleşmez. `--trust-workspace` yalnız `run`'da vardır (`syn agent` reddeder). |
 | `syn runs [--json]` | Konumsal argüman yok. |
 | `syn show <run_…\|ses_…> [--json]` | Tam bir run veya session kimliği. |
 | `syn doctor --runtime [--probe-model] [--json]` | `--runtime` olmadan runtime doctor çalışmaz (eski `doctor` devreye girer). |
@@ -187,7 +187,7 @@ Hedef deponun Synorch yapısı (`syn init`/`syn sync` çıktısı) oturumun her 
 
 Güven kuralı: depo metni `project` güvenindedir; tarif eder ve daraltır, asla yetki vermez. `writes_product_files: false` bir worker'ın yazma kapsamını ve `workspace-write` etkisini kaldırır; orchestrator için `.ai/tasks/` altındaki daha dar bir `control_plane_write_scope` `.ai/tasks/**`'ın yerini alır; explorer/reviewer/orchestrator için `writes_product_files: true` veya `.ai/tasks/` dışı kapsam **yok sayılır** ve tanılamaya yazılır. Manifest ek bir `role` katmanı olarak policy'ye girer (`source: .ai/agents/<rol>/AGENT.md`), dolayısıyla yürürlükteki manifest bir policy kaynağıdır ve hiçbir araç onu yazamaz (`policy-self-modification`). `assertNotWider` daraltmanın hiçbir etkiyi veya yazma desenini genişletmediğini her hesaplamada doğrular.
 
-Geri dönüş: depoda `.ai/` yoksa `src/templates/structure-templates.ts`'in (`syn init`'in yazacağı) içeriği bellekte kullanılır; `.ai/` varsa eksik veya geçersiz her parça (anayasa, kayıt, tek bir manifest) tek tek yerleşik karşılığıyla tamamlanır ve tanılamaya yazılır. **Init gerektirmeyen kullanım (K1.5-4):** yerleşik yapı birinci sınıf moddur; paketlenmiş `syn` hiçbir `syn init` olmadan her depoda anayasa, 8 çekirdek protokol, 5 rol ve 9 skill ile çalışır (şablonlar TypeScript olarak `dist/`e derlenir; npm `files` `dist` ve `skill-sources`'ı içerir). `syn init` yalnız özelleştirmek içindir. `doctor --runtime` `canonical` sonucu tanı yoksa her iki modda `ok`'tur ve yerleşik modda `canonical: built-in Synorch structure (…; customize with syn init)` bilgisini verir; yalnız tanı (eksik/geçersiz parça) `warn` yapar. `syn run`/legacy başlığı yerleşik mod için notice basmaz, yalnız deponun kendi yapısını duyurur. Boundary testi yalnız `cli` modülünün bu tek şablon dosyasını import etmesine izin verir.
+Geri dönüş: depoda `.ai/` yoksa `src/templates/structure-templates.ts`'in (`syn init`'in yazacağı) içeriği bellekte kullanılır; `.ai/` varsa eksik veya geçersiz her parça (anayasa, kayıt, tek bir manifest) tek tek yerleşik karşılığıyla tamamlanır ve tanılamaya yazılır. **Init gerektirmeyen kullanım (K1.5-4):** yerleşik yapı birinci sınıf moddur; paketlenmiş `syn` hiçbir `syn init` olmadan her depoda anayasa, 8 çekirdek protokol, 5 rol ve 9 skill ile çalışır (şablonlar TypeScript olarak `dist/`e derlenir; npm `files` `dist` ve `skill-sources`'ı içerir). `syn init` yalnız özelleştirmek içindir. `doctor --runtime` `canonical` sonucu tanı yoksa her iki modda `ok`'tur ve yerleşik modda `canonical: built-in Synorch structure (…; customize with syn init)` bilgisini verir; yalnız tanı (eksik/geçersiz parça) `warn` yapar. `syn run` başlığı yerleşik mod için notice basmaz, yalnız deponun kendi yapısını duyurur. Boundary testi yalnız `cli` modülünün bu tek şablon dosyasını import etmesine izin verir.
 
 ## 11. Yapılandırma
 
@@ -287,7 +287,7 @@ budget: { max_wall_time_seconds: 1800, max_cost_usd: 5 }                    # ka
 
 **`orchestrate` aracı** (yalnız `session`, `cli/orchestrate-tool.ts`): `{goal, reason, brief?}`; mevcut coordinator'ı turun içinde çalıştırır, plan bloğu ve canlı pano (`setBoard`, `OrchestrationView`) gösterir, ≤ 4 KiB sonuç bloğu döner. Plan modunda reddedilir.
 
-**Legacy (`syn agent --legacy`).** `/plan` (son plan, digest, onay), `/tasks`, `/context`, `/permissions`, `/model`, `/diff`, `/evidence`, `/cancel`, `/memory`, `/help`, `/exit`; yalnız kayıtlı olayları okur.
+**Tek çekirdek (sadeleştirme, 2026-09-25).** Eski toplu `syn agent --legacy` yolu (her mesaj bir coordinator run'ı) kaldırıldı. Etkileşimli ürün `syn agent`'tır; `syn run` aynı coordinator'ı süren ince headless giriş noktasıdır (`cli/session.ts`). `syn agent --resume <ses>` çökme kurtarmasının özetini ("N tool call(s) interrupted with unknown outcome (not re-run)") resume kartında gösterir; bir `syn run` oturumu da bu yolla kurtarılır. Git deposu olmayan klasörde orkestrasyon açık kalır: yazan worker'lar `scoped-dir` ile yerinde, sırayla ve geri alınabilir snapshot'la çalışır; ilk worker run'ında tek satır `git init` önerir.
 
 ## 14. Uçtan uca senaryolar (verification.md Seviye 3)
 
@@ -325,8 +325,8 @@ Kapsanmayanlar: "yüksek riskli değişiklik" ve "çalışırken kullanıcı dü
 
 - TUI (`pi-tui`) ile `syn agent`/`syn run` gerçek TTY'de manuel denenmedi; otomatik testler plain ve JSONL yolunu kullanır. §9 manuel matris açık.
 - `task_spawn` yalnız orchestrator bir güvenli sınırda (steer sonrası) danışılırken kabul edilir; run'ın başka anında orchestrator turu yoktur. Girdinin `packet` alanı bir **plan görevi** biçimindedir (tam `TaskContextPacket`'i harness derler); `tools.md`'deki "packet şeması" ifadesinin bu yorumu bir sözleşme netleştirme isteğidir.
-- Steer yalnız TTY'deki `syn agent`'ta girilir; çalışan bir attempt'in sürücüsüne iletilmez (bir sonraki dispatch'e kadar bekler). JSONL/stdin RPC steer'i v1 kapsamı dışında.
-- `ask_user` `syn run`'da yalnız etkileşimli (TTY) plain/TUI renderer'da bağlıdır; `syn agent`'ta cevap steer döngüsünden gelir.
+- Steer yalnız TTY'deki `syn agent`'ta, ön plandaki (`orchestrate {wait: true}`) worker run'ına girilir; çalışan bir attempt'in sürücüsüne iletilmez (bir sonraki dispatch'e kadar bekler). JSONL/stdin RPC steer'i v1 kapsamı dışında.
+- `ask_user` `syn run`'da yalnız etkileşimli (TTY) plain/TUI renderer'da bağlıdır.
 - Kanonik model profilleri yalnız ipucudur; route'a dönüşmez (ücretli sağlayıcı seçimi depo metnine bırakılmaz).
 - Gerçek hesaplarla (ChatGPT OAuth, Anthropic, `claude` köprüsü) uçtan uca çalışma ve `--probe-model` doğrulanmadı; Linux/macOS host'larda koşulmadı.
 

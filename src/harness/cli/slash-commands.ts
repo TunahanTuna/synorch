@@ -1,43 +1,10 @@
-import {
-  completionPacketSchema,
-  type CompletionPacket,
-  type SessionEvent,
-  type SessionId,
-  type CommandPaletteEntry,
-} from "../contracts/index.ts";
+import type { CommandPaletteEntry, SessionEvent } from "../contracts/index.ts";
 import { closestMatch } from "../../domain/suggest.ts";
-import type { Runtime } from "./runtime.ts";
 
 /**
- * In-session commands of `syn agent` (cli-experience.md). They only read what the session already
- * recorded (and the runtime's configuration); none of them changes state except `/cancel`.
+ * In-session commands of `syn agent` (cli-experience.md): the command registry and the two
+ * read-only reports (`/tasks`, `/context` fallback) built from what the session recorded.
  */
-
-export interface SlashContext {
-  readonly runtime: Runtime;
-  readonly events: readonly SessionEvent[];
-  readonly sessionId: SessionId | undefined;
-  cancel(): void;
-}
-
-export interface SlashResult {
-  readonly lines: readonly string[];
-  readonly exit: boolean;
-}
-
-export const SLASH_HELP = [
-  "/plan         latest plan, digest and approval",
-  "/tasks        task DAG with states and owned paths",
-  "/context      context blocks and token estimates of the last model request",
-  "/permissions  effective policy of the orchestrator and the latest worker",
-  "/model        configured routes and the routes actually decided",
-  "/diff         files integrated by this session's runs",
-  "/evidence     acceptance criterion -> evidence per completed attempt, and reviews",
-  "/cancel       cancel the active run (the session stays resumable)",
-  "/memory       memory vault and pending proposals",
-  "/help         this list; headless: syn run \"<goal>\" --mode jsonl",
-  "/exit         leave the session",
-];
 
 function latest<T extends SessionEvent["type"]>(events: readonly SessionEvent[], type: T): Extract<SessionEvent, { type: T }> | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -45,19 +12,6 @@ function latest<T extends SessionEvent["type"]>(events: readonly SessionEvent[],
     if (event?.type === type) return event as Extract<SessionEvent, { type: T }>;
   }
   return undefined;
-}
-
-export function planReport(events: readonly SessionEvent[]): string[] {
-  const proposed = latest(events, "plan/proposed");
-  if (proposed === undefined) return ["no plan yet"];
-  const state = events.filter((event) => event.type === "plan/state_changed" && event.data.plan_id === proposed.data.plan.plan_id).at(-1);
-  const approval = latest(events, "approval/decided");
-  return [
-    `plan ${proposed.data.plan.plan_id} v${proposed.data.plan.version} ${proposed.data.digest}: ${proposed.data.plan.goal}`,
-    `state ${state?.type === "plan/state_changed" ? state.data.to : "proposed"}; risk ${proposed.data.plan.risk}`,
-    ...(approval === undefined ? [] : [`approval ${approval.data.decision.outcome} by ${approval.data.decision.decided_by} (${approval.data.decision.mode})`]),
-    ...proposed.data.plan.tasks.map((task) => `- ${task.key} (${task.role}, ${task.risk}): ${task.objective}`),
-  ];
 }
 
 export function tasksReport(events: readonly SessionEvent[]): string[] {
@@ -82,99 +36,6 @@ export function contextReport(events: readonly SessionEvent[]): string[] {
     ...request.data.context.map((block) => `- ${block.source} (${block.trust}) ~${block.tokens_estimate}${block.truncated ? " truncated" : ""}`),
     compaction === undefined ? "no compaction" : `last compaction ${compaction.data.trigger}: ${compaction.data.tokens_before} -> ${compaction.data.tokens_after} tokens`,
   ];
-}
-
-export function permissionsReport(runtime: Runtime, events: readonly SessionEvent[]): string[] {
-  const snapshots = events.filter((event): event is Extract<SessionEvent, { type: "policy/snapshot" }> => event.type === "policy/snapshot");
-  const lines = [`policy mode ${runtime.policyMode}; sandbox ${runtime.sandbox.backend} (${runtime.sandbox.enforcement})`];
-  if (snapshots.length === 0) return [...lines, "no effective policy recorded yet"];
-  const seen = new Set<string>();
-  for (const snapshot of [...snapshots].reverse()) {
-    const policy = snapshot.data.policy;
-    if (seen.has(policy.role)) continue;
-    seen.add(policy.role);
-    const effects = Object.entries(policy.effects).map(([effect, decision]) => `${effect}=${decision}`).join(" ");
-    lines.push(`${policy.role}: ${effects}; write ${policy.write_scope.join(", ") || "none"}`);
-  }
-  const approvals = events.filter((event) => event.type === "approval/decided");
-  lines.push(`${approvals.length} approval decision(s) recorded`);
-  return lines;
-}
-
-export function modelReport(runtime: Runtime, events: readonly SessionEvent[]): string[] {
-  const lines = runtime.routeRules().map(
-    (rule) => `configured ${rule.tier}${rule.role === undefined ? "" : `/${rule.role}`} -> ${rule.route.provider_id}/${rule.route.model_id} via ${rule.route.adapter_id} (${rule.source})`,
-  );
-  for (const event of events) {
-    if (event.type !== "route/decided") continue;
-    const decision = event.data.decision;
-    lines.push(`decided ${decision.tier}${decision.role === undefined ? "" : `/${decision.role}`} -> ${decision.route.provider_id}/${decision.route.model_id}${decision.fallback.used ? " (approved fallback)" : ""}`);
-  }
-  return lines.length === 0 ? ["no routes configured"] : lines;
-}
-
-function diff(events: readonly SessionEvent[]): string[] {
-  const integrated = events.filter((event): event is Extract<SessionEvent, { type: "task/integrated" }> => event.type === "task/integrated");
-  if (integrated.length === 0) return ["no changes integrated in this session"];
-  return integrated.map((event) => `${event.data.task_id} ${event.data.artifact_digest}: ${event.data.paths.join(", ") || "(no files)"}`);
-}
-
-export async function evidenceReport(runtime: Runtime, events: readonly SessionEvent[]): Promise<string[]> {
-  const lines: string[] = [];
-  for (const event of events) {
-    if (event.type === "attempt/completion_recorded") {
-      let completion: CompletionPacket | undefined;
-      try {
-        completion = completionPacketSchema.parse(JSON.parse(new TextDecoder().decode(await runtime.blobs.get(event.data.blob.digest))));
-      } catch {
-        completion = undefined;
-      }
-      lines.push(`attempt ${event.data.attempt_id} ${event.data.status}`);
-      for (const entry of completion?.acceptance_evidence ?? []) {
-        lines.push(`  ${entry.criterion_id}: ${entry.evidence.map((ref) => `${ref.kind}:${ref.ref}`).join(", ")}`);
-      }
-    }
-    if (event.type === "review/recorded") lines.push(`review ${event.data.reviewer_attempt_id}: ${event.data.decision}`);
-  }
-  return lines.length === 0 ? ["no evidence recorded yet"] : lines;
-}
-
-export async function memoryReport(runtime: Runtime): Promise<string[]> {
-  const pending = await runtime.memory.pending();
-  return [`vault ${runtime.memoryRoot}`, `${pending.length} proposal(s) waiting (syn memory review)`];
-}
-
-export async function handleSlashCommand(text: string, context: SlashContext): Promise<SlashResult> {
-  const command = text.split(/\s+/)[0]?.toLowerCase() ?? "";
-  const lines = async (): Promise<readonly string[]> => {
-    switch (command) {
-      case "/plan":
-        return planReport(context.events);
-      case "/tasks":
-        return tasksReport(context.events);
-      case "/context":
-        return contextReport(context.events);
-      case "/permissions":
-        return permissionsReport(context.runtime, context.events);
-      case "/model":
-        return modelReport(context.runtime, context.events);
-      case "/diff":
-        return diff(context.events);
-      case "/evidence":
-        return evidenceReport(context.runtime, context.events);
-      case "/memory":
-        return memoryReport(context.runtime);
-      case "/cancel":
-        context.cancel();
-        return ["cancel requested; the session stays resumable"];
-      case "/help":
-        return SLASH_HELP;
-      default:
-        return [unknownConversationCommand(command, "·")];
-    }
-  };
-  if (command === "/exit" || command === "/quit") return { lines: [], exit: true };
-  return { lines: await lines(), exit: false };
 }
 
 // ---- the conversation's command registry (ADR-21, TUI §8.11) ----------------------------------

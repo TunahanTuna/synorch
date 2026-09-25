@@ -60,7 +60,7 @@ test("plan mode: read-only until /go, then the edit lands; /usage and /why expla
     assert.match(stdout, /Why was this allowed\? apply_patch src-add\.mjs \(succeeded\)/, "/why shows the latest decision as a why card");
     assert.match(stdout, /session +5 req - 260 in - 70 out/, "/usage shows the usage view");
     assert.match(stdout, /This session: cost unknown for this route · 330 tokens · 5 requests/, "/cost");
-    assert.match(stdout, /\/review \[focus\]/, "/help comes from the registry");
+    assert.match(stdout, /\/review \[--staged/, "/help comes from the registry");
     const usage = JSON.parse(await readFile(path.join(sandbox.home, "usage", "usage.json"), "utf8")) as { days: Record<string, Record<string, { requests: number }>> };
     const today = Object.values(usage.days)[0] ?? {};
     assert.equal(Object.values(today).reduce((sum, bucket) => sum + bucket.requests, 0), 5, "the daily aggregate is persisted");

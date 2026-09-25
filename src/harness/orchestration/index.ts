@@ -17,6 +17,30 @@ export {
   type UsageObservation,
 } from "./budget.ts";
 export { buildAttemptLog, latestReport, type AttemptLog, type RecordedReportCall, type RecordedToolCall } from "./attempt-log.ts";
+export {
+  actionableFindings,
+  artifactReviewGoal,
+  artifactReviewRecordSchema,
+  compileArtifactReviewPacket,
+  describeReviewTarget,
+  fixFollowUpMessage,
+  isGeneratedPath,
+  mapReviewVerdict,
+  parseReviewArgument,
+  renderArtifactReviewBrief,
+  renderReviewCard,
+  reviewSessionIds,
+  REVIEW_CRITERIA,
+  runArtifactReview,
+  verdictDecision,
+  type ArtifactReviewRequest,
+  type ArtifactReviewResult,
+  type ArtifactReviewStatus,
+  type ParsedReviewArgument,
+  type ReviewCardGlyphs,
+  type ReviewTarget,
+  type ReviewVerdict,
+} from "./artifact-review.ts";
 export { commandMentioned, roleCapabilityIssues } from "./capabilities.ts";
 export { extractJsonBlock, parseClaim, readClaim, reviewerClaimSchema, workerClaimSchema } from "./claims.ts";
 export { createControlPlaneWriter, type ControlPlaneWriter } from "./control-plane.ts";
@@ -142,6 +166,9 @@ export {
   type IntegratedDependency,
   type IntegrationReviewHandle,
   type IntegrationReviewOutcome,
+  type ArtifactReviewHandle,
+  type ArtifactReviewOutcome,
+  type PinnedReviewArtifact,
   type AttemptFailure,
   renderWorkerMessage,
   type AttemptRecord,

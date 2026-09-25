@@ -285,6 +285,35 @@ export interface IntegrationReviewHandle {
   cancel(reason: string): void;
 }
 
+/**
+ * A standalone artifact pinned by its caller (`/review`, ADR-09): the reviewer's brief (the bounded
+ * diff), the digest of the full reviewed content, and how to recompute that digest afterwards.
+ */
+export interface PinnedReviewArtifact {
+  readonly digest: Digest;
+  readonly brief: string;
+  /** Recomputes the digest of the same target now; undefined when it can no longer be read. */
+  repin(signal: AbortSignal): Promise<Digest | undefined>;
+}
+
+/** The reviewer's judged report on a standalone artifact (no implementer attempt, so no `ReviewPacket`). */
+export interface ArtifactReviewOutcome {
+  readonly attemptId: AttemptId;
+  readonly route: ModelRoute;
+  /** Unresolved evidence dropped, `met` without own evidence made `unverifiable`; undefined without a valid report. */
+  readonly report: ReviewReportInput | undefined;
+  readonly problems: readonly string[];
+  /** True when the pinned digest no longer matches the target after the review. */
+  readonly artifactChanged: boolean;
+  readonly cancelled: boolean;
+}
+
+export interface ArtifactReviewHandle {
+  readonly attemptId: AttemptId;
+  readonly result: Promise<ArtifactReviewOutcome>;
+  cancel(reason: string): void;
+}
+
 /** The contract `WorkerManager` plus the coordinator's own verification and integration steps. */
 export interface OrchestrationWorkerManager extends WorkerManager {
   dispatch(packet: TaskContextPacket, signal: AbortSignal, options?: WorkerDispatchOptions): Promise<AttemptHandle>;
@@ -294,6 +323,12 @@ export interface OrchestrationWorkerManager extends WorkerManager {
    * over the combined result, each `met` backed by the reviewer's own tool results.
    */
   dispatchIntegrationReview(packet: TaskContextPacket, dependencies: readonly IntegratedDependency[], signal: AbortSignal, options?: DispatchOptions): Promise<IntegrationReviewHandle>;
+  /**
+   * `/review` (ADR-09): an independent reviewer attempt on a caller-pinned artifact (a workspace
+   * diff, a commit or range), read-only on the main workspace in a fresh session. Every `met` needs
+   * the reviewer's own resolved tool results; the digest is recomputed after the review.
+   */
+  dispatchArtifactReview(packet: TaskContextPacket, artifact: PinnedReviewArtifact, signal: AbortSignal, options?: DispatchOptions): Promise<ArtifactReviewHandle>;
   attempt(attemptId: AttemptId): AttemptRecord | undefined;
   verify(attemptId: AttemptId, options?: CompletionVerificationOptions): Promise<CompletionVerification>;
   integrate(attemptId: AttemptId, expectedArtifact: Digest, signal: AbortSignal): Promise<void>;
@@ -858,6 +893,44 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
     return execution;
   };
 
+  /**
+   * A review with no worker artifact or harness run to cite (integration and artifact reviews):
+   * only the reviewer's own resolved tool results count; `check` gives the report one correction round.
+   */
+  const ownEvidenceJudging = (record: AttemptRecord, label: string) => {
+    const statements = statementsOf(record.packet);
+    const judge = async (log: AttemptLog, criteria: ReviewReportInput["criteria"]) => {
+      const index = indexFor(record, undefined, record.workspace.root, log);
+      const problems: EvidenceProblem[] = [];
+      const judged: ReviewReportInput["criteria"] = [];
+      for (const criterion of criteria) {
+        const kept: EvidenceRef[] = [];
+        for (const evidence of criterion.evidence) {
+          const resolution = evidence.produced_by === "reviewer" ? await resolvePointer(evidence, index, criterion.criterion_id) : unresolvedPointer(evidence, criterion.criterion_id, `${label} cites only its own tool results (produced_by: reviewer)`);
+          if (resolution.status === "resolved" && isIndependentReviewEvidence(evidence, undefined, statements.get(criterion.criterion_id))) kept.push(evidence);
+          else problems.push({ criterionId: criterion.criterion_id, ref: evidence.ref.slice(0, 200), reason: resolution.reason ?? "does not resolve" });
+        }
+        if (criterion.verdict === "met" && kept.length === 0) {
+          problems.push({ criterionId: criterion.criterion_id, ref: "(met)", reason: INDEPENDENT_EVIDENCE_HINT });
+          judged.push({ ...criterion, verdict: "unverifiable", evidence: kept });
+        } else judged.push({ ...criterion, evidence: kept });
+      }
+      return { problems, judged };
+    };
+    const check = async (input: Readonly<Record<string, unknown>>): Promise<ToolResult> => {
+      const report = input as unknown as ReviewReportInput;
+      const { problems } = await judge(await currentLog(record), report.criteria);
+      if (problems.length === 0) return toolOk(REPORT_RECORDED);
+      if (record.repairs.report_corrections < REPORT_CORRECTION_ROUNDS) {
+        record.repairs.report_corrections += 1;
+        const text = formatEvidenceCorrection(problems, evidenceCandidates(await currentLog(record)), REPORT_CORRECTION_ROUNDS - record.repairs.report_corrections);
+        return toolRejected(text, `${problems.length} evidence problem(s) in the review; nothing was recorded. Correct them as listed above and call ${REPORT_TOOL_NAMES.review} again.`);
+      }
+      return toolOk(`review recorded with ${problems.length} unresolved evidence problem(s); a met verdict without your own evidence counts as unverifiable. End your turn now.`);
+    };
+    return { judge, check };
+  };
+
   const closeAttempt = async (record: AttemptRecord): Promise<void> => {
     unregister.get(record.attemptId)?.();
     unregister.delete(record.attemptId);
@@ -1418,37 +1491,7 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
         throw harnessError("review_blocked", "an integration review runs as a read-only reviewer packet");
       }
       const { record, controller } = await prepare(packet, signal, options, undefined);
-      const statements = statementsOf(record.packet);
-      /** Only the reviewer's own resolved tool results count: there is no worker artifact or harness run to cite. */
-      const judge = async (log: AttemptLog, criteria: ReviewReportInput["criteria"]) => {
-        const index = indexFor(record, undefined, record.workspace.root, log);
-        const problems: EvidenceProblem[] = [];
-        const judged: ReviewReportInput["criteria"] = [];
-        for (const criterion of criteria) {
-          const kept: EvidenceRef[] = [];
-          for (const evidence of criterion.evidence) {
-            const resolution = evidence.produced_by === "reviewer" ? await resolvePointer(evidence, index, criterion.criterion_id) : unresolvedPointer(evidence, criterion.criterion_id, "an integration review cites only its own tool results (produced_by: reviewer)");
-            if (resolution.status === "resolved" && isIndependentReviewEvidence(evidence, undefined, statements.get(criterion.criterion_id))) kept.push(evidence);
-            else problems.push({ criterionId: criterion.criterion_id, ref: evidence.ref.slice(0, 200), reason: resolution.reason ?? "does not resolve" });
-          }
-          if (criterion.verdict === "met" && kept.length === 0) {
-            problems.push({ criterionId: criterion.criterion_id, ref: "(met)", reason: INDEPENDENT_EVIDENCE_HINT });
-            judged.push({ ...criterion, verdict: "unverifiable", evidence: kept });
-          } else judged.push({ ...criterion, evidence: kept });
-        }
-        return { problems, judged };
-      };
-      const check = async (input: Readonly<Record<string, unknown>>): Promise<ToolResult> => {
-        const report = input as unknown as ReviewReportInput;
-        const { problems } = await judge(await currentLog(record), report.criteria);
-        if (problems.length === 0) return toolOk(REPORT_RECORDED);
-        if (record.repairs.report_corrections < REPORT_CORRECTION_ROUNDS) {
-          record.repairs.report_corrections += 1;
-          const text = formatEvidenceCorrection(problems, evidenceCandidates(await currentLog(record)), REPORT_CORRECTION_ROUNDS - record.repairs.report_corrections);
-          return toolRejected(text, `${problems.length} evidence problem(s) in the review; nothing was recorded. Correct them as listed above and call ${REPORT_TOOL_NAMES.review} again.`);
-        }
-        return toolOk(`review recorded with ${problems.length} unresolved evidence problem(s); a met verdict without your own evidence counts as unverifiable. End your turn now.`);
-      };
+      const { judge, check } = ownEvidenceJudging(record, "an integration review");
       const run = async (): Promise<IntegrationReviewOutcome> => {
         unregister.set(record.attemptId, deps.reports?.register(record.attemptId, check) ?? (() => undefined));
         const execution = await executeBounded(record, renderIntegrationReviewBrief(record.packet, dependencies), controller, "dispatch", REPORT_TOOL_NAMES.review);
@@ -1491,6 +1534,38 @@ export function createWorkerManager(deps: WorkerManagerDependencies): Orchestrat
       const result = run().catch(async (error: unknown): Promise<IntegrationReviewOutcome> => {
         await failUnfinished(record, error);
         return { attemptId: record.attemptId, decision: "invalid", problems: [`integration review failed inside the harness: ${error instanceof Error ? error.message : String(error)}`], findings: [] };
+      });
+      return { attemptId: record.attemptId, result, cancel: (reason) => controller.abort(new Error(reason)) };
+    },
+    async dispatchArtifactReview(packet, artifact, signal, options) {
+      if (packet.role !== "reviewer" || packet.write_mode !== "read-only") {
+        throw harnessError("review_blocked", "an artifact review runs as a read-only reviewer packet");
+      }
+      const { record, controller } = await prepare(packet, signal, options, undefined);
+      const { judge, check } = ownEvidenceJudging(record, "this review");
+      const run = async (): Promise<ArtifactReviewOutcome> => {
+        unregister.set(record.attemptId, deps.reports?.register(record.attemptId, check) ?? (() => undefined));
+        const execution = await executeBounded(record, `${artifact.brief}\n\n${REVIEWER_REPORT_INSTRUCTIONS}`, controller, "dispatch", REPORT_TOOL_NAMES.review);
+        await closeAttempt(record);
+        const cancelled = controller.signal.aborted;
+        await finishAttempt(record, execution, cancelled);
+        const after = await artifact.repin(new AbortController().signal).catch(() => undefined);
+        const artifactChanged = after !== artifact.digest;
+        const claim = readClaim(reviewerClaimSchema, execution.log, REPORT_TOOL_NAMES.review);
+        if (!claim.ok) return { attemptId: record.attemptId, route: record.route, report: undefined, problems: claim.problems, artifactChanged, cancelled };
+        const { judged, problems } = await judge(execution.log, claim.claim.criteria);
+        return {
+          attemptId: record.attemptId,
+          route: record.route,
+          report: { ...claim.claim, criteria: judged },
+          problems: problems.map((problem) => `${problem.criterionId} ${problem.ref}: ${problem.reason}`),
+          artifactChanged,
+          cancelled,
+        };
+      };
+      const result = run().catch(async (error: unknown): Promise<ArtifactReviewOutcome> => {
+        await failUnfinished(record, error);
+        return { attemptId: record.attemptId, route: record.route, report: undefined, problems: [`review failed inside the harness: ${error instanceof Error ? error.message : String(error)}`], artifactChanged: false, cancelled: controller.signal.aborted };
       });
       return { attemptId: record.attemptId, result, cancel: (reason) => controller.abort(new Error(reason)) };
     },

@@ -46,6 +46,7 @@ import {
   type WorkspaceTrustState,
 } from "../contracts/index.ts";
 import { approvePlan, type PlanApprovalOutcome } from "./approval.ts";
+import { runArtifactReview, type ArtifactReviewRequest, type ArtifactReviewResult } from "./artifact-review.ts";
 import { readEvents } from "./attempt-log.ts";
 import { commandMentioned } from "./capabilities.ts";
 import { createBudgetTracker, type BudgetGateSlot, type BudgetTracker } from "./budget.ts";
@@ -100,6 +101,8 @@ export type WorkerFactory = (scope: RunScope, budget: BudgetTracker) => Orchestr
 /** The coordinator plus K1.7's worker directory (list, assignments, per-worker control) of its active or last run. */
 export interface OrchestrationCoordinator extends Coordinator {
   readonly workers: WorkerDirectory;
+  /** `/review` (ADR-09): an independent review of a caller-pinned artifact as its own run; never rejects. */
+  review(request: ArtifactReviewRequest, signal: AbortSignal): Promise<ArtifactReviewResult>;
 }
 
 type WorkerAction = "message" | "pause" | "resume" | "cancel";
@@ -1829,6 +1832,12 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
 
   return {
     run,
+    review: (request, signal) =>
+      runArtifactReview(
+        { sessions: deps.sessions, blobs: deps.blobs, createWorkers: deps.createWorkers, emit: (event) => fanOut({ kind: "session-event", event }), now, platform },
+        request,
+        signal,
+      ),
     workers: {
       list: () => runWorkers?.list() ?? [],
       assignment: (task) => runWorkers?.assignment(task),

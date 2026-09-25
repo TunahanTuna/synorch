@@ -4,9 +4,19 @@ import { Document, isMap, parseDocument } from "yaml";
 import type { ChoiceAnswer, ChoiceQuestion } from "../contracts/index.ts";
 import {
   addMarketplace,
+  approveHooks,
   claudeHome as resolveClaudeHome,
   createExtensions,
   describeContents,
+  describeHookConfig,
+  hookCount,
+  hookDigest,
+  personaBaseRole,
+  personaModelTier,
+  revokeHooks,
+  type HookSource,
+  type HookSourceState,
+  type PluginAgent,
   marketplacePlugins,
   PluginError,
   readPluginStore,
@@ -60,8 +70,15 @@ Usage:
                                              name@marketplace; Claude's own settings stay as they are).
   syn plugin marketplace add <git-url|path>  Register a marketplace (.claude-plugin/marketplace.json).
   syn plugin marketplace list|remove <name>
+  syn plugin show <name>                     Contents, hook commands and agents of one plugin.
+  syn plugin hooks [list]                    Hook sources and whether they run.
+  syn plugin hooks approve|revoke <name>     Let a plugin's hooks run (or stop them); a changed
+                                             plugin needs a new approval.
+  syn plugin agents                          Plugin agents (orchestration worker personas).
 
-Agents and hooks of a plugin are listed but not supported yet (hooks never run).
+Plugin hooks run commands on your machine: they run only after you approve them (install asks;
+--allow-hooks approves at install). Claude Code plugins' hooks stay off until approved and never
+run on Claude Code routes, where Claude runs them itself.
 `;
 
 export class ExtensionCommandError extends Error {
@@ -157,7 +174,19 @@ export function describeSkill(name: string, statuses: readonly ItemStatus[]): st
   return lines;
 }
 
-export function describePlugins(plugins: readonly PluginEntry[], sep = "·"): string[] {
+const HOOK_STATE_LABEL: Readonly<Record<HookSourceState, string>> = {
+  active: "hooks approved (they run)",
+  pending: "hooks not approved (never run)",
+  changed: "hooks changed since you approved them (not run until approved again)",
+};
+
+function hookStateLine(source: HookSource | undefined, key: string): string | undefined {
+  if (source === undefined || source.origin === "user") return undefined;
+  const hint = source.state === "active" ? `/plugins hooks revoke ${key}` : `/plugins hooks approve ${key}`;
+  return `${HOOK_STATE_LABEL[source.state]}${source.origin === "claude" ? "; never on Claude Code routes (Claude runs them)" : ""} · ${hint}`;
+}
+
+export function describePlugins(plugins: readonly PluginEntry[], sep = "·", hooks: readonly HookSource[] = []): string[] {
   if (plugins.length === 0) return ["No plugins. Install one: syn plugin install <path|git-url|name@marketplace>"];
   const lines: string[] = [];
   for (const plugin of plugins) {
@@ -165,8 +194,55 @@ export function describePlugins(plugins: readonly PluginEntry[], sep = "·"): st
     lines.push(`${plugin.key}${plugin.contents.version === undefined ? "" : ` ${plugin.contents.version}`} ${sep} ${plugin.origin === "claude" ? "claude" : "synorch"} ${sep} ${state}`);
     if (plugin.contents.description !== "") lines.push(`  ${oneLine(plugin.contents.description, 100)}`);
     for (const line of describeContents(plugin.contents)) lines.push(`  ${line}`);
+    const hookLine = hookStateLine(hooks.find((source) => source.key === plugin.key), plugin.key);
+    if (hookLine !== undefined) lines.push(`  ${hookLine}`);
   }
   return lines;
+}
+
+/** `/plugins hooks`: every hook source (user configuration and plugins) and whether it runs. */
+export function describeHookSources(sources: readonly HookSource[]): string[] {
+  if (sources.length === 0) return ["No hooks. Plugins may bring hooks/hooks.json; your own go under hooks: in ~/.synorch/config.yaml."];
+  const lines: string[] = [];
+  for (const source of sources) {
+    lines.push(`${source.key} ${source.origin === "user" ? "(your config: runs)" : `(${source.origin} plugin: ${HOOK_STATE_LABEL[source.state]})`}`);
+    for (const line of describeHookConfig(source.config)) lines.push(`  ${line}`);
+  }
+  return lines;
+}
+
+/** `/agents`: plugin agents with their base role and model hint. */
+export function describeAgents(agents: readonly PluginAgent[]): string[] {
+  if (agents.length === 0) return ["No plugin agents. A plugin's agents/*.md become worker personas the orchestrator can assign to a task."];
+  const lines = [`Plugin agents (worker personas) · ${agents.length}`];
+  for (const agent of agents) {
+    const tier = personaModelTier(agent.model);
+    lines.push(`  ${agent.id.padEnd(32)}${personaBaseRole(agent).padEnd(12)}${(tier ?? "orchestrator's tier").padEnd(22)}${oneLine(agent.description, 70)}`);
+  }
+  lines.push("The orchestrator names one on a plan task (agent); its instructions are layered on that task's role.");
+  return lines;
+}
+
+function describeAgent(agent: PluginAgent): string[] {
+  const tier = personaModelTier(agent.model);
+  return [
+    `agent ${agent.id} (${agent.origin} plugin ${agent.plugin})`,
+    `  file         ${agent.file}`,
+    `  description  ${oneLine(agent.description, 200)}`,
+    `  base role    ${personaBaseRole(agent)}${agent.tools.length === 0 ? " (all tools)" : ` (tools: ${agent.tools.join(", ")})`}`,
+    `  model        ${agent.model ?? "inherit"}${tier === undefined ? "" : ` → tier ${tier} (your routes for that tier decide)`}`,
+    `  instructions ${oneLine(agent.body, 200)}`,
+  ];
+}
+
+function hookApprovalContext(source: HookSource): string[] {
+  return [
+    `Plugin ${source.key} (${source.origin === "claude" ? "installed in Claude Code" : "Synorch plugin"}) wants to run these commands on your machine:`,
+    ...describeHookConfig(source.config).map((line) => `  ${line}`),
+    "They run in the workspace with your user permissions and environment (timeout 60 s by default, output capped).",
+    "A hook can block or narrow a tool call, never widen your permission mode.",
+    ...(source.origin === "claude" ? ["On Claude Code routes they are never run by Synorch (Claude runs them itself)."] : []),
+  ];
 }
 
 // ---- a runtime-free catalog for the CLI ---------------------------------------------------------
@@ -274,7 +350,46 @@ export async function pluginCommand(args: readonly string[], target: string | un
         const extensions = await standaloneExtensions(io, root);
         const plugins = extensions.state().plugins;
         if (json) io.stdout(`${JSON.stringify(plugins.map((plugin) => ({ key: plugin.key, origin: plugin.origin, enabled: plugin.enabled, version: plugin.contents.version, root: plugin.contents.root, skills: plugin.contents.skills.map((skill) => skill.name), commands: plugin.contents.commands.map((command) => command.name), mcp_servers: Object.keys(plugin.contents.mcpServers), agents: plugin.contents.agents, hooks: plugin.contents.hooks })), null, 2)}\n`);
-        else io.stdout(`${describePlugins(plugins).join("\n")}\n`);
+        else io.stdout(`${describePlugins(plugins, "·", extensions.hooks.sources()).join("\n")}\n`);
+        return 0;
+      }
+      case "show": {
+        if (name === undefined) throw new ExtensionCommandError("syn plugin show <name>");
+        const extensions = await standaloneExtensions(io, root);
+        const plugin = extensions.state().plugins.find((entry) => entry.key === name || entry.contents.name === name);
+        if (plugin === undefined) throw new ExtensionCommandError(`No plugin ${name} (syn plugin list).`);
+        io.stdout(`${[...describePlugins([plugin], "·", extensions.hooks.sources()), ...plugin.contents.agentDefs.length === 0 ? [] : ["", ...describeAgents(extensions.personas.list().filter((agent) => agent.plugin === plugin.key))]].join("\n")}\n`);
+        return 0;
+      }
+      case "agents": {
+        const extensions = await standaloneExtensions(io, root);
+        io.stdout(`${describeAgents(extensions.personas.list()).join("\n")}\n`);
+        return 0;
+      }
+      case "hooks": {
+        const action = name ?? "list";
+        const extensions = await standaloneExtensions(io, root);
+        if (action === "list") {
+          io.stdout(`${describeHookSources(extensions.hooks.sources()).join("\n")}\n`);
+          return 0;
+        }
+        if (action !== "approve" && action !== "revoke") throw new ExtensionCommandError(`Unknown hooks action: ${action}. Expected list, approve or revoke.`);
+        if (extra === undefined) throw new ExtensionCommandError(`syn plugin hooks ${action} <name>`);
+        if (action === "revoke") {
+          io.stdout((await revokeHooks(io.home, extra)) ? `Hooks of ${extra} no longer run.\n` : `Hooks of ${extra} were not approved.\n`);
+          return 0;
+        }
+        const source = extensions.hooks.sources().find((entry) => entry.key === extra && entry.origin !== "user");
+        if (source === undefined) throw new ExtensionCommandError(`${extra} is not an enabled plugin with hooks (syn plugin hooks list).`);
+        io.stdout(`${hookApprovalContext(source).join("\n")}\n`);
+        let proceed = flags.has("--yes");
+        if (!proceed && io.confirm !== undefined) proceed = await io.confirm(`Let ${extra}'s hooks run?`);
+        if (!proceed) {
+          io.stdout(io.confirm === undefined ? "Not approved: pass --yes to approve without a question.\n" : "Not approved.\n");
+          return io.confirm === undefined ? 2 : 0;
+        }
+        await approveHooks(io.home, extra, source.digest);
+        io.stdout(`Hooks of ${extra} approved; they run from the next session (in a running session: /plugins hooks approve).\n`);
         return 0;
       }
       case "install": {
@@ -291,6 +406,12 @@ export async function pluginCommand(args: readonly string[], target: string | un
         const record = await staged.commit();
         await setExtensionDisabled(io.home, "plugins", record.name, flags.has("--disabled"));
         io.stdout(`Installed ${record.name} in ${record.dir}${flags.has("--disabled") ? " (off: syn plugin enable " + record.name + ")" : ""}.\n`);
+        if (hookCount(staged.contents.hookConfig) > 0) {
+          let allow = flags.has("--allow-hooks");
+          if (!allow && !flags.has("--yes") && io.confirm !== undefined) allow = await io.confirm(`Let ${record.name}'s hooks run (the commands listed above)?`);
+          if (allow) await approveHooks(io.home, record.name, hookDigest(staged.contents.hookConfig, record.dir));
+          io.stdout(allow ? "Its hooks are approved.\n" : `Its hooks do not run until you approve them: syn plugin hooks approve ${record.name}\n`);
+        }
         return 0;
       }
       case "remove":
@@ -335,7 +456,7 @@ export async function pluginCommand(args: readonly string[], target: string | un
         throw new ExtensionCommandError(`Unknown marketplace action: ${action}. Expected add, list or remove.`);
       }
       default:
-        throw new ExtensionCommandError(`Unknown plugin sub-command: ${verb}. Expected list, install, remove, enable, disable or marketplace.`);
+        throw new ExtensionCommandError(`Unknown plugin sub-command: ${verb}. Expected list, show, install, remove, enable, disable, hooks, agents or marketplace.`);
     }
   } catch (error) {
     if (error instanceof ExtensionCommandError || error instanceof PluginError) {
@@ -397,15 +518,78 @@ export async function runSkillsSlash(host: ExtensionSlashHost, argument: string)
   host.print(["/skills [list | show <name> | enable <name> | disable <name>]"]);
 }
 
-/** `/plugins [list | install <spec> | remove <name> | enable <name> | disable <name>]`. */
+/**
+ * Asks in the choice modal whether a plugin's hooks may run (each command shown); an approval
+ * stores the digest of the definitions, so a changed plugin asks again. Returns whether approved.
+ */
+export async function askHookApproval(host: Pick<ExtensionSlashHost, "choose" | "home" | "extensions">, source: HookSource): Promise<boolean> {
+  const answer = await host.choose({
+    question: source.state === "changed" ? `The hooks of ${source.key} changed. Let them run?` : `Let the hooks of ${source.key} run?`,
+    header: "Hooks",
+    context: hookApprovalContext(source),
+    options: [
+      { label: "Allow", description: "these commands run on the listed events until the plugin changes" },
+      { label: "Not now", description: "they do not run; /plugins hooks approve asks again", recommended: true },
+    ],
+    allowOther: false,
+    escapeLabel: "not now",
+    tone: "attention",
+  });
+  if (answer?.kind !== "selected" || answer.indices[0] !== 0) return false;
+  await approveHooks(host.home, source.key, source.digest);
+  await host.extensions.reload();
+  return true;
+}
+
+/** `/plugins [list | show <name> | install <spec> | remove <name> | enable <name> | disable <name> | hooks [approve|revoke <name>] | agents]`. */
 export async function runPluginsSlash(host: ExtensionSlashHost, argument: string): Promise<void> {
-  const [verb = "list", name] = argument.trim().split(/\s+/).filter((word) => word !== "");
+  const [verb = "list", name, extra] = argument.trim().split(/\s+/).filter((word) => word !== "");
   const extensions = host.extensions;
   const options = { home: host.home, cwd: host.workspaceRoot, env: host.env, ...(extensions.claudeHome === undefined ? {} : { claudeHome: extensions.claudeHome }) };
   switch (verb) {
     case "list":
-      host.print([...describePlugins(extensions.state().plugins, host.sep), `/plugins install <path|git-url|name@marketplace> ${host.sep} /plugins enable|disable|remove <name>`]);
+      host.print([...describePlugins(extensions.state().plugins, host.sep, extensions.hooks.sources()), `/plugins show|enable|disable|remove <name> ${host.sep} /plugins install <spec> ${host.sep} /plugins hooks ${host.sep} /agents`]);
       return;
+    case "show": {
+      const plugin = extensions.state().plugins.find((entry) => entry.key === name || entry.contents.name === name);
+      if (plugin === undefined) {
+        host.print([name === undefined ? "/plugins show <name>" : `No plugin ${name}; /plugins lists them.`]);
+        return;
+      }
+      const agents = extensions.personas.list().filter((agent) => agent.plugin === plugin.key);
+      host.print([...describePlugins([plugin], host.sep, extensions.hooks.sources()), ...(agents.length === 0 ? [] : ["", ...describeAgents(agents)])]);
+      return;
+    }
+    case "agents": {
+      const agent = name === "show" && extra !== undefined ? extensions.personas.find(extra) : undefined;
+      if (name === "show") host.print(agent === undefined ? [`No plugin agent ${extra ?? ""}; /agents lists them.`] : describeAgent(agent));
+      else host.print(describeAgents(extensions.personas.list()));
+      return;
+    }
+    case "hooks": {
+      const action = name ?? "list";
+      if (action === "list") {
+        host.print([...describeHookSources(extensions.hooks.sources()), `/plugins hooks approve|revoke <plugin>`]);
+        return;
+      }
+      if ((action !== "approve" && action !== "revoke") || extra === undefined) {
+        host.print(["/plugins hooks [list | approve <plugin> | revoke <plugin>]"]);
+        return;
+      }
+      if (action === "revoke") {
+        const revoked = await revokeHooks(host.home, extra);
+        await extensions.reload();
+        host.print([revoked ? `Hooks of ${extra} no longer run.` : `Hooks of ${extra} were not approved.`]);
+        return;
+      }
+      const source = extensions.hooks.sources().find((entry) => entry.key === extra && entry.origin !== "user");
+      if (source === undefined) {
+        host.print([`${extra} is not an enabled plugin with hooks; /plugins hooks lists them.`]);
+        return;
+      }
+      host.print([(await askHookApproval(host, source)) ? `Hooks of ${extra} approved; they run from now on.` : `Hooks of ${extra} stay off.`]);
+      return;
+    }
     case "install": {
       if (name === undefined) {
         host.print(["/plugins install <path|git-url|name@marketplace>"]);
@@ -443,6 +627,8 @@ export async function runPluginsSlash(host: ExtensionSlashHost, argument: string
       await extensions.reload(settings);
       await host.changed();
       host.print([`Installed ${record.name}${index === 1 ? " (off)" : ""}.`]);
+      const hookSource = extensions.hooks.sources().find((entry) => entry.key === record.name && entry.origin === "synorch");
+      if (hookSource !== undefined && hookSource.state !== "active") host.print([(await askHookApproval(host, hookSource)) ? "Its hooks are approved." : `Its hooks stay off (/plugins hooks approve ${record.name}).`]);
       return;
     }
     case "remove":
@@ -479,6 +665,6 @@ export async function runPluginsSlash(host: ExtensionSlashHost, argument: string
       return;
     }
     default:
-      host.print(["/plugins [list | install <spec> | remove <name> | enable <name> | disable <name>]"]);
+      host.print(["/plugins [list | show <name> | install <spec> | remove <name> | enable <name> | disable <name> | hooks | agents]"]);
   }
 }

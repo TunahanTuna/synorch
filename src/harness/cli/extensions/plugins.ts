@@ -3,6 +3,8 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } fr
 import path from "node:path";
 import { z } from "zod";
 import { claudeDirectory, mayReadReal, readClaudeEnabledPlugins } from "./claude-home.ts";
+import { readAgentFile, type AgentRef } from "./agents.ts";
+import { describeHookConfig, hookCount, mergeHookConfigs, parseHookConfig, type HookConfig } from "./hooks.ts";
 import { commandNameOf, isSkillName, metaOf, readMarkdownFile, type MarkdownMeta } from "./markdown.ts";
 
 /**
@@ -42,10 +44,14 @@ export interface PluginContents {
   readonly root: string;
   readonly skills: readonly SkillRef[];
   readonly commands: readonly CommandRef[];
-  /** Agent names (listed only; not supported yet). */
+  /** Agent names. */
   readonly agents: readonly string[];
-  /** Hook events or files (listed only; never executed). */
+  /** Agents (`agents/*.md`): orchestration worker personas. */
+  readonly agentDefs: readonly AgentRef[];
+  /** Hook event names the plugin declares (supported or not). */
   readonly hooks: readonly string[];
+  /** The supported command hooks; they run only once the user approved them. */
+  readonly hookConfig: HookConfig;
   /** Raw MCP server entries by name (`.mcp.json` and manifest `mcpServers`). */
   readonly mcpServers: Readonly<Record<string, unknown>>;
   readonly problems: readonly string[];
@@ -152,7 +158,7 @@ function asList(value: unknown): unknown[] {
 
 /**
  * Reads a plugin directory (manifest optional). `fallback` names a manifest-less plugin (marketplace
- * entry, or the directory name). Nothing is executed: hooks and agents are only listed.
+ * entry, or the directory name). Nothing is executed here (hooks run only after approval, from the hook engine).
  */
 export async function readPlugin(root: string, fallback: { readonly name?: string; readonly description?: string; readonly version?: string } = {}, guard: ReadGuard = allowAll): Promise<PluginContents> {
   const problems: string[] = [];
@@ -211,20 +217,30 @@ export async function readPlugin(root: string, fallback: { readonly name?: strin
     for (const target of targets) commands.push(...(await scanCommands(target, guard)));
   }
 
-  // Agents and hooks: listed, never run.
-  const agentFiles = data.agents === undefined ? await markdownFiles(path.join(root, "agents")) : asList(data.agents).map((entry) => within(entry, "agents")).filter((entry): entry is string => entry !== undefined);
+  // Agents (worker personas) and hooks (run only after approval, see hooks.ts).
+  const agentFiles = data.agents === undefined ? await markdownFiles(path.join(root, "agents")) : (await Promise.all(asList(data.agents).map((entry) => within(entry, "agents")).filter((entry): entry is string => entry !== undefined).map(async (entry) => ((await isDirectory(entry)) ? markdownFiles(entry) : [entry])))).flat();
+  const agentDefs: AgentRef[] = [];
+  for (const file of agentFiles) {
+    if (!(await guard(file))) continue;
+    const agent = await readAgentFile(file);
+    if (agent !== undefined && !agentDefs.some((existing) => existing.name === agent.name)) agentDefs.push(agent);
+  }
   const agents = agentFiles.map((file) => commandNameOf(file));
   const hooks: string[] = [];
+  const hookConfigs: HookConfig[] = [];
   const hooksFile = path.join(root, "hooks", "hooks.json");
   const hookEvents = (value: unknown): string[] => {
     const events = (value as { hooks?: unknown } | undefined)?.hooks ?? value;
+    const parsed = parseHookConfig(value);
+    hookConfigs.push(parsed.config);
+    for (const entry of parsed.unsupported) problems.push(`hooks: ${entry} is not supported by Synorch; it never runs`);
     return typeof events === "object" && events !== null && !Array.isArray(events) ? Object.keys(events as Record<string, unknown>) : [];
   };
   if (await isFile(hooksFile)) hooks.push(...hookEvents(await readJson(hooksFile, guard)));
   for (const entry of asList(data.hooks)) {
     if (typeof entry === "string") {
       const file = within(entry, "hooks");
-      if (file !== undefined) hooks.push(...hookEvents(await readJson(file, guard)));
+      if (file !== undefined && path.resolve(file) !== path.resolve(hooksFile)) hooks.push(...hookEvents(await readJson(file, guard)));
     } else hooks.push(...hookEvents(entry));
   }
 
@@ -261,7 +277,9 @@ export async function readPlugin(root: string, fallback: { readonly name?: strin
     skills,
     commands,
     agents,
+    agentDefs,
     hooks: [...new Set(hooks)],
+    hookConfig: mergeHookConfigs(hookConfigs),
     mcpServers,
     problems,
   };
@@ -275,8 +293,12 @@ export function describeContents(contents: PluginContents): string[] {
   if (contents.commands.length > 0) lines.push(`commands (${contents.commands.length}): ${contents.commands.map((command) => `/${contents.name}:${command.name}`).join(", ")}`);
   const servers = Object.keys(contents.mcpServers);
   if (servers.length > 0) lines.push(`MCP servers (${servers.length}): ${servers.join(", ")}`);
-  if (contents.agents.length > 0) lines.push(`agents (${contents.agents.length}, not supported yet): ${contents.agents.join(", ")}`);
-  if (contents.hooks.length > 0) lines.push(`hooks (not supported yet, never run): ${contents.hooks.join(", ")}`);
+  if (contents.agentDefs.length > 0) lines.push(`agents (${contents.agentDefs.length}, worker personas): ${contents.agentDefs.map((agent) => `${contents.name}:${agent.name}`).join(", ")}`);
+  const count = hookCount(contents.hookConfig);
+  if (count > 0) {
+    lines.push(`hooks (${count}, run only after you approve them):`);
+    for (const line of describeHookConfig(contents.hookConfig)) lines.push(`  ${line}`);
+  } else if (contents.hooks.length > 0) lines.push(`hooks: ${contents.hooks.join(", ")} (none Synorch supports; never run)`);
   if (lines.length === 0) lines.push("no skills, commands or MCP servers");
   for (const problem of contents.problems) lines.push(`warning: ${problem}`);
   return lines;

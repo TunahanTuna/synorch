@@ -68,6 +68,7 @@ import {
   validatePlan,
   writingTaskCount,
   type PacketSource,
+  type PersonaResolver,
   type PlanValidation,
   type StepFloors,
 } from "./plan.ts";
@@ -182,6 +183,8 @@ export interface CoordinatorDependencies {
    * it records `trust/used`; a headless run that needs it and lacks it stops before any worker.
    */
   readonly workspaceTrust?: () => WorkspaceTrustState;
+  /** K7: plugin agent personas a plan task may name (`agent`); their body is layered on the task's role. */
+  readonly personas?: PersonaResolver;
 }
 
 /** Plan tasks whose verification commands run repository code (every non-empty verification list). */
@@ -946,6 +949,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
           forbiddenPaths: [],
           preferWorktree: false,
           stepFloor: limits.stepFloors.reviewer,
+          ...(deps.personas === undefined ? {} : { personas: deps.personas }),
         });
         let retries = 0;
         for (;;) {
@@ -1043,6 +1047,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
           forbiddenPaths: [],
           preferWorktree: deps.preferWorktree ?? true,
           stepFloor: limits.stepFloors.worker,
+          ...(deps.personas === undefined ? {} : { personas: deps.personas }),
         });
         let retries = 0;
         let revisions = 0;
@@ -1220,6 +1225,7 @@ export function createCoordinator(deps: CoordinatorDependencies): OrchestrationC
                 forbiddenPaths: [],
                 preferWorktree: deps.preferWorktree ?? true,
                 stepFloor: limits.stepFloors.worker,
+                ...(deps.personas === undefined ? {} : { personas: deps.personas }),
               });
               entry.nextNotes = [
                 `The orchestrator replaced this task's verification (it could not run: ${planCaused.join("; ")}) with: ${decision.verification.join("; ")}.`.slice(0, NOTE_LIMIT),

@@ -105,6 +105,7 @@ export {
   reviewerStepLimit,
   runStepLimit,
   validatePlan,
+  type PersonaResolver,
   type PlanValidation,
   type StepFloors,
 } from "./plan.ts";

@@ -58,6 +58,27 @@ export interface ToolGatewayDependencies {
   readonly now?: () => Date;
   /** Platform whose path-case policy keys the attempt file ledger (defaults to the running one). */
   readonly platform?: string;
+  /** K7 PreToolUse / PostToolUse hooks; never run for harness-initiated (`system`) calls. */
+  readonly hooks?: ToolHooks;
+}
+
+/** One model tool call as a hook sees it. */
+export interface ToolHookCall {
+  readonly toolName: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+  readonly toolCallId: ToolCallId;
+  readonly scope: ToolInvocationScope;
+  readonly sessionId: string;
+}
+
+/**
+ * K7 hook seam. `pre` runs after the policy decided and before any approval prompt: it can deny a
+ * call or make an allowed call ask, never widen a decision. `post` adds context (hook feedback) to
+ * an executed call's result text. Failures of the seam itself never fail the call.
+ */
+export interface ToolHooks {
+  pre(call: ToolHookCall, signal: AbortSignal): Promise<{ readonly deny?: string; readonly ask?: string } | undefined>;
+  post(call: ToolHookCall & { readonly result: ToolResult }, signal: AbortSignal): Promise<{ readonly context?: string } | undefined>;
 }
 
 type PolicyLayer = PolicyDecision["reasons"][number]["layer"];
@@ -269,6 +290,16 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
     }
 
     decision = decide(tool.metadata.visible_to.includes(scope.role), action, scope, argsJson);
+    const hookCall: ToolHookCall = { toolName: tool.metadata.name, arguments: parsed.data as Readonly<Record<string, unknown>>, toolCallId, scope, sessionId: dependencies.events.sessionId };
+    const hooks = scope.actor === "system" ? undefined : dependencies.hooks;
+    if (hooks !== undefined && decision.decision !== "deny") {
+      const verdict = await hooks.pre(hookCall, callSignal).catch(() => undefined);
+      if (verdict?.deny !== undefined) {
+        decision = gatewayDecision(action, scope.policy, [{ code: "hook-denied", layer: "user", message: verdict.deny.slice(0, 500) || "denied by a PreToolUse hook" }]);
+      } else if (verdict?.ask !== undefined && decision.decision === "allow") {
+        decision = policyDecisionSchema.parse({ ...decision, decision: "ask", reasons: [...decision.reasons, { code: "hook-ask", layer: "user", message: verdict.ask.slice(0, 500) || "a PreToolUse hook asks for approval" }] });
+      }
+    }
     try {
       await append({ type: "tool/policy_decided", data: { tool_call_id: toolCallId, action, decision } });
     } catch {
@@ -328,6 +359,10 @@ export function createToolGateway(dependencies: ToolGatewayDependencies): ToolGa
       raw = errorResult("timeout", `${tool.metadata.name} exceeded ${tool.metadata.timeout_ms} ms`, { text: raw.text, truncated: raw.truncated });
     }
     const state: ToolCallOutcome["state"] = raw.status === "ok" ? "succeeded" : raw.error?.code === "cancelled" ? "cancelled" : "failed";
+    if (hooks !== undefined && state !== "cancelled") {
+      const feedback = await hooks.post({ ...hookCall, result: raw }, signal).catch(() => undefined);
+      if (feedback?.context !== undefined && feedback.context.trim() !== "") raw = { ...raw, text: `${raw.text}\n\n[PostToolUse hook] ${feedback.context.trim()}` };
+    }
     return finish(state, raw);
   }
 

@@ -1,6 +1,8 @@
 import type { SkillCatalog } from "../../context/index.ts";
 import type { McpServerDefinition } from "../../mcp/index.ts";
-import { createMergedSkillCatalog, itemBody, loadExtensions, pluginMcpServers, resolveItems, type ExtensionItem, type ExtensionLoadInput, type ExtensionState, type ItemStatus } from "./catalog.ts";
+import { createPersonaCatalog, type PersonaCatalog, type PluginAgent } from "./agents.ts";
+import { createMergedSkillCatalog, itemBody, loadExtensions, pluginDataDir, pluginMcpServers, resolveItems, type ExtensionItem, type ExtensionLoadInput, type ExtensionState, type ItemStatus } from "./catalog.ts";
+import { createHookEngine, hookSources, readHookApprovals, type HookApprovals, type HookConfig, type HookEngine, type HookProcessRunner, type HookSource } from "./hooks.ts";
 
 /**
  * K7: one runtime's skills, commands and plugins. `reload()` re-reads every source (after an
@@ -12,6 +14,8 @@ export interface ExtensionSettings {
   readonly includeClaudePlugins: boolean;
   readonly disabledSkills: readonly string[];
   readonly disabledPlugins: readonly string[];
+  /** `hooks:` of the user configuration. */
+  readonly userHooks?: HookConfig;
 }
 
 export interface Extensions {
@@ -31,6 +35,10 @@ export interface Extensions {
   mcpServers(): readonly McpServerDefinition[];
   problems(): readonly string[];
   settings(): ExtensionSettings;
+  /** Hooks of the user configuration and of enabled plugins (plugin hooks run once approved). */
+  readonly hooks: HookEngine;
+  /** Agents of enabled plugins, as orchestration worker personas. */
+  readonly personas: PersonaCatalog;
   /** Applies new settings (after the user configuration changed) and re-reads every source. */
   reload(settings?: ExtensionSettings): Promise<void>;
 }
@@ -39,6 +47,14 @@ export interface ExtensionsOptions extends Omit<ExtensionLoadInput, "includeClau
   readonly settings: ExtensionSettings;
   readonly trusted: () => boolean;
   readonly canonicalCatalog: SkillCatalog;
+  /** Tests: replaces the hook process runner. */
+  readonly hookRunner?: HookProcessRunner;
+}
+
+function pluginAgents(state: ExtensionState): PluginAgent[] {
+  return state.plugins
+    .filter((plugin) => plugin.enabled)
+    .flatMap((plugin) => plugin.contents.agentDefs.map((agent) => ({ ...agent, id: `${plugin.contents.name}:${agent.name}`, plugin: plugin.key, origin: plugin.origin })));
 }
 
 export async function createExtensions(options: ExtensionsOptions): Promise<Extensions> {
@@ -52,6 +68,17 @@ export async function createExtensions(options: ExtensionsOptions): Promise<Exte
       trusted: options.trusted(),
     });
   let state = await read();
+  let approvals: HookApprovals = await readHookApprovals(options.home);
+  const computeSources = (): HookSource[] =>
+    hookSources({
+      user: settings.userHooks ?? {},
+      plugins: state.plugins
+        .filter((plugin) => plugin.enabled)
+        .map((plugin) => ({ key: plugin.key, origin: plugin.origin, root: plugin.contents.root, data: pluginDataDir(plugin, options), config: plugin.contents.hookConfig })),
+      approvals,
+    });
+  let sources = computeSources();
+  let agents = pluginAgents(state);
   const disabled = (): ReadonlySet<string> => new Set(settings.disabledSkills);
   let mcp = pluginMcpServers(state, options);
   const statuses = (): ItemStatus[] => resolveItems(state.items, { trusted: options.trusted(), disabled: disabled() });
@@ -76,9 +103,14 @@ export async function createExtensions(options: ExtensionsOptions): Promise<Exte
     mcpServers: () => mcp.servers,
     problems: () => [...state.problems, ...mcp.problems],
     settings: () => settings,
+    hooks: createHookEngine({ env: options.env, sources: () => sources, ...(options.hookRunner === undefined ? {} : { run: options.hookRunner }) }),
+    personas: createPersonaCatalog(() => agents),
     async reload(next) {
       if (next !== undefined) settings = next;
       state = await read();
+      approvals = await readHookApprovals(options.home);
+      sources = computeSources();
+      agents = pluginAgents(state);
       mcp = pluginMcpServers(state, options);
     },
   };

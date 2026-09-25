@@ -331,7 +331,12 @@ export interface CompilePacketInput {
   readonly preferWorktree: boolean;
   /** The worker step floor (`StepFloors.worker`); `MIN_TASK_STEPS` when absent. */
   readonly stepFloor?: number;
+  /** K7: resolves a task's `agent` to its persona instructions (plugin agents); unknown ids are ignored. */
+  readonly personas?: PersonaResolver;
 }
+
+/** K7: a plugin agent's persona for a packet (its body, already bounded). */
+export type PersonaResolver = (id: string) => { readonly id: string; readonly instructions: string } | undefined;
 
 export const EXPECTED_REPORT = [
   "summary",
@@ -444,6 +449,7 @@ export function planContext(plan: Pick<Plan, "tasks">, task: PlanTask): string[]
 export function compileTaskPacket(input: CompilePacketInput): TaskContextPacket {
   const { plan, task } = input;
   const perTaskSteps = perTaskStepLimit(plan, input.stepFloor ?? MIN_TASK_STEPS);
+  const persona = task.agent === undefined ? undefined : input.personas?.(task.agent);
   const stopConditions = [
     "A change outside owned_paths is required",
     "A cited source changed since the packet was created",
@@ -460,6 +466,7 @@ export function compileTaskPacket(input: CompilePacketInput): TaskContextPacket 
     role: task.role,
     model_tier: task.model_tier,
     ...(task.effort === undefined ? {} : { effort: task.effort }),
+    ...(persona === undefined ? {} : { persona: { id: persona.id, instructions: persona.instructions.slice(0, 8 * 1024) } }),
     risk: task.risk,
     write_mode: writeModeFor(task),
     isolation: isolationFor(task, input.preferWorktree),

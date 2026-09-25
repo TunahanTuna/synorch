@@ -28,6 +28,7 @@ import { policyConfigSchema, type PolicyConfig } from "../policy/index.ts";
 import { REVIEW_CROSS_PROVIDER_MODES, WEB_SEARCH_PROVIDERS, type ReviewCrossProviderMode, type WebSearchProvider } from "../providers/index.ts";
 import { CLAUDE_CODE_MODES, type ClaudeCodeMode } from "../providers/claude-code/native.ts";
 import type { RouteOverride } from "./args.ts";
+import { parseHookConfig, type HookConfig } from "./extensions/hooks.ts";
 
 /** K4.1 `web` block (user layer only): search backend, native provider search, private fetch exceptions. */
 const webConfigSchema = z.strictObject({
@@ -61,7 +62,12 @@ export interface ExtensionsConfig {
   readonly includeClaudePlugins: boolean;
   readonly disabledSkills: readonly string[];
   readonly disabledPlugins: readonly string[];
+  /** K7 user hooks (`hooks:` of the user configuration, Claude Code's hook format); they run as written. */
+  readonly userHooks?: HookConfig;
 }
+
+/** K7 `hooks:` block: Claude Code's `{ <Event>: [{ matcher, hooks: [{ type, command, args, timeout }] }] }`, parsed leniently. */
+const hooksConfigSchema = z.record(z.string().min(1).max(64), z.array(z.unknown()).max(200));
 
 export interface WebConfig {
   readonly searchProvider: WebSearchProvider | undefined;
@@ -218,6 +224,8 @@ const configFileSchema = z.strictObject({
   skills: extensionSwitchSchema.optional(),
   /** K7 plugins (user layer only). */
   plugins: extensionSwitchSchema.optional(),
+  /** K7 hooks (user layer only; Claude Code's hook format). */
+  hooks: hooksConfigSchema.optional(),
 });
 type ConfigFile = z.infer<typeof configFileSchema>;
 export type UserConfigFile = ConfigFile;
@@ -368,6 +376,7 @@ const IGNORED_KEY_REASON: Readonly<Record<string, string>> = {
   effort: "reasoning effort is chosen in the user configuration only",
   skills: "skills are enabled and disabled in the user configuration only",
   plugins: "plugins are enabled and disabled in the user configuration only",
+  hooks: "hooks run commands; they are configured in the user configuration only",
 };
 
 function warningsOf(layer: "workspace" | "project", file: string, read: LayerRead | undefined): ConfigWarning[] {
@@ -543,6 +552,7 @@ export function extensionsConfigOf(user: ConfigFile | undefined): ExtensionsConf
     includeClaudePlugins: user?.plugins?.include_claude !== false,
     disabledSkills: user?.skills?.disabled ?? [],
     disabledPlugins: user?.plugins?.disabled ?? [],
+    ...(user?.hooks === undefined ? {} : { userHooks: parseHookConfig({ hooks: user.hooks }).config }),
   };
 }
 

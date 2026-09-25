@@ -61,7 +61,8 @@ import { buildCommit, loadAppearance, planLabel, subscriptionPlan, userHome, wor
 import { DEFAULT_WEB_DOMAINS, describeProcess } from "../tools/index.ts";
 import type { ParsedCommand } from "./args.ts";
 import { ATTACHMENTS_OPEN, mayContainImage, resolveAttachments } from "./attachments.ts";
-import { runPluginsSlash, runSkillsSlash, type ExtensionSlashHost } from "./extensions-command.ts";
+import { askHookApproval, runPluginsSlash, runSkillsSlash, type ExtensionSlashHost } from "./extensions-command.ts";
+import type { HookEvent, HookOutcome } from "./extensions/index.ts";
 
 /** Adapters that turn `image` message parts into provider image input. */
 const IMAGE_ADAPTERS: ReadonlySet<string> = new Set(["openai-chatgpt", "openai-responses", "anthropic-messages", "claude-code"]);
@@ -124,6 +125,8 @@ type AgentCommand = Extract<ParsedCommand, { kind: "agent" }>;
 type ChangedFile = ChangeSummary["files"][number];
 
 const MAX_STEPS = 50;
+/** K7: consecutive turns a Stop hook may add before Synorch stops asking it. */
+const MAX_STOP_CONTINUATIONS = 3;
 const CONVERSATION_TITLE = "chat: ";
 const WRITE_TOOLS = new Set(["apply_patch", "write_file"]);
 const REPLAY_EXCHANGES = 3;
@@ -377,6 +380,8 @@ class Conversation implements ConversationCommandHost {
   private mcpStarted: Promise<void> = Promise.resolve();
   private debug = false;
   private submittedAt: number | undefined;
+  private sessionStartHooked = false;
+  private stopContinuations = 0;
   private readonly timings: string[] = [];
   /** K4.2: the first Esc (with background processes running) armed "Esc again stops them". */
   private processStopArmedAt: number | undefined;
@@ -1241,6 +1246,24 @@ class Conversation implements ConversationCommandHost {
       body = resolved.message;
       images = resolved.images;
     }
+    // K7 hooks: SessionStart once, UserPromptSubmit per typed prompt (a block drops the prompt).
+    const claudeNative = route.route.adapter_kind === "agent-backend" && (this.runtime.config.claudeCodeMode ?? "native") === "native";
+    const hookContext: string[] = [];
+    if (!this.sessionStartHooked) {
+      this.sessionStartHooked = true;
+      await this.reviewChangedHooks();
+      const source = this.parsed.resume !== undefined || this.parsed.continue ? "resume" : this.parsed.fork !== undefined ? "fork" : "startup";
+      hookContext.push(...((await this.runHook("SessionStart", { source }, [source], claudeNative, log.sessionId))?.context ?? []));
+    }
+    if (!followUp && !verbatim) {
+      const submitted = await this.runHook("UserPromptSubmit", { prompt: typed }, [], claudeNative, log.sessionId);
+      if (submitted?.blocked === true) {
+        this.note("error", `Prompt blocked by a UserPromptSubmit hook: ${submitted.reason ?? "no reason given"}`);
+        return false;
+      }
+      hookContext.push(...(submitted?.context ?? []));
+    }
+    if (hookContext.length > 0) body = `${body}\n${ATTACHMENTS_OPEN}\nContext from hooks:\n${hookContext.join("\n")}\n</synorch-attachments>`;
     const notes = this.pendingNotes.splice(0);
     // K3: completion notes ride on this turn; a follow-up turn is only needed for later ones.
     this.unreportedRuns = 0;
@@ -1279,6 +1302,14 @@ class Conversation implements ConversationCommandHost {
     // A message typed while the last step settled could not be delivered in this turn: it starts the next one.
     const leftover = driver.drainSteers?.() ?? [];
     if (leftover.length > 0) this.queued.unshift({ text: leftover.join("\n"), attachments: [] });
+    // K7 Stop hooks: a block continues the conversation with the hook's reason (at most 3 times in a row).
+    if (outcome?.outcome === "completed" && leftover.length === 0 && !active.signal.aborted) {
+      const stopped = await this.runHook("Stop", { stop_hook_active: this.stopContinuations > 0 }, [], claudeNative, log.sessionId);
+      if (stopped?.blocked === true && this.stopContinuations < MAX_STOP_CONTINUATIONS) {
+        this.stopContinuations += 1;
+        this.queued.unshift({ text: `[Synorch note: a Stop hook asked you to continue: ${(stopped.reason ?? "keep going").replaceAll("]", ")")}]`, attachments: [], verbatim: true });
+      } else this.stopContinuations = 0;
+    } else this.stopContinuations = 0;
     if (this.planOn && outcome?.outcome === "completed" && leftover.length === 0) {
       this.note("info", `${this.glyphs.bullet} Plan mode ${this.glyphs.sep} /go carries it out here ${this.glyphs.sep} /go workers runs it with workers ${this.glyphs.sep} or keep refining`);
     }
@@ -2299,6 +2330,28 @@ class Conversation implements ConversationCommandHost {
   /** K7 `/plugins [install <spec> | remove | enable | disable <name>]`. */
   public async plugins(argument: string): Promise<void> {
     await runPluginsSlash(this.extensionHost(), argument);
+  }
+
+  /** K7: runs one hook event (notes for hook messages); undefined when no active hook listens. */
+  private async runHook(event: HookEvent, payload: Readonly<Record<string, unknown>>, match: readonly string[], claudeNative: boolean, sessionId: string): Promise<HookOutcome | undefined> {
+    const hooks = this.runtime.extensions.hooks;
+    if (!hooks.has(event, { claudeNative })) return undefined;
+    const outcome = await hooks
+      .run(event, payload, match, { sessionId, cwd: this.runtime.workspaceRoot, permissionMode: this.runtime.permissionMode(), claudeNative, signal: this.outer.signal })
+      .catch(() => undefined);
+    for (const message of outcome?.messages ?? []) this.note("warning", message);
+    return outcome;
+  }
+
+  /** K7: a Synorch plugin whose approved hooks changed asks again (interactive sessions only); Claude plugins wait for /plugins hooks approve. */
+  private async reviewChangedHooks(): Promise<void> {
+    const changed = this.runtime.extensions.hooks.sources().filter((source) => source.state === "changed");
+    if (changed.length === 0) return;
+    if (this.renderer.approvals.availability !== "interactive") {
+      this.note("warning", `Hooks changed since you approved them and do not run: ${changed.map((source) => source.key).join(", ")} ${this.glyphs.sep} /plugins hooks approve <plugin>`);
+      return;
+    }
+    for (const source of changed) await askHookApproval(this.extensionHost(), source).catch(() => false);
   }
 
   private extensionHost(): ExtensionSlashHost {

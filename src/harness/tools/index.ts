@@ -13,7 +13,7 @@ export {
 } from "./builtin/control-tools.ts";
 export type { CommandClassifierHint, CommandScopeHint } from "./builtin/process-tools.ts";
 export { childEnvironment, INHERITED_ENV_ALLOWLIST, isBlockedEnvName } from "./environment.ts";
-export { createToolGateway, type ToolGatewayDependencies } from "./gateway.ts";
+export { createToolGateway, type ToolGatewayDependencies, type ToolHookCall, type ToolHooks } from "./gateway.ts";
 export { boundText, createRedactor, INLINE_OUTPUT_LIMIT_BYTES, REDACTED, type Redactor } from "./redaction.ts";
 export { createToolRegistry, type ToolRegistryOptions } from "./registry.ts";
 export { createWebFetchTool, type WebFetchToolOptions } from "./builtin/web-fetch.ts";

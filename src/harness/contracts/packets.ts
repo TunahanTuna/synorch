@@ -96,6 +96,8 @@ export const planTaskSchema = z.strictObject({
   model_tier: taskModelTierSchema,
   /** K6: optional reasoning-effort hint; the user's effort settings always win, the hint fills only unset levels. */
   effort: reasoningEffortSchema.optional().describe("optional reasoning effort: low for trivial/mechanical work, high or above for hard debugging/design; omit for the default"),
+  /** K7: optional plugin agent (worker persona) whose instructions are layered on the task's role. */
+  agent: z.string().min(1).max(200).optional().describe("optional plugin agent id from the listed plugin agents; its instructions are layered on this task's role"),
   acceptance_criteria: z.array(acceptanceCriterionSchema).min(1),
   verification: z.array(z.string().min(1)),
 });
@@ -276,6 +278,8 @@ export const taskContextPacketSchema = z
     model_tier: taskModelTierSchema,
     /** K6: the orchestrator's effort hint for this task (below the user's settings). */
     effort: reasoningEffortSchema.optional(),
+    /** K7: the plugin agent persona layered on the role (its body as extra instructions); never widens scope or policy. */
+    persona: z.strictObject({ id: z.string().min(1).max(200), instructions: z.string().max(8 * 1024) }).optional(),
     risk: riskClassSchema,
     write_mode: z.enum(["read-only", "owned-paths", "rca-only"]),
     isolation: z.enum(["worktree", "scoped-dir", "shared-read-only"]),

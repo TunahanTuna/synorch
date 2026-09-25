@@ -69,7 +69,7 @@ import {
   createSourceReader,
   type ContextBuilder,
 } from "../context/index.ts";
-import { createAgentDriver, recoverSession } from "../core/index.ts";
+import { createAgentDriver, recoverSession, type BackendApprovalHandler } from "../core/index.ts";
 import { buildProposal, createMemoryStore, readGitBranch, resolveMemoryRoot } from "../memory/index.ts";
 import {
   createBudgetGateSlot,
@@ -123,7 +123,7 @@ import { createCommandGrantStore } from "./command-grants.ts";
 import type { EffortOverride, RouteOverride } from "./args.ts";
 import { loadCanonicalStructure, type CanonicalStructure } from "./canonical.ts";
 import { checkEndpoint, DEFAULT_ADAPTER_FOR_PROVIDER, isSynorchHome, loadRuntimeConfig, resolveHome, type ConfiguredAdapter, type RuntimeConfig } from "./config.ts";
-import { claudeHome as resolveClaudeHome, createExtensions, type Extensions } from "./extensions/index.ts";
+import { claudeHome as resolveClaudeHome, createExtensions, gatewayHooks, nativeToolPreHook, personaModelTier, PERSONA_INSTRUCTIONS_LIMIT, renderPersonaHint, type Extensions } from "./extensions/index.ts";
 import { withRoleDefinitions } from "./role-policy.ts";
 import { plannerHint, renderProfileBlock, startProjectProfile, within, type ProjectProfileHandle } from "./project-profile.ts";
 import { createOrchestrateSlot, createOrchestrateTool, createRunControlTools, type OrchestrateSlot } from "./orchestrate-tool.ts";
@@ -987,8 +987,11 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   // Claude Code native mode: its permission prompts go to the same broker as the gateway's (ADR-08 revision 2026-09-24).
   const redactText = createRedactor(() => [...redactionValues]);
   const backendRedact = (text: string): string => redactText(text).text;
-  const backendApprovals = (broker: ApprovalBroker) =>
-    createClaudeNativeApprovals({
+  // K7 hooks: PreToolUse / PostToolUse on the gateway; on Claude native built-ins only Synorch's own hooks (Claude runs its plugins' hooks itself).
+  const hookNotice = (message: string): void => emit({ kind: "notice", level: "warning", message: backendRedact(message) });
+  const toolHooks = gatewayHooks(extensions.hooks, { workspaceRoot, permissionMode: () => permission, notify: hookNotice });
+  const backendApprovals = (broker: ApprovalBroker): BackendApprovalHandler => {
+    const native = createClaudeNativeApprovals({
       broker,
       permissionMode: () => permission,
       commandGrants: () => createCommandGrantStore(home, effectiveTrust().root).list(),
@@ -996,6 +999,12 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       web: { domains: () => webSession.domains(), environment: env },
       askUser: (questions, signal) => askUserQuestions(questions, signal),
     });
+    return async (toolName, input, context, signal) => {
+      const denied = await nativeToolPreHook(extensions.hooks, { toolName, toolInput: input, sessionId: context.runId ?? "session", workspaceRoot, permissionMode: permission, notify: hookNotice }, signal).catch(() => undefined);
+      if (denied !== undefined) return { allow: false, reason: `PreToolUse hook: ${denied}`.slice(0, 1000) };
+      return native(toolName, input, context, signal);
+    };
+  };
 
   // K6 reasoning effort: session levels (`/effort`, `--effort <tier>=`) > `--effort <level>` > config role > config tier.
   const sessionEfforts = new Map<ModelTier, ReasoningEffort>();
@@ -1035,7 +1044,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       router,
       context,
       tools: registry,
-      gateway: createToolGateway({ events, blobs, registry, policy, approvals: broker, sandbox: runner, redactionValues: () => [...redactionValues] }),
+      gateway: createToolGateway({ events, blobs, registry, policy, approvals: broker, sandbox: runner, redactionValues: () => [...redactionValues], hooks: toolHooks }),
       credentials,
       backendApprovals: backendApprovals(broker),
       backendRedact,
@@ -1100,7 +1109,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         router,
         context,
         tools: registry,
-        gateway: wrap(createToolGateway({ events, blobs, registry, policy, approvals: broker, sandbox: runner, redactionValues: () => [...redactionValues], platform })),
+        gateway: wrap(createToolGateway({ events, blobs, registry, policy, approvals: broker, sandbox: runner, redactionValues: () => [...redactionValues], platform, hooks: toolHooks })),
         credentials,
         backendApprovals: backendApprovals(broker),
         backendRedact,
@@ -1145,7 +1154,13 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
             const known = profile.current();
             return known === undefined ? undefined : plannerHint(known);
           },
+          personaHint: () => renderPersonaHint(extensions.personas.list()),
+          personaTier: (agent) => personaModelTier(extensions.personas.find(agent)?.model),
         }),
+        personas: (id) => {
+          const agent = extensions.personas.find(id);
+          return agent === undefined ? undefined : { id: agent.id, instructions: agent.body.slice(0, PERSONA_INSTRUCTIONS_LIMIT) };
+        },
         sandbox,
         createWorkers: createWorkerFactory({
           sessions,

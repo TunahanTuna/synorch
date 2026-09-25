@@ -39,14 +39,28 @@ export async function writeJsonAtomic(filePath: string, value: unknown): Promise
 }
 
 async function renameWithRetry(from: string, to: string): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
+  await retryTransientFs(() => rename(from, to));
+}
+
+const TRANSIENT_FS_CODES: ReadonlySet<string> = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/**
+ * Windows reports EPERM/EACCES/EBUSY while another handle (a concurrent reader, antivirus, the
+ * indexer) holds a file, or while it is still delete-pending after an unlink. Those clear within
+ * milliseconds, so the operation is retried with a bounded exponential backoff (about 1.3s in
+ * total at the default 8 attempts) before the error is surfaced.
+ */
+export async function retryTransientFs<T>(operation: () => Promise<T>, attempts = 8): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
     try {
-      await rename(from, to);
-      return;
+      return await operation();
     } catch (error: unknown) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (attempt >= 10 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+      if (attempt >= attempts || !isTransientFsError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 5 * 2 ** attempt));
     }
   }
+}
+
+export function isTransientFsError(error: unknown): boolean {
+  return TRANSIENT_FS_CODES.has((error as NodeJS.ErrnoException | undefined)?.code ?? "");
 }

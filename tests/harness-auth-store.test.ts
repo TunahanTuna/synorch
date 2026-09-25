@@ -61,7 +61,7 @@ test("file-0600 store round-trips, lists and deletes secrets with restrictive mo
     assert.equal(await store.delete(apiRef), false);
     assert.equal(await store.get(apiRef), undefined);
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 10 });
   }
 });
 
@@ -77,7 +77,7 @@ test("store negative: mismatched methods, invalid secrets and cli-bridge secrets
     await assert.rejects(store.set(apiRef, apiSecret), HarnessError);
     assert.equal(await readFile(store.location, "utf8"), "{ not json");
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 10 });
   }
 });
 
@@ -96,7 +96,7 @@ test("backend selection: SYNORCH_CREDENTIAL_STORE=file wins, keychain requests f
     assert.equal(createCredentialStore(home, { platform: "linux", runSync: linuxNoDbus, env: {} }).backend, "file-0600");
     assert.equal(createMemoryCredentialStore().backend, "memory");
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 10 });
   }
 });
 
@@ -206,7 +206,7 @@ test("OS keychain backends keep secrets out of argv and round-trip through the p
       }
     }
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 10 });
   }
 });
 
@@ -222,7 +222,7 @@ test("Windows DPAPI round trip through real PowerShell", { skip: process.platfor
     assert.ok(!onDisk.includes("access-store-test-secret"));
     assert.ok(!onDisk.includes(Buffer.from(JSON.stringify(oauthSecret)).toString("base64").slice(0, 24)));
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 10 });
   }
 });
 
@@ -251,7 +251,7 @@ test("withRefreshLock serializes refreshes across store instances sharing one ho
     const other = await first.withRefreshLock(apiRef, async () => "independent profile", signal);
     assert.equal(other, "independent profile");
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 10 });
   }
 });
 
@@ -281,6 +281,6 @@ test("withRefreshLock waits for a lock held by another process and takes over ab
     const release = await acquireFileLock(lockFile, { timeoutMs: 2_000 });
     await release();
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 10 });
   }
 });

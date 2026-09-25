@@ -106,6 +106,12 @@ Sistemi hantallaştırma; amaca yönelik kal. Ana amaç orkestrasyonda çok yetk
 - **Sağlayıcı eşlemesi:** OpenAI/ChatGPT Responses `reasoning.effort`; Claude Code köprüsünde CLI'nin efor ayarı; Anthropic API'de thinking/effort parametresi. Desteklenen seviyeler modele göre katalogdan gelir; desteklenmeyen seviye sessizce yutulmaz, en yakın seviyeye düşülür ve söylenir. Tam parametre adları uygulamadan önce güncel dokümandan doğrulanır.
 - **Orkestrasyon:** worker'lar rolünün eforunu kullanır; orchestrator görev başına efor önerebilir (trivial → düşük, zor hata ayıklama → yüksek). Kullanıcı ayarı her zaman önceliklidir.
 
+### ✅ K7 — Skill, komut ve plugin sistemi (ürün sahibi isteği, 2026-09-25) — yapıldı `8c97e28`
+Ürün sahibi: "Claude plugin ve skill'leri aynen kullanılsın, ama kendimiz de ekleyebilelim; köprü kurduğumuz Claude'un olanlarını kendimize entegre edelim."
+- Tek katalog (öncelik: proje > `~/.synorch` > Synorch plugin > Claude > yerleşik); `/skills`, `/plugins`, `syn skills`, `syn plugin install|list|remove|enable|disable`, `syn plugin marketplace`; her skill/komut paletten `/<ad>` ile çağrılır.
+- Claude'un skill/komut/açık plugin'leri yerinde okunur, tüm sağlayıcılarda kullanılır (`skills.include_claude` / `plugins.include_claude`, varsayılan açık); `~/.claude` altında yalnız skills/commands/plugins + `enabledPlugins` okunur.
+- Bekleyen: gerçek makinede `syn plugin list` doğrulaması; Claude rotasında `--strict-mcp-config` altında Claude plugin MCP'lerinin yüklenip yüklenmediği; plugin `agents/` ve `hooks/` desteği.
+- ✅ UI (`983683a`): mesajlar tam ve sarılı, araç satırı 3 satır + Ctrl+O, "Starting workers" gibi tören satırları kaldırıldı. ✅ Çapraz sağlayıcılı review + `/review` + görev başına efor (`6749755`). ✅ Sadeleştirme: `--legacy` kaldırıldı, `syn run` ince headless sarmalayıcı (`83961a6`).
 ### Sadeleştirme (K1.5–K3 boyunca)
 - ✅ Eski toplu yol: `syn agent --legacy` kaldırıldı (agent e2e'leri konuşma yoluna taşındı; crash-recovery özeti konuşmanın resume kartında). `syn run` headless giriş noktası olarak kaldı: aynı coordinator çekirdeğini süren ince sarmalayıcı, JSONL sözleşmesi aynı; `--orchestrate` açık yazım olarak kabul edilir.
 - ✅ Explorer yalnız orkestrasyonda: session yolunda explorer alt-run'ı yok (yalnız planner planlar); session ajanı keşfi kendisi yapar.

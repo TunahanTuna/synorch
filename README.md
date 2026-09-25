@@ -52,6 +52,16 @@ npm install --global synorch
 syn init && syn sync && syn doctor
 ```
 
+Installing from a local checkout (works on Windows, macOS and Linux; no `syn init` needed — bare `syn` in a terminal opens the agent session):
+
+```bash
+pnpm install
+pnpm run install:global   # build, pack and install a self-contained global copy
+syn --version             # 0.3.0 (<commit>)
+```
+
+See [docs/harness/delivery/install.md](./docs/harness/delivery/install.md) for the linked (live-rebuild) variant, updating and uninstalling.
+
 Other package managers work the same way:
 
 ```bash
@@ -61,7 +71,7 @@ yarn dlx synorch init
 
 Then just open Codex or Claude Code in that folder. The generated `AGENTS.md` and `CLAUDE.md` become the entry point, and the orchestrator takes it from there.
 
-> **Requires Node.js 24+.** Synorch ships as strict-TypeScript ESM and relies on Node's built-in type stripping — no transpiler in your dependency tree.
+> **Requires Node.js 24+.** Synorch is written in strict-TypeScript ESM; the published package ships compiled JavaScript in `dist/`, so no transpiler ends up in your dependency tree.
 
 ---
 

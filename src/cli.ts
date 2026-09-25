@@ -8,7 +8,7 @@ import { StructureService } from "./application/structure-service.ts";
 import { scopeSchema, type StructureScope } from "./domain/config.ts";
 import { CliError } from "./domain/errors.ts";
 import type { GenerationPlan } from "./domain/generation.ts";
-import { SYNORCH_VERSION } from "./domain/product.ts";
+import { versionLine } from "./infrastructure/build-info.ts";
 import { closestMatch } from "./domain/suggest.ts";
 import { NodeFileSystem } from "./infrastructure/file-system.ts";
 
@@ -155,7 +155,7 @@ async function main(): Promise<void> {
   const { values, positionals } = parsed;
 
   if (values.version) {
-    console.log(SYNORCH_VERSION);
+    console.log(versionLine());
     return;
   }
   if (values.help || positionals.length === 0) {

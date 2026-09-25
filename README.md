@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/brand/synorch-logo.svg" alt="Synorch logo" width="96" height="96">
+
 # Synorch
 
 **Turn any repository into an orchestrator-led AI development organization — in one command.**
@@ -13,6 +15,17 @@
 </div>
 
 ---
+
+### The mark
+
+The Synorch logo is the product in one picture: **synthesis + orchestration**.
+
+- **Top diamond — the conductor.** One decision center reads the goal and plans the work.
+- **Side arcs — parallel workers.** Specialists (explorer, implementer, debugger, reviewer) run side by side, each in its own isolated space, possibly on different models and providers.
+- **Center lens — the shared core.** The work they build together, held to evidence and independent review.
+- **Bottom diamond — the result.** Everything converges into one verified outcome.
+
+The gradient flows top to bottom, teal → blue → violet: from intent, through work, to result. In the terminal the same mark is drawn as half-block pixel art (`src/harness/tui/logo-art.ts`) and re-tinted by the active theme; the vector source is in [`assets/brand/`](assets/brand/).
 
 ## Why Synorch exists
 

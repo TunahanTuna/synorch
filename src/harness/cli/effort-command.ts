@@ -8,7 +8,7 @@ import {
   type RouteRule,
 } from "../contracts/index.ts";
 import { isReasoningEffort, type EffortResolution } from "../providers/index.ts";
-import { setUserSetting } from "./config-command.ts";
+import { setUserSetting, unsetUserSetting } from "./config-command.ts";
 import type { Runtime } from "./runtime.ts";
 
 /**
@@ -151,7 +151,19 @@ async function applyEffort(host: EffortCommandHost, target: EffortTarget, level:
     ...(resolution.notice === undefined ? [] : [resolution.notice]),
   ]);
   host.refreshStatus();
-  if (!save || level === undefined) return;
+  if (!save) return;
+  if (level === undefined) {
+    try {
+      const change = await unsetUserSetting(runtime.home, `effort.${target.slot}`);
+      runtime.setConfiguredEffort(target.slot, undefined);
+      host.refreshStatus();
+      host.print([`${host.ok} Removed effort.${target.slot} from ${change.file}`]);
+    } catch (error) {
+      host.showFailure(error);
+    }
+    return;
+  }
+  runtime.setConfiguredEffort(target.slot, level);
   try {
     const change = await setUserSetting(runtime.home, `effort.${target.slot}`, level);
     host.print([`${host.ok} Saved effort.${target.slot} = ${level} to ${change.file}`]);

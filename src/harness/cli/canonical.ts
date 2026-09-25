@@ -523,7 +523,7 @@ export function describeCanonical(canonical: CanonicalStructure, workspaceRoot: 
   const parts = `constitution ${canonical.instructions.constitution === undefined ? "missing" : "loaded"}, ${canonical.protocolIds.length} core protocol(s), ${canonical.roles.size} role manifest(s), ${canonical.skillEntries.length} skill(s) in the catalog`;
   return canonical.origin === "repository"
     ? `canonical .ai: ${path.join(workspaceRoot, ".ai")} (${parts})`
-    : `canonical: built-in Synorch structure (${parts}; customize with syn init)`;
+    : `canonical: built-in Synorch structure (${parts}; ready as is, /init or syn init only to customize)`;
 }
 
 export function describeProfiles(canonical: CanonicalStructure): string | undefined {

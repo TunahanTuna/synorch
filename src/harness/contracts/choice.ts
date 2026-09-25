@@ -32,6 +32,8 @@ export interface ChoiceQuestion {
   readonly numberShortcuts?: boolean;
   /** Space toggles, Enter confirms. */
   readonly multiSelect?: boolean;
+  /** Multi-select rows checked when the modal opens (for example every changed file in `/commit`). */
+  readonly initialChecked?: readonly number[];
   /** Appends "Other…", which switches to a free-text answer. Default true. */
   readonly allowOther?: boolean;
   /** The row highlighted first (default: the recommended one, else the first). */

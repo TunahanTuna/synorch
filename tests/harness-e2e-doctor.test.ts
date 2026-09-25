@@ -70,7 +70,7 @@ test("doctor --runtime --json reports each area separately and makes no network 
     assert.match(byId.get("trust")?.summary ?? "", /not trusted.*syn trust/);
     const canonical = byId.get("canonical");
     assert.equal(canonical?.status, "ok", "a repository without .ai/ runs on the built-in structure, a first-class mode (K1.5-4)");
-    assert.match(canonical?.summary ?? "", /canonical: built-in Synorch structure \(constitution loaded, 8 core protocol\(s\), 5 role manifest\(s\), 9 skill\(s\).*customize with syn init\)/);
+    assert.match(canonical?.summary ?? "", /canonical: built-in Synorch structure \(constitution loaded, 8 core protocol\(s\), 5 role manifest\(s\), 9 skill\(s\).*ready as is, \/init or syn init only to customize\)/);
     assert.equal(byId.get("sandbox")?.status, "warn", "a partial sandbox is reported, not hidden");
     assert.equal(byId.get("store")?.status, "ok");
     const auth = byId.get("auth")?.details as { provider_id: string; method: string; state: string }[];

@@ -32,7 +32,7 @@ immediately. The checkout must stay in place and keep its `node_modules`.
 
 ```powershell
 syn                 # interactive terminal: opens the agent session (like `claude`)
-syn --version       # 0.3.0 (<short commit>) — the commit comes from dist/build-info.json
+syn --version       # 0.4.0-beta.0 (<short commit>) — the commit comes from dist/build-info.json
 syn doctor --runtime
 syn agent --help
 ```

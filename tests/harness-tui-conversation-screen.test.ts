@@ -19,7 +19,7 @@ const HEADER: SessionHeaderView = {
   routes: [],
   sandboxEnforcement: "full",
   notices: [],
-  version: "0.3.0",
+  version: "0.4.0-beta.0",
   model: "sol-large",
   permissionMode: "auto",
 };
@@ -77,7 +77,7 @@ test("first screen: product and folder above, a prompt with a hint, model and mo
   assert.equal(
     await screen(tui, terminal),
     [
-      "Synorch 0.3.0 · demo (main)",
+      "Synorch 0.4.0-beta.0 · demo (main)",
       "────────────────────────────────────────────────────────────────────────────────",
       ">  Ask anything or describe a change · / commands · @ files",
       "────────────────────────────────────────────────────────────────────────────────",

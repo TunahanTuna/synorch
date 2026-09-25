@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-beta.0] - 2026-09-26
+
+Pre-release, published under the npm dist-tag `beta` (`npm i -g synorch@beta`). `latest` stays on 0.3.0.
+
+### Added
+
+- The `syn` harness: a conversation-first, interactive coding agent in the terminal. Running `syn` with no arguments opens a session; the 0.3.0 structure commands (`inspect`, `init`, `sync`, `doctor`) are unchanged.
+- Multiple providers behind one session: a ChatGPT subscription login, a bridge that runs the local Claude Code CLI with its native toolset, and direct API keys.
+- Orchestration: the orchestrator decomposes work into isolated workers (separate worktrees) and routes an independent review to a different provider than the one that wrote the change; orchestration can run in the background while the conversation continues.
+- `/review` as the independent review step, with a pinned review artifact, a verdict card and a fix follow-up.
+- Permission modes `ask`, `auto`, `full` and `plan`: risky actions prompt instead of being silently denied.
+- An MCP client with OAuth for remote servers.
+- Claude Code compatible skills, slash commands and plugins, including plugin hooks and agents.
+- Effort control per turn and per route.
+- Themes, a welcome screen and logo, and layered panels for skills, plugins, MCP, status, runs, memory, config and help.
+- `/rewind` and `/fork` for conversation history.
+- Global install: `syn` works from any directory without a prior `init`.
+
+### Known limitations
+
+- Beta: not every feature has been validated in real terminals yet, and one Windows CI test is flaky.
+
 ## [0.3.0] - 2026-09-22
 
 ### Added
@@ -66,7 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A bundled, provenance-tracked Ingenium skill catalog with on-demand loading rules.
 - Model profiles, orchestration protocols, minimal context packets, verification contracts, and provider adapters.
 
-[Unreleased]: https://github.com/TunahanTuna/synorch/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/TunahanTuna/synorch/compare/v0.4.0-beta.0...HEAD
+[0.4.0-beta.0]: https://github.com/TunahanTuna/synorch/compare/v0.3.0...v0.4.0-beta.0
 [0.3.0]: https://github.com/TunahanTuna/synorch/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TunahanTuna/synorch/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/TunahanTuna/synorch/releases/tag/v0.1.0

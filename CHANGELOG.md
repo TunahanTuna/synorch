@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-beta.1] - 2026-09-26
+
+Pre-release under the npm dist-tag `beta`. `latest` stays on 0.3.0.
+
+### Fixed
+
+- First run on a new machine: bare `syn` asks which provider to connect, signs in, saves `routes.session` and continues, instead of exiting with `config_invalid` before any sign-in was possible. Headless runs without a route name the two commands to run.
+- A turn that fails because the provider is not signed in offers to sign in in the session and retry.
+- A Claude Code sign-in made inside a session is visible to it immediately.
+- Windows: the credential refresh lock tolerates `EPERM`/`EBUSY`.
+
 ## [0.4.0-beta.0] - 2026-09-26
 
 Pre-release, published under the npm dist-tag `beta` (`npm i -g synorch@beta`). `latest` stays on 0.3.0.
@@ -88,7 +99,8 @@ Pre-release, published under the npm dist-tag `beta` (`npm i -g synorch@beta`). 
 - A bundled, provenance-tracked Ingenium skill catalog with on-demand loading rules.
 - Model profiles, orchestration protocols, minimal context packets, verification contracts, and provider adapters.
 
-[Unreleased]: https://github.com/TunahanTuna/synorch/compare/v0.4.0-beta.0...HEAD
+[Unreleased]: https://github.com/TunahanTuna/synorch/compare/v0.4.0-beta.1...HEAD
+[0.4.0-beta.1]: https://github.com/TunahanTuna/synorch/compare/v0.4.0-beta.0...v0.4.0-beta.1
 [0.4.0-beta.0]: https://github.com/TunahanTuna/synorch/compare/v0.3.0...v0.4.0-beta.0
 [0.3.0]: https://github.com/TunahanTuna/synorch/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TunahanTuna/synorch/compare/v0.1.0...v0.2.0

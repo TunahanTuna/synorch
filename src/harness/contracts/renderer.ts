@@ -49,6 +49,8 @@ export interface SessionHeaderView {
 export interface SessionWelcomeView {
   /** Short commit of the build (`syn --version`). */
   readonly commit?: string;
+  /** Set late only when the model was chosen after start (first-run sign-in). */
+  readonly model?: string;
   readonly effort?: string;
   /** Provider / plan label: `ChatGPT Plus`, `Claude Code`, `OpenAI API`. */
   readonly plan?: string;

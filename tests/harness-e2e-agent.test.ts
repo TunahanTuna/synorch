@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { test } from "node:test";
 import { runHarnessCommand } from "../src/harness/cli/index.ts";
 import { createScriptedAdapter } from "../src/harness/providers/index.ts";
@@ -52,13 +54,32 @@ test("syn agent saves a piped conversation; --resume continues it and --fork bra
   }
 });
 
-test("syn agent without any configured route fails with a usage exit and a next step", async () => {
+test("syn agent without any configured route fails headless with the two commands that connect one", async () => {
   const sandbox = await createSandbox({ "README.md": "# agent\n" });
   try {
     const session = await agent(sandbox, [], "/exit\n");
     assert.equal(session.code, 2);
-    assert.match(session.stderr, /Error \[config_invalid\]: no model route is configured for the conversation/);
-    assert.match(session.stderr, /next: syn doctor --runtime/);
+    assert.match(session.stderr, /Error \[config_invalid\]: no model is connected for the conversation: run syn login openai, then syn config set routes\.session openai\/gpt-6-sol/);
+    assert.match(session.stderr, /next: syn login openai && syn config set routes\.session openai\/gpt-6-sol/);
+  } finally {
+    await sandbox.cleanup();
+  }
+});
+
+test("syn agent at a terminal without a route connects a provider first and saves routes.session", async () => {
+  const sandbox = await createSandbox({ "README.md": "# agent\n" });
+  try {
+    const io = capture({ cwd: sandbox.workspace, stdin: new ScriptedInput("4\ny\n/exit\n", true), stdinIsTTY: true });
+    const offline = async (): Promise<Response> => {
+      throw new Error("offline");
+    };
+    const overrides = overridesFor(sandbox, { fetch: offline as never, authOptions: { claudeProbe: async () => ({ installed: true, version: "9.9.9" }) } });
+    const code = await runHarnessCommand(["agent", "--plain"], io.io, overrides);
+    const shown = io.stdout() + io.stderr();
+    assert.equal(code, 0, shown);
+    assert.match(shown, /Connect a model provider/);
+    assert.match(shown, /Connected Claude Code .* anthropic\/opus-5\.5@claude-code \(saved as routes\.session\)/);
+    assert.match(await readFile(path.join(sandbox.home, "config.yaml"), "utf8"), /session[\s\S]*anthropic[\s\S]*opus-5\.5[\s\S]*claude-code/);
   } finally {
     await sandbox.cleanup();
   }

@@ -33,7 +33,7 @@ test("logo art: 7 rows × 14 cells of half-blocks tinted with the theme's logo c
 
 test("logo art falls back to the glyph mark: NO_COLOR, 16 colours, ascii glyphs, logo glyph", () => {
   const theme = builtinTheme("nord")!;
-  const info = { version: "0.4.0-beta.0", folder: "demo" };
+  const info = { version: "0.4.0-beta.1", folder: "demo" };
   const frame = { width: 120, rows: 40, glyphs: GLYPH_SETS.rich };
   const noColor = renderWelcome(info, DEFAULT_WELCOME, { ...frame, style: createStyler(false, { theme, depth: 24 }) });
   assert.equal(noColor[0], "   ◆");

@@ -164,7 +164,7 @@ interface Part {
   readonly painted: string;
   /** 0 never drops; lower drops first. */
   readonly drop: number;
-  /** Joined to the previous part with a space instead of the separator (`Synorch v0.4.0-beta.0`). */
+  /** Joined to the previous part with a space instead of the separator (`Synorch v0.4.0-beta.1`). */
   readonly glue?: boolean;
 }
 

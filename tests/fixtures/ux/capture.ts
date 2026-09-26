@@ -433,7 +433,7 @@ async function runBoard(columns: number, rows: number): Promise<{ frames: Frame[
     view: "conversation",
     now: () => now,
   });
-  await tui.start({ workspaceRoot: "/work/demo", gitBranch: "main", policyMode: "autonomous", routes: [], sandboxEnforcement: "full", notices: [], version: "0.4.0-beta.0", model: "sol-large", permissionMode: "auto" });
+  await tui.start({ workspaceRoot: "/work/demo", gitBranch: "main", policyMode: "autonomous", routes: [], sandboxEnforcement: "full", notices: [], version: "0.4.0-beta.1", model: "sol-large", permissionMode: "auto" });
   const frames: Frame[] = [];
   tui.flush();
   tui.setBoard(BOARD);

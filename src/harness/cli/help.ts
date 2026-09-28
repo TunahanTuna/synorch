@@ -90,6 +90,27 @@ ${COMMON}
 
 ${EXIT_CODES}
 `,
+  review: `syn review — independent review of a diff, without the interface (ADR-09)
+
+Usage:
+  syn review [--staged | <commit> | <from>..<to>] [focus...] [--json] [--trust-workspace] [options]
+
+  Reviews the uncommitted changes by default (the last commit when the tree is clean), pinned
+  by content digest, with a fresh read-only reviewer on another provider when one is available.
+  Never asks for approval. run-<n> targets exist only in a conversation (/review).
+
+Output:
+  A short verdict card. --json writes one object to stdout: {schema, status, target, label,
+  verdict, decision, reviewer, cross_provider, artifact, findings, criteria, attempt_id,
+  session_id}; a failure is {schema, error: {code, message}}.
+
+Exit codes:
+  0 approve, 1 changes requested, 2 blocked, 3 error (no verdict, artifact changed, no git).
+
+${SESSION}
+
+${COMMON}
+`,
   runs: `syn runs — list sessions and runs of this project
 
 Usage:

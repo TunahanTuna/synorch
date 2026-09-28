@@ -290,3 +290,18 @@ test("the plain and JSONL paths never load pi-tui", () => {
   );
   assert.match(control.stderr, /LOADED @earendil-works\/pi-tui/, "the hook detects a real pi-tui load");
 });
+
+test("syn review parses its target, focus and flags; run-<n> and fix are not headless targets", () => {
+  const staged = parseHarnessArgs(["review", "--json", "--staged"]);
+  assert.ok(staged.kind === "review");
+  assert.deepEqual(staged.target, { kind: "staged" });
+  assert.equal(staged.json, true);
+  const range = parseHarnessArgs(["review", "HEAD~2..HEAD", "error", "paths", "--trust-workspace"]);
+  assert.ok(range.kind === "review");
+  assert.deepEqual(range.target, { kind: "range", from: "HEAD~2", to: "HEAD", symmetric: false });
+  assert.equal(range.focus, "error paths");
+  assert.equal(range.trustWorkspace, true);
+  assert.throws(() => parseHarnessArgs(["review", "--staged", "HEAD"]), UsageError);
+  assert.throws(() => parseHarnessArgs(["review", "fix"]), UsageError);
+  assert.equal(isHarnessInvocation(["review"]), true);
+});

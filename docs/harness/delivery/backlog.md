@@ -2,6 +2,14 @@
 
 > Durum: yaşayan plan (ürün sahibi + orchestrator). Son güncelleme: 2026-09-25. Bu dosya "ne yapacağız, hangi sırayla, neden" sorusunun tek listesidir. Ayrıntılı tasarım: [ürün gereksinimleri](../foundation/product-requirements.md), [ADR-21](../decisions/ADR-21-conversation-first-runtime.md), [TUI deneyimi](../design/tui-experience.md), [uygulama planı §8](../implementation-plan.md), sahip bağlamı [harness-context.yaml](../harness-context.yaml) / [harness-ux-context.yaml](../harness-ux-context.yaml).
 
+## 2026-09-28 — backlog-wave-1 durumu (orkestratör notu)
+
+- **Tamamlandı:** `/agents` paneli; `syn review --json` (çıkış kodları 0/1/2/3); `/why` cilası; orkestrasyon kullanım ölçümü (`/usage` kartı + usage.json `orchestration`) ve usage load yarışı düzeltmesi; ADR-21 D6 dirty overlay küçük dilimi (yalnız kirli izlenen dosyalar; untracked/silinmiş/rename scoped-dir'de kalır); Codex model listesinde `visibility:"hide"` filtresi (format gerçek yanıtla uyumlu doğrulandı).
+- **Windows CI:** yerelde üretilemedi (CRLF, env, node sürümü, çekirdek sayısı elendi); şüpheliler admin symlink testleri ve gerçek pwsh yolları; CI'a başarısız test adlarını annotation olarak basan teşhis adımı eklendi — sonraki PR koşusunda test adı okunacak.
+- **Bekleyen / sahibe ait:** gerçek terminal UX denemesi (kontrol listesi hazır); P0 boş React hız testi (ücretli, elle ölçülecek); `latest` dist-tag kararı — orkestratör kararı: #1 ve Windows CI kapanana kadar beta'da kal; Linux/macOS gerçek host doğrulaması ertelendi.
+- **Yeni borç:** non-high-risk scoped-dir düşüşü için görünür uyarı (sözleşme değişikliği gerekir: runtime.ts/events.ts/model.ts); review mantığı conversation.ts ile review-command.ts arasında yinelenmiş, ortak modüle çıkarılmalı; ADR-21 D6'nın geri kalanı (untracked/rename, sentetik taban).
+- **Bayat maddeler tamamlandı (orijinaller değişmedi):** K2 (`a33602f`), K6 görev başı efor (`6749755`), K7 hooks/agents (`632a2ce`), Claude köprüsü doğrulaması (`2921531`), 0.4.0-beta.1 + PR #1 merge (`ad5f08f`).
+
 ## 🔔 Ürün sahibi için hatırlatıcı
 
 - [ ] **K1 bitince dene:** `node F:\development\Tunahan\tuna\ai-template\dist\cli.js agent` (C:\temp\syn-smoke içinde). Dene: `/` paleti, `@dosya`, görsel yapıştırma (Alt+V), `Shift+Tab` plan modu, `/model`, `/usage`, `/graph`, büyük bir işte canlı worker panosu, çalışırken mesaj yazıp yön verme.

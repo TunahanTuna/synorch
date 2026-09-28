@@ -30,6 +30,7 @@ Runtime commands (syn <command> --help for details):
   agent             Interactive orchestrated session (--resume <session>, --fork <session>).
   run "<goal>"      Run one goal to completion; --mode jsonl writes machine frames.
   runs              List the runs of this project.
+  review [target]   Independent read-only review of a diff (--json; exit 0/1/2/3).
   show <id>         Plan, workers, approvals, evidence and usage of a run or session.
   doctor --runtime  Sandbox, store, auth and capability health; no network request.
   login, logout     Connect or remove a provider identity.
@@ -43,7 +44,7 @@ Safety:
   Model fallback is never silent.
 `;
 
-const HARNESS_COMMAND_NAMES: readonly string[] = ["agent", "setup", "run", "runs", "show", "login", "logout", "auth", "memory", "trust", "config", "mcp", "skills", "plugin"];
+const HARNESS_COMMAND_NAMES: readonly string[] = ["agent", "setup", "run", "review", "runs", "show", "login", "logout", "auth", "memory", "trust", "config", "mcp", "skills", "plugin"];
 
 const LEGACY_OPTIONS = {
   target: { type: "string", short: "t" },

@@ -1,6 +1,7 @@
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 import { closestMatch } from "../../domain/suggest.ts";
 import { parseConfigPositionals, type ConfigSubcommand } from "./config-command.ts";
+import { parseReviewArgument, type ReviewTarget } from "../orchestration/artifact-review.ts";
 import {
   AUTH_METHODS,
   modelTierSchema,
@@ -91,6 +92,8 @@ export type ParsedCommand =
       readonly setup?: boolean;
     }
   | { readonly kind: "run"; readonly common: CommonFlags; readonly session: SessionFlags; readonly goal: string; readonly goalFromStdin: boolean; readonly jsonl: boolean; readonly streamDeltas: boolean; readonly trustWorkspace: boolean }
+  /** `syn review`: the headless `/review` (ADR-09); never a run-<n> target. */
+  | { readonly kind: "review"; readonly common: CommonFlags; readonly session: SessionFlags; readonly target: ReviewTarget; readonly focus: string; readonly json: boolean; readonly trustWorkspace: boolean }
   | { readonly kind: "trust"; readonly common: CommonFlags; readonly revoke: boolean }
   | { readonly kind: "runs"; readonly common: CommonFlags; readonly json: boolean }
   | { readonly kind: "show"; readonly common: CommonFlags; readonly id: RunId | SessionId; readonly json: boolean }
@@ -136,6 +139,13 @@ export const HARNESS_COMMAND_OPTIONS = {
     mode: { type: "string" },
     json: { type: "boolean", default: false },
     "stream-deltas": { type: "boolean", default: false },
+    "trust-workspace": { type: "boolean", default: false },
+  },
+  review: {
+    ...COMMON_OPTIONS,
+    ...SESSION_OPTIONS,
+    staged: { type: "boolean", default: false },
+    json: { type: "boolean", default: false },
     "trust-workspace": { type: "boolean", default: false },
   },
   trust: { ...COMMON_OPTIONS, revoke: { type: "boolean", default: false } },
@@ -317,6 +327,22 @@ export function parseHarnessArgs(argv: readonly string[]): ParsedCommand {
         goalFromStdin: goal === "-",
         jsonl,
         streamDeltas: values["stream-deltas"],
+        trustWorkspace: values["trust-workspace"],
+      };
+    }
+    case "review": {
+      const { values, positionals } = parse(command, args, HARNESS_COMMAND_OPTIONS.review);
+      if (values.help) return { kind: "help", command };
+      const argument = parseReviewArgument(positionals.join(" "));
+      if (argument.fix) throw new UsageError("fix is a conversation command (/review fix); syn review only reviews.", command);
+      if (values.staged && argument.target.kind !== "workspace") throw new UsageError("--staged cannot be combined with a commit or range target.", command);
+      return {
+        kind: "review",
+        common: common(command, values),
+        session: session(command, values),
+        target: values.staged ? { kind: "staged" } : argument.target,
+        focus: argument.focus,
+        json: values.json,
         trustWorkspace: values["trust-workspace"],
       };
     }

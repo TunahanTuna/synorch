@@ -98,6 +98,14 @@ export interface QuotaWindowView {
   readonly requests?: { readonly total: number; readonly workers: number } | undefined;
 }
 
+export interface OrchestrationUsageView {
+  readonly runs: number;
+  readonly tasks: number;
+  readonly tokens: number;
+  readonly costUsd?: number | undefined;
+  readonly durationMs: number;
+}
+
 export interface UsageView {
   readonly kind: "usage";
   /** Rows of the current session. */
@@ -106,6 +114,13 @@ export interface UsageView {
   readonly today?: readonly UsageRowView[] | undefined;
   readonly quotas?: readonly QuotaWindowView[] | undefined;
   readonly sessionElapsedMs?: number | undefined;
+  /** Orchestration runs (worker tasks and tokens, wall time); omitted when none ran. */
+  readonly orchestration?:
+    | {
+        readonly session: OrchestrationUsageView;
+        readonly today?: OrchestrationUsageView | undefined;
+      }
+    | undefined;
   /** Optional budget line, e.g. `$2.00 session budget`. */
   readonly budget?: { readonly usedUsd: number; readonly limitUsd: number } | undefined;
 }

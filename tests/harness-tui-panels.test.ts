@@ -7,7 +7,8 @@ import xterm from "@xterm/headless";
 import type { Terminal } from "@earendil-works/pi-tui";
 import type { SessionHeaderView, TerminalRenderer } from "../src/harness/contracts/index.ts";
 import { describeSkills, runSkillsSlash, type ExtensionSlashHost } from "../src/harness/cli/extensions-command.ts";
-import type { ExtensionItem, Extensions, ExtensionSettings, ItemStatus } from "../src/harness/cli/extensions/index.ts";
+import type { ExtensionItem, Extensions, PluginAgent, ExtensionSettings, ItemStatus } from "../src/harness/cli/extensions/index.ts";
+import { agentsPanel } from "../src/harness/cli/panels/agents.ts";
 import { skillsPanel } from "../src/harness/cli/panels/skills.ts";
 import { GLYPH_SETS } from "../src/harness/tui/conversation-view.ts";
 import { PiTuiRenderer } from "../src/harness/tui/pi-tui-renderer.ts";
@@ -294,6 +295,36 @@ test("plain mode keeps the text report: no panel control, /skills prints the lis
     await runSkillsSlash(host, "");
     assert.deepEqual(printed.slice(0, -1), describeSkills(host.extensions.statuses(), "·"));
   } finally {
+    await cleanup();
+  }
+});
+
+test("/agents panel: lists agents with role, tier and origin; Enter shows file, tools and instructions", async () => {
+  const { tui, terminal, settle } = await mounted();
+  const { host, cleanup } = await fixture();
+  try {
+    const agents: PluginAgent[] = [
+      { id: "acme:reviewer", name: "reviewer", description: "Reviews diffs", tools: ["Read", "Grep"], model: "haiku", body: "Look for **bugs** first.", file: "/plugins/acme/agents/reviewer.md", plugin: "acme", origin: "synorch" },
+    ];
+    const personas = { list: () => agents, find: (id: string) => agents.find((agent) => agent.id === id) };
+    const withAgents: ExtensionSlashHost = { ...host, extensions: { ...host.extensions, personas } as unknown as Extensions };
+    const done = tui.controls.openPanel?.(agentsPanel(withAgents));
+    let screen = await settle();
+    assert.match(screen, /^ Agents\s+1\/1 $/m);
+    assert.match(screen, /❯ acme:reviewer\s+fast_worker\s+synorch:acme\s+reviewer\s+Reviews diffs/);
+    assert.match(screen, /o open file/);
+
+    terminal.type(ENTER);
+    screen = await waitFor(settle, /^ Agents › reviewer/m);
+    assert.match(screen, /file\s+\/plugins\/acme\/agents\/reviewer\.md/);
+    assert.match(screen, /tools\s+Read, Grep/);
+    assert.match(screen, /Look for bugs first\./);
+
+    terminal.type(ESC);
+    terminal.type("q");
+    await done;
+  } finally {
+    await tui.stop("completed");
     await cleanup();
   }
 });

@@ -30,6 +30,7 @@ import { pluginCommand, skillsCommand } from "./extensions-command.ts";
 import { failureInfo } from "./outcome.ts";
 import type { RuntimeOverrides } from "./runtime.ts";
 import { conversationCommand } from "./conversation.ts";
+import { reviewCommand } from "./review-command.ts";
 import { runCommand, type SessionIO } from "./session.ts";
 import { resolveTerminalSettings, streamHasColors, type TerminalSettings } from "./terminal.ts";
 import { trustCommand } from "./trust.ts";
@@ -39,7 +40,7 @@ import { trustCommand } from "./trust.ts";
  * dynamic `import("./harness/cli/index.ts")`, so `inspect/init/sync/doctor` never load it. The
  * composition root itself is `createRuntime()` in `runtime.ts`.
  */
-export const HARNESS_COMMANDS = ["agent", "setup", "run", "runs", "show", "login", "logout", "auth", "memory", "trust", "config", "mcp", "skills", "plugin"] as const;
+export const HARNESS_COMMANDS = ["agent", "setup", "run", "review", "runs", "show", "login", "logout", "auth", "memory", "trust", "config", "mcp", "skills", "plugin"] as const;
 export type HarnessCommand = (typeof HARNESS_COMMANDS)[number];
 
 export { harnessCommandFlags, parseHarnessArgs, requestsJsonl, UsageError, type ParsedCommand } from "./args.ts";
@@ -214,6 +215,8 @@ async function dispatch(parsed: Exclude<ParsedCommand, { kind: "help" }>, io: Ha
       };
       return parsed.kind === "run" ? runCommand(parsed, sessionIO, overrides) : conversationCommand(parsed, sessionIO, overrides);
     }
+    case "review":
+      return reviewCommand(parsed, { cwd: io.cwd, env: io.env, stdout: io.stdout, stderr: io.stderr, signal: io.signal }, overrides);
     case "runs":
     case "show": {
       const inspectIO = { cwd: io.cwd, env: io.env, home, platform, stdout: (text: string) => void io.stdout.write(text) };

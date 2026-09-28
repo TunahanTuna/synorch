@@ -345,12 +345,15 @@ function routeWhy(events: readonly SessionEvent[]): WhyView | undefined {
   const decided = [...events].reverse().find((event): event is SessionEventOf<"route/decided"> => event.type === "route/decided");
   if (decided === undefined) return undefined;
   const decision = decided.data.decision;
+  const prepared = [...events].reverse().find((event): event is SessionEventOf<"model/request_prepared"> => event.type === "model/request_prepared");
+  const effort = prepared?.data.reasoning_effort;
   const facts = [
     { label: "Tier", text: `${decision.tier}${decision.role === undefined ? "" : ` (role ${decision.role})`}` },
     { label: "Source", text: `${decision.source} configuration` },
     { label: "Reason", text: decision.reason },
     { label: "Adapter", text: decision.route.adapter_id },
-    { label: "Fallback", text: decision.fallback.used ? `yes, from ${decision.fallback.from?.provider_id ?? "?"}/${decision.fallback.from?.model_id ?? "?"} (approved)` : "no" },
+    ...(effort === undefined ? [] : [{ label: "Effort", text: `${effort} reasoning (clamped to what this model supports)` }]),
+    { label: "Fallback", text: decision.fallback.used ? `yes: ${decision.fallback.from?.provider_id ?? "?"}/${decision.fallback.from?.model_id ?? "?"} was unavailable, you approved this route instead` : "no, the configured route is in use" },
   ];
   return {
     kind: "why",
@@ -361,6 +364,7 @@ function routeWhy(events: readonly SessionEvent[]): WhyView | undefined {
     howToChange: [
       { command: "/model", effect: "every logged-in provider's models; switch this conversation" },
       { command: `/config routes.${decision.tier}`, effect: "change the default route for this tier" },
+      { command: "/effort", effect: "change the reasoning effort from the next request on" },
     ],
     facts,
   };
@@ -373,14 +377,14 @@ function routeWhy(events: readonly SessionEvent[]): WhyView | undefined {
  */
 export function buildWhy(events: readonly SessionEvent[], argument: string, facts: WhyFacts): WhyView | string {
   const wanted = argument.trim().toLowerCase();
-  if (wanted === "model" || wanted === "route") return routeWhy(events) ?? "No model route recorded yet in this conversation.";
+  if (wanted === "model" || wanted === "route") return routeWhy(events) ?? "No model route recorded yet: it is chosen when the first request is sent. /model lists the routes you can pick.";
   const decided = [...events].reverse().filter((event): event is Decided => event.type === "tool/policy_decided");
   let chosen: Decided | undefined;
   if (wanted === "" || wanted === "last") chosen = decided[0];
   else if (/^\d+$/.test(wanted)) chosen = decided[Number(wanted) - 1];
   else chosen = decided.find((event) => event.data.action.tool_name.toLowerCase().includes(wanted));
   if (chosen === undefined) {
-    if (decided.length === 0) return "No action recorded yet in this conversation. /why model explains the model route.";
+    if (decided.length === 0) return "No tool decision recorded yet: Synorch has not run or been refused an action in this conversation. /why model explains the model route.";
     return /^\d+$/.test(wanted) ? `Only ${decided.length} decision${decided.length === 1 ? "" : "s"} recorded; /why 1…${decided.length}` : `No ${wanted} action recorded in this conversation.`;
   }
   const action = chosen.data.action;
@@ -418,9 +422,9 @@ export function buildWhy(events: readonly SessionEvent[], argument: string, fact
     subject: `${subjectOf(chosen)}${result === undefined ? "" : ` (${result.data.state})`}`,
     decision: decision.decision,
     reasons: decision.reasons.map((reason) => ({ layer: reason.layer, code: reason.code, message: reason.message })),
-    howToChange,
+    howToChange: howToChange.length > 0 || decision.decision === "deny" ? howToChange : [{ command: "/permissions", effect: "shows the rules and grants behind this outcome" }],
     facts: whyFacts,
-    recent: decided.slice(0, 6).map((event, position) => `${position + 1}. ${snippet(subjectOf(event), 60)} · ${DECISION_WORD[event.data.decision.decision]}`),
+    recent: decided.length < 2 ? [] : decided.slice(0, 6).map((event, position) => `${position + 1}. ${snippet(subjectOf(event), 60)} · ${DECISION_WORD[event.data.decision.decision]}`),
   };
 }
 

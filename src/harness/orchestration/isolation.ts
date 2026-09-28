@@ -1300,7 +1300,27 @@ export function createIsolationProvider(deps: IsolationProviderDependencies): Or
           if (integrated.has(key) && integrated.get(key) === current) ours.push(relative);
         }
         const overlap = mainDirty.filter((relative) => !ours.includes(relative) && matchesAny(relative, owned, platform));
-        if (overlap.length > 0) reason = `uncommitted changes overlap owned paths (${overlap.slice(0, 5).join(", ")})`;
+        if (overlap.length > 0) {
+          // ADR-21 D6: a tracked, modified regular file (present in HEAD, on disk, unchanged type) is seeded
+          // into the worktree like an earlier integration; anything else keeps the scoped-dir fallback.
+          const tracked = new Set(await gitTrackedPaths(git, deps.workspaceRoot, signal));
+          const inHead = head === undefined ? new Map<string, GitTreeEntry>() : await gitTreeEntries(git, deps.workspaceRoot, head, overlap, signal);
+          const blocked = new Map<string, string>();
+          for (const relative of overlap) {
+            const observed = await observe(deps.workspaceRoot, relative);
+            const entry = inHead.get(relative);
+            if (!tracked.has(relative)) blocked.set(relative, "untracked");
+            else if (observed.kind === "absent") blocked.set(relative, "deleted");
+            else if (observed.kind !== "file") blocked.set(relative, "not a regular file");
+            else if (entry === undefined) blocked.set(relative, "newly added or renamed");
+            else if (entry.mode === "160000" || entry.mode === "120000") blocked.set(relative, "submodule or link");
+          }
+          if (blocked.size > 0) {
+            reason = `uncommitted changes overlap owned paths (${[...blocked].slice(0, 5).map(([relative, why]) => `${relative}: ${why}`).join(", ")}); only modified tracked files are carried into a worktree`;
+          } else {
+            ours.push(...overlap);
+          }
+        }
       }
       const common: WorkspaceExtras = submodules.length > 0 ? { submodules } : {};
       let fallback: IsolatedWorkspace["fallback"];

@@ -73,7 +73,7 @@ export function pluginPage(host: ExtensionSlashHost, plugin: PluginEntry): Panel
     return status === undefined ? rawItem(`command:${command.name}`, `/${contents.name}:${command.name}`, [{ kind: "fields", rows: [{ label: "file", value: command.file ?? "(inline)" }, { label: "description", value: command.meta.description }] }], command.meta.description) : skillItem(host, status);
   });
   const servers = Object.entries(contents.mcpServers).map(([name, entry]) => rawItem(`mcp:${name}`, name, [{ kind: "fields", rows: [{ label: "server", value: name }, { label: "runs as", value: plugin.enabled ? "a plugin server (/mcp shows its state and tools)" : "nothing: the plugin is off" }] }, { kind: "heading", text: "Definition" }, { kind: "code", text: JSON.stringify(entry, null, 2) ?? "" }]));
-  const agents = contents.agents.map((name) => rawItem(`agent:${name}`, name, [{ kind: "fields", rows: [{ label: "agent", value: name }, { label: "support", value: "listed only; Synorch does not run plugin agents yet" }] }]));
+  const agents = contents.agents.map((name) => rawItem(`agent:${name}`, name, [{ kind: "fields", rows: [{ label: "agent", value: name }, { label: "support", value: "a worker persona the orchestrator may assign to a task (/agents shows the detail)" }] }]));
   const hooks = contents.hooks.map((name) => rawItem(`hook:${name}`, name, [{ kind: "fields", rows: [{ label: "hook", value: name }, { label: "support", value: "listed only; plugin hooks never run" }] }]));
   if (skills.length > 0) views.push({ kind: "list", label: "Skills", items: skills });
   if (commands.length > 0) views.push({ kind: "list", label: "Commands", items: commands });

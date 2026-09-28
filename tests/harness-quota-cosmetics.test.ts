@@ -84,3 +84,43 @@ test("view widths are grapheme-aware: ZWJ families, flags and skin tones are one
   assert.equal(truncate("ab👨‍👩‍👧‍👦cd🇹🇷ef", 6), "ab👨‍👩‍👧‍👦c…");
   assert.deepEqual(wrap("fix 👨‍👩‍👧‍👦👨‍👩‍👧‍👦👨‍👩‍👧‍👦 done", 4), ["fix", "👨‍👩‍👧‍👦👨‍👩‍👧‍👦", "👨‍👩‍👧‍👦", "done"]);
 });
+
+test("orchestration metrics: an old usage.json still loads and a finished run is summed", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "syn-orch-"));
+  try {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(path.join(home, "usage"), { recursive: true });
+    await writeFile(path.join(home, "usage", "usage.json"), JSON.stringify({ schema_version: 1, days: { "2026-09-25": {} }, quota: {} }));
+    const ledger = new UsageLedger(home, () => new Date("2026-09-25T10:00:00Z"));
+    await ledger.report();
+    const run_id = createId("run");
+    const at = (timestamp: string, value: Record<string, unknown>): SessionEvent => ev({ timestamp, run_id, ...value });
+    ledger.observe(at("2026-09-25T10:00:00Z", { type: "run/created", actor: { kind: "system" }, data: {} }));
+    ledger.observe(at("2026-09-25T10:00:01Z", { type: "task/created", actor: { kind: "system" }, data: {} }));
+    ledger.observe(at("2026-09-25T10:00:02Z", { type: "task/created", actor: { kind: "system" }, data: {} }));
+    ledger.observe(at("2026-09-25T10:00:03Z", { type: "provider/usage", actor: { kind: "agent", role: "implementer" }, data: { request_id: createId("request"), provider_id: "anthropic", usage: { input_tokens: 10, output_tokens: 5, source: "provider-reported" } } }));
+    ledger.observe(at("2026-09-25T10:00:30Z", { type: "run/state_changed", actor: { kind: "system" }, data: { from: "running", to: "completed", reason: "done" } }));
+    const text = (await ledger.report()).join("\n");
+    assert.match(text, /Orchestration this session: 1 run · 2 tasks · 15 tokens · 30s/);
+    assert.match(text, /Orchestration today: 1 run/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("usage load race: events observed before the disk read finishes are merged, not overwritten", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "syn-race-"));
+  try {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(path.join(home, "usage"), { recursive: true });
+    const bucket = { requests: 1, input: 100, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: 0 };
+    await writeFile(path.join(home, "usage", "usage.json"), JSON.stringify({ schema_version: 1, days: { "2026-09-25": { "a/b|t": bucket } }, quota: {} }));
+    const ledger = new UsageLedger(home, () => new Date("2026-09-25T10:00:00Z"));
+    ledger.observe(ev({ type: "provider/usage", actor: { kind: "agent", role: "implementer" }, data: { request_id: createId("request"), provider_id: "anthropic", usage: { input_tokens: 10, output_tokens: 5, source: "provider-reported" } } }));
+    const text = (await ledger.report()).join("\n");
+    assert.match(text, /This session: 1 request/);
+    assert.match(text, /Today: 2 requests · 110 in/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});

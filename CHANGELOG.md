@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/agents` panel listing the available agents.
+- `syn review [target] --json`: headless independent review with a machine-readable verdict and exit codes 0/1/2/3.
+- Orchestration usage metrics: a `/usage` card and an `orchestration` section in `usage.json`.
+- Isolated workers are seeded with the owner's dirty tracked files (ADR-21 D6, first slice; untracked, deleted and renamed files still stay in the scoped directory).
+- CI prints failing test names as annotations to diagnose the Windows job.
+
+### Changed
+
+- `/why` output polish.
+
+### Fixed
+
+- A race when loading `usage.json` concurrently.
+- Codex models marked `visibility: "hide"` no longer appear in the model list.
+
 ## [0.4.0-beta.1] - 2026-09-26
 
 Pre-release under the npm dist-tag `beta`. `latest` stays on 0.3.0.

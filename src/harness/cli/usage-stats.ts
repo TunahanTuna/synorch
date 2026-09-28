@@ -41,6 +41,31 @@ interface UsageFile {
   days: Record<string, Record<string, Bucket>>;
   /** Per provider: the top window (`window`/`percent`/`resetsAt`, kept for older readers) and every window seen. */
   quota: Record<string, ProviderQuota>;
+  /** Orchestration runs per day (optional: files written before this field existed still load). */
+  orchestration?: Record<string, OrchestrationTotals>;
+}
+
+/** What one finished orchestration run cost: input to `recordOrchestrationRun`, summed per day. */
+export interface OrchestrationRun {
+  readonly tasks: number;
+  readonly tokens: number;
+  readonly costUsd?: number;
+  readonly durationMs: number;
+}
+
+interface OrchestrationTotals {
+  runs: number;
+  tasks: number;
+  tokens: number;
+  costUsd: number;
+  durationMs: number;
+}
+
+interface RunProgress {
+  startedAt: number;
+  tasks: number;
+  tokens: number;
+  costUsd: number;
 }
 
 interface QuotaWindow {
@@ -105,6 +130,18 @@ function emptyBucket(): Bucket {
   return { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: 0 };
 }
 
+function emptyOrchestration(): OrchestrationTotals {
+  return { runs: 0, tasks: 0, tokens: 0, costUsd: 0, durationMs: 0 };
+}
+
+function addOrchestration(target: OrchestrationTotals, run: OrchestrationRun): void {
+  target.runs += 1;
+  target.tasks += run.tasks;
+  target.tokens += run.tokens;
+  target.costUsd += run.costUsd ?? 0;
+  target.durationMs += run.durationMs;
+}
+
 function add(target: Bucket, source: Bucket): void {
   if (source.billing !== undefined) target.billing = source.billing;
   target.requests += source.requests;
@@ -146,6 +183,8 @@ export class UsageLedger {
   private readonly tiers = new Map<string, string>();
   private readonly sessionQuota = new Map<string, { window: string; percent: number }>();
   private readonly providerRequests = new Map<string, ProviderRequests>();
+  private readonly sessionOrchestration = emptyOrchestration();
+  private readonly openRuns = new Map<string, RunProgress>();
   private loaded: Promise<void>;
   private saving: Promise<void> = Promise.resolve();
   private dirty = false;
@@ -162,7 +201,23 @@ export class UsageLedger {
     try {
       const parsed = JSON.parse(await readFile(this.file, "utf8")) as Partial<UsageFile>;
       if (parsed.schema_version === 1 && typeof parsed.days === "object" && parsed.days !== null) {
-        this.data = { schema_version: 1, days: parsed.days, quota: parsed.quota ?? {} };
+        // Events observed while this read was pending are already in memory: fold them onto the disk data.
+        const orchestration: Record<string, OrchestrationTotals> = parsed.orchestration ?? {};
+        const disk: UsageFile = { schema_version: 1, days: parsed.days, quota: parsed.quota ?? {}, orchestration };
+        for (const [day, buckets] of Object.entries(this.data.days)) {
+          const target = (disk.days[day] ??= {});
+          for (const [key, bucket] of Object.entries(buckets)) add((target[key] ??= emptyBucket()), bucket);
+        }
+        for (const [day, totals] of Object.entries(this.data.orchestration ?? {})) {
+          const target = (orchestration[day] ??= emptyOrchestration());
+          target.runs += totals.runs;
+          target.tasks += totals.tasks;
+          target.tokens += totals.tokens;
+          target.costUsd += totals.costUsd;
+          target.durationMs += totals.durationMs;
+        }
+        Object.assign(disk.quota, this.data.quota);
+        this.data = disk;
       }
     } catch {
       return;
@@ -193,6 +248,25 @@ export class UsageLedger {
       });
       return;
     }
+    if (event.type === "run/created") {
+      this.openRuns.set(event.run_id ?? "", { startedAt: Date.parse(event.timestamp) || this.now().getTime(), tasks: 0, tokens: 0, costUsd: 0 });
+      return;
+    }
+    if (event.type === "task/created") {
+      const run = this.openRuns.get(event.run_id ?? "");
+      if (run !== undefined) run.tasks += 1;
+      return;
+    }
+    if (event.type === "run/state_changed") {
+      const key = event.run_id ?? "";
+      const run = this.openRuns.get(key);
+      if (run === undefined || !["completed", "failed", "cancelled"].includes(event.data.to)) return;
+      this.openRuns.delete(key);
+      if (run.tasks === 0) return;
+      const ended = Date.parse(event.timestamp) || this.now().getTime();
+      this.recordOrchestrationRun({ tasks: run.tasks, tokens: run.tokens, costUsd: run.costUsd, durationMs: Math.max(0, ended - run.startedAt) });
+      return;
+    }
     if (event.type !== "provider/usage") return;
     const route = this.routes.get(event.data.request_id);
     this.routes.delete(event.data.request_id);
@@ -209,6 +283,13 @@ export class UsageLedger {
       const cost = usage.cost_usd_estimate ?? (route === undefined ? undefined : estimateCostUsd(route.model, bucket.input, bucket.output));
       if (cost === undefined) bucket.unpriced = 1;
       else bucket.costUsd = cost;
+    }
+    if (WORKERS.has(route?.role ?? event.actor.role ?? "")) {
+      const run = this.openRuns.get(event.run_id ?? "");
+      if (run !== undefined) {
+        run.tokens += bucket.input + bucket.output;
+        run.costUsd += bucket.costUsd;
+      }
     }
     const key = `${route?.provider ?? "unknown"}/${route?.model ?? "unknown"}|${route?.tier ?? event.actor.role ?? "unknown"}`;
     const sessionBucket = this.session.get(key) ?? emptyBucket();
@@ -231,6 +312,26 @@ export class UsageLedger {
     if (quota !== undefined && quota.windows.length > 0 && provider !== undefined) this.recordQuota(provider, quota.windows);
     this.schedule();
     for (const listener of this.listeners) listener();
+  }
+
+  /**
+   * Measurement only (no threshold): one finished orchestration run (worker tasks, worker tokens and
+   * estimated cost, wall time). `observe` calls it when a run with tasks reaches a final state;
+   * exposed so any other run-end point can record too.
+   */
+  public recordOrchestrationRun(run: OrchestrationRun): void {
+    addOrchestration(this.sessionOrchestration, run);
+    const orchestration = (this.data.orchestration ??= {});
+    addOrchestration((orchestration[today(this.now())] ??= emptyOrchestration()), run);
+    this.schedule();
+    for (const listener of this.listeners) listener();
+  }
+
+  private orchestrationLine(label: string, total: OrchestrationTotals): string | undefined {
+    if (total.runs === 0) return undefined;
+    const seconds = Math.round(total.durationMs / 1000);
+    const cost = total.costUsd > 0 ? ` · ~${money(total.costUsd)}` : "";
+    return `Orchestration ${label}: ${total.runs} run${total.runs === 1 ? "" : "s"} · ${total.tasks} task${total.tasks === 1 ? "" : "s"} · ${compact(total.tokens)} tokens${cost} · ${seconds}s`;
   }
 
   /** Merges a snapshot into the provider's windows (a bridge may report one window at a time). */
@@ -350,9 +451,14 @@ export class UsageLedger {
         }),
       );
     }
+    const orchestration = (total: OrchestrationTotals) => ({ runs: total.runs, tasks: total.tasks, tokens: total.tokens, ...(total.costUsd > 0 ? { costUsd: total.costUsd } : {}), durationMs: total.durationMs });
+    const dayOrchestration = this.data.orchestration?.[today(this.now())];
     return {
       kind: "usage",
       session: this.viewRows(this.session),
+      ...(this.sessionOrchestration.runs === 0 && (dayOrchestration?.runs ?? 0) === 0
+        ? {}
+        : { orchestration: { session: orchestration(this.sessionOrchestration), ...(dayOrchestration === undefined || dayOrchestration.runs === 0 ? {} : { today: orchestration(dayOrchestration) }) } }),
       today: this.viewRows(day),
       ...(quotas.length === 0 ? {} : { quotas }),
       ...(sessionElapsedMs === undefined ? {} : { sessionElapsedMs }),
@@ -381,6 +487,9 @@ export class UsageLedger {
     const day = this.data.days[today(this.now())] ?? {};
     const lines = [this.summary("This session", this.totals(this.session.values())), ...this.rows(this.session)];
     lines.push(this.summary("Today", this.totals(Object.values(day))), ...this.rows(day));
+    for (const line of [this.orchestrationLine("this session", this.sessionOrchestration), this.orchestrationLine("today", this.data.orchestration?.[today(this.now())] ?? emptyOrchestration())]) {
+      if (line !== undefined) lines.push(line);
+    }
     const providers = this.quotaProviders();
     if (providers.length === 0) lines.push("Quota: no subscription quota reported by the providers used so far");
     for (const provider of providers) {

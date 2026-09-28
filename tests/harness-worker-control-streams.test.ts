@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { setImmediate as tick, setTimeout as delay } from "node:timers/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { createId, deriveProjectId, type RenderEvent, type SessionEvent } from "../src/harness/contracts/index.ts";
 import { createAgentDriver } from "../src/harness/core/index.ts";
@@ -16,6 +16,8 @@ import { createBlobStore, createSessionStore } from "../src/harness/store/index.
 test("a paused driver finishes its step, starts no new one until resumed, and delivers a steer at the boundary", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "synorch-wc-"));
   const store = await createSessionStore(home).create({ session_id: createId("session"), project_id: deriveProjectId("/workspace", "linux"), workspace_root: "/workspace", created_at: "2026-09-24T10:00:00.000Z" });
+  const turnAbort = new AbortController();
+  let running: Promise<unknown> | undefined;
   try {
     const blobs = createBlobStore(home);
     const registry = testRegistry();
@@ -32,14 +34,20 @@ test("a paused driver finishes its step, starts no new one until resumed, and de
     const runId = newRunId();
     const turn = driver.runTurn(
       { sessionId: store.sessionId, runId, taskId: undefined, attemptId: undefined, role: "implementer", route: testRoute("model"), policy: testPolicy(runId), packet: undefined, userMessage: "Fix a", trigger: "dispatch", maxSteps: 5 },
-      new AbortController().signal,
+      turnAbort.signal,
     );
+    running = turn;
     const events = async (): Promise<string[]> => {
       const out: string[] = [];
       for await (const item of store.read()) if (item.status === "ok") out.push(item.event.type);
       return out;
     };
-    for (let index = 0; index < 2000 && !(await events()).includes("step/ended"); index += 1) await tick();
+    // Wait on a wall-clock deadline, not a poll count: every append is a durable write, and on a slow (Windows CI) disk a fixed number of polls ends before the first step does.
+    const deadline = Date.now() + 30_000;
+    while (!(await events()).includes("step/ended")) {
+      assert.ok(Date.now() < deadline, "the first step never ended");
+      await delay(5);
+    }
     await delay(150);
     assert.equal(adapter.requests.length, 1, "no second model step while paused");
     assert.equal(driver.paused, true);
@@ -50,8 +58,11 @@ test("a paused driver finishes its step, starts no new one until resumed, and de
     const second = JSON.stringify(adapter.requests[1]?.messages);
     assert.ok(second.includes("keep the heading unchanged"), "the steer reached the next request");
   } finally {
+    // Settle the turn before the store closes: a turn still appending into a closed store rejects with "session ... is closed", which hides the real failure.
+    turnAbort.abort();
+    await running?.catch(() => undefined);
     await store.close().catch(() => undefined);
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 

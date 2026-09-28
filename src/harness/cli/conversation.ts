@@ -96,6 +96,7 @@ import { runMcpSlash } from "./mcp-command.ts";
 import { mcpPanel, type McpPanelHost } from "./panels/mcp.ts";
 import { pluginsPanel } from "./panels/plugins.ts";
 import { cardPanel, configPanel, helpPanel, memoryPanel, resumePanel, runsPanel, statusPanel } from "./panels/session.ts";
+import { agentsPanel } from "./panels/agents.ts";
 import { skillsPanel } from "./panels/skills.ts";
 import { defaultEffort, isReasoningEffort } from "../providers/index.ts";
 import { openBrowser } from "../tui/open-browser.ts";
@@ -2503,6 +2504,7 @@ class Conversation implements ConversationCommandHost {
   /** K7 `/plugins [install <spec> | remove | enable | disable <name>]`. */
   public async plugins(argument: string): Promise<void> {
     if (argument.trim() === "" && (await this.showPanel(() => pluginsPanel(this.extensionHost())))) return;
+    if (argument.trim() === "agents" && (await this.showPanel(() => agentsPanel(this.extensionHost())))) return;
     await runPluginsSlash(this.extensionHost(), argument);
   }
 

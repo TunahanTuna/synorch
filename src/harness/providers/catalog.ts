@@ -164,6 +164,7 @@ export async function fetchCodexModels(fetchImpl: FetchLike, headers: Headers, s
     for (const entry of list) {
       const item = typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : undefined;
       const id = typeof entry === "string" ? entry : (item?.slug ?? item?.id);
+      if (item?.visibility === "hide") continue; // internal rows (e.g. gpt-reserve, codex-auto-review)
       if (typeof id !== "string" || !/^[A-Za-z0-9._:-]{1,120}$/.test(id) || rows.has(id)) continue;
       // K6: `supported_reasoning_levels: [{ effort: "low", … }]` and `default_reasoning_level`.
       const levels = Array.isArray(item?.supported_reasoning_levels)

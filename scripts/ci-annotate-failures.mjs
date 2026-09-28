@@ -25,7 +25,17 @@ for (let i = 0; i < lines.length; i++) {
     if (f && /subtestsFailed/.test(f[1])) parent = true;
     const e = /^\s*error:\s*(.*)$/.exec(lines[j]);
     if (e) {
-      error = /^[|>][-+]?$/.test(e[1].trim()) ? (lines[j + 1] ?? '').trim() : unquote(e[1]);
+      if (/^[|>][-+]?$/.test(e[1].trim())) {
+        // A block scalar: keep the whole message (assert.fail texts carry the useful detail after their first line).
+        const lead = (line) => /^(\s*)/.exec(line)[1].length;
+        const indent = lead(lines[j + 1] ?? '');
+        const block = [];
+        for (let k = j + 1; k < lines.length && block.length < 60; k++) {
+          if (lines[k].trim() !== '' && lead(lines[k]) < indent) break;
+          block.push(lines[k].slice(indent));
+        }
+        error = block.join('\n').trim();
+      } else error = unquote(e[1]);
     }
   }
   if (!parent) failures.push({ name: m[2].trim(), error: error || '(no error text)' });
@@ -33,13 +43,13 @@ for (let i = 0; i < lines.length; i++) {
 
 const shown = failures.slice(0, MAX);
 for (const f of shown) {
-  console.log(`::error title=${escProp(f.name)}::${esc(f.error.slice(0, 500))}`);
+  console.log(`::error title=${escProp(f.name)}::${esc(f.error.slice(0, 1500))}`);
 }
 const summary = [
   '## Failing tests (diagnostic re-run)',
   `exit status: ${run.status} | failures: ${failures.length}${failures.length > MAX ? ` (first ${MAX} annotated)` : ''}`,
   '',
-  ...failures.map((f) => `- \`${f.name}\`: ${f.error.slice(0, 300).replace(/\n/g, ' ')}`),
+  ...failures.map((f) => `- \`${f.name}\`: ${f.error.slice(0, 3000).replace(/\n/g, '\n  ')}`),
   ...(failures.length === 0 ? ['No failing test parsed from TAP output.', '', '```', (run.stdout ?? '').slice(-3000), (run.stderr ?? '').slice(-2000), '```'] : []),
   '',
 ].join('\n');

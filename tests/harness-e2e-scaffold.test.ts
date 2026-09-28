@@ -45,8 +45,8 @@ const BUILD = [
   'console.log("built");',
   "",
 ].join("\n");
-const INSTALL = "npm install --prefix app --offline --no-audit --no-fund";
-const BUILD_COMMAND = "node app/build.mjs";
+const INSTALL = "npm install --offline --no-audit --no-fund";
+const BUILD_COMMAND = "node build.mjs";
 
 test("install commands are recognised by argv", () => {
   for (const argv of [["npm", "install"], ["npm", "ci"], ["pnpm", "install", "--frozen-lockfile"], ["pnpm"], ["yarn"], ["npm.cmd", "i"], ["uv", "sync"], ["pip", "install", "-r", "requirements.txt"], ["python", "-m", "pip", "install", "x"]]) {
@@ -69,8 +69,8 @@ test("scaffold via orchestration: one attempt, no review, one install, generated
     const orchestrator = createScriptedAdapter(
       [
         call("plan_propose", () =>
-          planArguments("Create an empty React project in app/", [
-            { key: "scaffold", risk: "standard", owned: ["app/**"], tier: "fast_worker", verification: [INSTALL, BUILD_COMMAND], criteria: ["app/ holds a React project that builds"] },
+          planArguments("Create an empty React project", [
+            { key: "scaffold", risk: "standard", owned: ["package.json", "package-lock.json", "build.mjs", "src/**"], tier: "fast_worker", verification: [INSTALL, BUILD_COMMAND], criteria: ["the workspace holds a React project that builds"] },
             { key: "review-scaffold", role: "reviewer", dependsOn: ["scaffold"], owned: [], tier: "complex_worker", criteria: ["the scaffold is minimal"] },
           ]),
         ),
@@ -81,13 +81,13 @@ test("scaffold via orchestration: one attempt, no review, one install, generated
     const worker = createScriptedAdapter(
       [
         calls(() => [
-          { name: "write_file", arguments: { path: "app/package.json", content: PACKAGE } },
-          { name: "write_file", arguments: { path: "app/src/App.jsx", content: MAIN } },
-          { name: "write_file", arguments: { path: "app/build.mjs", content: BROKEN_BUILD } },
+          { name: "write_file", arguments: { path: "package.json", content: PACKAGE } },
+          { name: "write_file", arguments: { path: "src/App.jsx", content: MAIN } },
+          { name: "write_file", arguments: { path: "build.mjs", content: BROKEN_BUILD } },
         ]),
         taskReport((ids) => [{ criterion: "AC-1", ref: ids.at(-1) ?? "" }]),
         // Verification-repair round: the harness build failed; the worker fixes build.mjs.
-        call("write_file", () => ({ path: "app/build.mjs", content: BUILD, expected_digest: sha256(BROKEN_BUILD) })),
+        call("write_file", () => ({ path: "build.mjs", content: BUILD, expected_digest: sha256(BROKEN_BUILD) })),
         taskReport((ids) => [{ criterion: "AC-1", ref: ids.at(-1) ?? "" }]),
         text("fixed the build"),
       ],
@@ -95,7 +95,7 @@ test("scaffold via orchestration: one attempt, no review, one install, generated
     );
     const run = capture({ cwd: sandbox.workspace });
     const code = await runHarnessCommand(
-      ["run", "Create an empty React project in app/", "--mode", "jsonl"],
+      ["run", "Create an empty React project", "--mode", "jsonl"],
       run.io,
       overridesFor(sandbox, { adapters: [orchestrator, worker], limits: { review: "proportional" } }),
     );
@@ -130,10 +130,10 @@ test("scaffold via orchestration: one attempt, no review, one install, generated
     const states = eventsOf(runLog, "task/state_changed").map((event) => event.data.to);
     assert.deepEqual(states, ["ready", "running", "verifying", "completed"]);
     const integrated = eventsOf(runLog, "task/integrated")[0]?.data.paths ?? [];
-    assert.ok(integrated.includes("app/package.json") && integrated.includes("app/build.mjs"), integrated.join(", "));
-    assert.ok(!integrated.some((entry) => entry.includes("node_modules/") || entry.includes("/dist/")), `generated outputs are not part of the artifact: ${integrated.join(", ")}`);
-    await access(path.join(sandbox.workspace, "app", "dist", "index.html"));
-    assert.equal(await readFile(path.join(sandbox.workspace, "app", "build.mjs"), "utf8"), BUILD);
+    assert.ok(integrated.includes("package.json") && integrated.includes("build.mjs"), integrated.join(", "));
+    assert.ok(!integrated.some((entry) => entry.startsWith("node_modules/") || entry.startsWith("dist/")), `generated outputs are not part of the artifact: ${integrated.join(", ")}`);
+    await access(path.join(sandbox.workspace, "dist", "index.html"));
+    assert.equal(await readFile(path.join(sandbox.workspace, "build.mjs"), "utf8"), BUILD);
 
     const last = frames.at(-1);
     assert.ok(last?.type === "result" && last.data.status === "succeeded");

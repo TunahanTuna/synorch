@@ -167,7 +167,7 @@ test("SEC-H4 revert never restores through a junction planted during the attempt
 test("SEC-M1 scoped-dir sees a gitignored write outside the owned paths and integrate refuses it", async () => {
   const workspace = await createTempWorkspace({ "src/a.ts": "a\n", ".gitignore": ".env\n" }, { git: true });
   try {
-    await writeFile(path.join(workspace.root, "src", "a.ts"), "user edit\n");
+    await writeFile(path.join(workspace.root, "src", "u.ts"), "user edit\n");
     const provider = providerFor(workspace);
     const scoped = await provider.create(packet(["src/**"]), createId("attempt"), signal());
     assert.equal(scoped.mode, "scoped-dir");
@@ -177,7 +177,7 @@ test("SEC-M1 scoped-dir sees a gitignored write outside the owned paths and inte
     await assert.rejects(provider.integrate(scoped, set.artifactDigest, signal()), /\.env \(outside-owned\)/);
     await scoped.revert(signal());
     assert.equal(existsSync(path.join(workspace.root, ".env")), false, "revert removes the ignored file the attempt created");
-    assert.equal(await readFile(path.join(workspace.root, "src", "a.ts"), "utf8"), "user edit\n");
+    assert.equal(await readFile(path.join(workspace.root, "src", "u.ts"), "utf8"), "user edit\n");
     await scoped.dispose();
   } finally {
     await workspace.cleanup();

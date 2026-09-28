@@ -107,10 +107,10 @@ test("integrate never overwrites the user's untracked file or a concurrent edit;
   }
 });
 
-test("uncommitted user changes overlapping owned paths fall back to scoped-dir; high-risk refuses instead", async () => {
+test("uncommitted untracked user files overlapping owned paths fall back to scoped-dir; high-risk refuses instead", async () => {
   const workspace = await createTempWorkspace({ "src/a.ts": "a\n", "src/b.ts": "b\n" }, { git: true });
   try {
-    await writeFile(path.join(workspace.root, "src", "a.ts"), "user edit\n");
+    await writeFile(path.join(workspace.root, "src", "u.ts"), "user untracked\n");
     const provider = createIsolationProvider({ workspaceRoot: workspace.root, projectId: deriveProjectId(workspace.root, process.platform), home: workspace.home });
     const scoped = await provider.create(packet(["src/**"]), createId("attempt"), signal());
     assert.equal(scoped.mode, "scoped-dir");
@@ -119,12 +119,42 @@ test("uncommitted user changes overlapping owned paths fall back to scoped-dir; 
     assert.deepEqual((await scoped.snapshot(signal())).changedPaths, ["src/b.ts"], "the user's pre-existing edit is not attributed to the attempt");
     assert.deepEqual(await scoped.revert(signal()), ["src/b.ts"]);
     assert.equal(await readFile(path.join(workspace.root, "src", "b.ts"), "utf8"), "b\n");
-    assert.equal(await readFile(path.join(workspace.root, "src", "a.ts"), "utf8"), "user edit\n", "revert keeps the user's own change");
+    assert.equal(await readFile(path.join(workspace.root, "src", "u.ts"), "utf8"), "user untracked\n", "revert keeps the user's own change");
     await scoped.dispose();
     await assert.rejects(
       provider.create(packet(["src/**"], { risk: "high-risk" }), createId("attempt"), signal()),
       (error: unknown) => error instanceof HarnessError && error.info.code === "sandbox_insufficient",
     );
+  } finally {
+    await workspace.cleanup();
+  }
+});
+
+test("a dirty tracked owned file is carried into the worktree; integrate ships only the worker's diff and never clobbers a later user edit", async () => {
+  const workspace = await createTempWorkspace({ "src/a.ts": "a\n", "src/b.ts": "b\n" }, { git: true });
+  try {
+    await writeFile(path.join(workspace.root, "src", "a.ts"), "user edit\n");
+    const provider = createIsolationProvider({ workspaceRoot: workspace.root, projectId: deriveProjectId(workspace.root, process.platform), home: workspace.home });
+    const isolated = await provider.create(packet(["src/**"]), createId("attempt"), signal());
+    assert.equal(isolated.mode, "worktree");
+    assert.equal(await readFile(path.join(isolated.root, "src", "a.ts"), "utf8"), "user edit\n");
+    assert.deepEqual((await isolated.snapshot(signal())).changedPaths, [], "the user's edit is baseline, not worker work");
+    await writeFile(path.join(isolated.root, "src", "b.ts"), "worker edit\n");
+    const snapshot = await isolated.snapshot(signal());
+    assert.deepEqual(snapshot.changedPaths, ["src/b.ts"]);
+    await provider.integrate(isolated, snapshot.artifactDigest, signal());
+    assert.equal(await readFile(path.join(workspace.root, "src", "b.ts"), "utf8"), "worker edit\n");
+    assert.equal(await readFile(path.join(workspace.root, "src", "a.ts"), "utf8"), "user edit\n");
+    await isolated.dispose();
+
+    const second = await provider.create(packet(["src/a.ts"]), createId("attempt"), signal());
+    assert.equal(second.mode, "worktree");
+    await writeFile(path.join(second.root, "src", "a.ts"), "worker on top\n");
+    const next = await second.snapshot(signal());
+    await writeFile(path.join(workspace.root, "src", "a.ts"), "user edited again\n");
+    await assert.rejects(provider.integrate(second, next.artifactDigest, signal()), /integration conflict/);
+    assert.equal(await readFile(path.join(workspace.root, "src", "a.ts"), "utf8"), "user edited again\n");
+    await second.dispose();
   } finally {
     await workspace.cleanup();
   }

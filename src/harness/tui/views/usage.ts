@@ -1,4 +1,4 @@
-import type { UsageRowView, UsageView } from "../../contracts/views.ts";
+import type { OrchestrationUsageView, UsageRowView, UsageView } from "../../contracts/views.ts";
 import { clean, displayWidth, finish, formatCount, formatElapsed, formatTokens, formatUsd, meterBar, padEnd, padStart, shareBar, type ViewContext } from "./kit.ts";
 
 /**
@@ -206,6 +206,14 @@ export function renderUsage(view: UsageView, ctx: ViewContext): string[] {
     `  ${padEnd(label, 8)} ${formatCount(totals.requests)} req ${sep} ${formatTokens(totals.input)} in ${sep} ${formatTokens(totals.output)} out ${sep} ${formatTokens(totals.cache)} cache ${sep} ${costCell(totals)}`;
   lines.push(summary("session", sessionTotals));
   if (today !== undefined) lines.push(t.muted(summary("today", sum(today))));
+  const orchestration = (label: string, run: OrchestrationUsageView) =>
+    `  ${padEnd(label, 8)} ${formatCount(run.runs)} run${run.runs === 1 ? "" : "s"} ${sep} ${formatCount(run.tasks)} task${run.tasks === 1 ? "" : "s"} ${sep} ${formatTokens(run.tokens)} tokens ${sep} ${run.costUsd === undefined ? "-" : `~${formatUsd(run.costUsd)}`} ${sep} ${formatElapsed(run.durationMs)}`;
+  if (view.orchestration !== undefined) {
+    lines.push("");
+    lines.push(t.muted("  orchestration"));
+    if (view.orchestration.session.runs > 0) lines.push(orchestration("session", view.orchestration.session));
+    if (view.orchestration.today !== undefined) lines.push(t.muted(orchestration("today", view.orchestration.today)));
+  }
   if (sessionTotals.estimated) lines.push(t.muted("  ~ estimated from token counts; the provider's bill is authoritative"));
   return finish(lines, ctx);
 }

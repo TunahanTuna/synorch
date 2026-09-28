@@ -39,5 +39,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify source
-        run: pnpm check
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Diagnose failing tests (Windows)
+        if: failure() && runner.os == 'Windows'
+        continue-on-error: true
+        run: node scripts/ci-annotate-failures.mjs
